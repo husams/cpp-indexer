@@ -41,6 +41,11 @@
     "policy_refuted", "unknown", "truncated_budget", "missing_evidence"
   ],
   "artifact_kinds": ["semantic-index", "query-result", "analysis", "diff", "refactoring-plan", "proof"],
+  "artifact_generation": {
+    "field": "generation",
+    "required": false,
+    "min_length": 1
+  },
   "diagnostic_invariants": [
     {"codes": ["stale_input"], "status": ["unknown"], "freshness": ["stale"]},
     {"codes": ["backend_error", "timeout"], "status": ["error"]},

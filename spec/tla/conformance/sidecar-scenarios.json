@@ -1,0 +1,32 @@
+{
+  "version": "1.0.0",
+  "scenarios": [
+    {
+      "id": "sidecar-current",
+      "kind": "normal",
+      "actions": [
+        "StartOneTUUpdate",
+        "PrepareStagedArtifact",
+        "BuildSidecar",
+        "PrepareSidecarArtifact",
+        "ValidateStagedArtifact",
+        "PublishCoreGeneration",
+        "PublishSidecar"
+      ],
+      "nondeterministicChoices": {
+        "PrepareStagedArtifact": {"field": "stagedArtifactQuality", "value": "valid"},
+        "PrepareSidecarArtifact": {"field": "sidecarQuality", "value": "valid"}
+      },
+      "observations": [
+        {"field": "sidecarState", "value": "current"},
+        {"field": "sidecarQuality", "value": "valid"},
+        {"field": "sidecarValidated", "value": true},
+        {"field": "sidecarAttachment", "value": "attached"},
+        {"field": "sidecarFilePublication", "value": "current"},
+        {"field": "readCompleteness", "value": "complete"},
+        {"field": "currentGeneration", "value": 2}
+      ],
+      "purpose": "A validated sidecar reaches sidecarFilePublication=current only once its own generation matches the newly published core generation -- the sidecar-publication conformance flow named in HSE-89's acceptance criteria."
+    }
+  ]
+}

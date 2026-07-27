@@ -1,0 +1,15 @@
+{
+  "version": "1.0.0",
+  "description": "Sidecar-publication operation/action mapping for CidxStorageConformance.tla, the third named conformance flow in HSE-89 (alongside index-generation publication and QueryPlan read-only execution, both mapped in operation-map.json over CidxBehavior).",
+  "operations": [
+    {"operation": "storage.tu-update.start", "specAction": "StartOneTUUpdate", "observation": "corePublicationState=staging"},
+    {"operation": "storage.tu-update.stage-artifact", "specAction": "PrepareStagedArtifact", "observation": "generationState=validated"},
+    {"operation": "sidecar.build", "specAction": "BuildSidecar", "observation": "sidecarState=building"},
+    {"operation": "sidecar.prepare", "specAction": "PrepareSidecarArtifact", "observation": "sidecarState=validated"},
+    {"operation": "storage.tu-update.validate", "specAction": "ValidateStagedArtifact", "observation": "stagedValidated=true"},
+    {"operation": "storage.tu-update.publish", "specAction": "PublishCoreGeneration", "observation": "corePublicationState=current"},
+    {"operation": "sidecar.publish", "specAction": "PublishSidecar", "observation": "sidecarFilePublication=current"},
+    {"operation": "sidecar.missing", "specAction": "MarkSidecarMissing", "observation": "sidecarState=missing"},
+    {"operation": "sidecar.corrupt", "specAction": "MarkSidecarCorrupt", "observation": "sidecarState=corrupt"}
+  ]
+}

@@ -1,8 +1,32 @@
 #!/usr/bin/env bash
+#
+# HSE-89 internal-critic fix (two-generation trust-root poisoning): this is a
+# self-test of tools/check.sh's own detection logic (it seeds invariant and
+# liveness mutations check.sh must fail closed on), so verification.yml
+# extracts it from GITHUB_BASE_SHA and runs that copy for pull_request
+# events, exactly like check.sh, check-conformance.sh, and the other
+# base-pinned checkers. That alone was not enough: this script previously
+# invoked tools/check.sh via "$ROOT/tools/check.sh", where ROOT derived from
+# its OWN script location -- i.e. whichever check.sh happens to sit beside
+# wherever this script is currently running from. A PR that (a) weakens
+# check.sh's detection and (b) neuters this script's assertions in the same
+# commit would still print PASS, because the extracted self-test AND the
+# check.sh it invoked would both resolve to the compromised commit -- there
+# was no way to point this script's own check.sh invocation independently at
+# the trusted, base-extracted copy verification.yml already runs for the
+# real per-PR gate. CIDX_CHECK_SH closes that: it resolves independently of
+# CIDX_REPO_ROOT (which still points model/module asset resolution at the
+# real checkout, since those ARE legitimate PR content to seed mutations
+# from) so verification.yml can wire it to the SAME base-extracted check.sh
+# both this script and the real gate trust, from the same immutable base
+# revision. See check-self-test-tamper-regression.sh for the executable
+# proof.
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="${CIDX_REPO_ROOT:+$CIDX_REPO_ROOT/spec/tla}"
+ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+CHECK_SH="${CIDX_CHECK_SH:-$ROOT/tools/check.sh}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/cidx-tla-regression.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -17,7 +41,7 @@ mv "$WORK/models/CidxRepositorySmoke.cfg.mutated" \
   "$WORK/models/CidxRepositorySmoke.cfg"
 
 set +e
-output="$(TLA_MODEL_DIR="$WORK/models" "$ROOT/tools/check.sh" 2>&1)"
+output="$(TLA_MODEL_DIR="$WORK/models" "$CHECK_SH" 2>&1)"
 status=$?
 set -e
 
@@ -53,7 +77,7 @@ run_seed() {
   set +e
   local seed_output
   seed_output="$(TLA_MODEL_DIR="$seed_dir" TLA_MODELS="CidxWorkspaceLifecycleSmoke" \
-    "$ROOT/tools/check.sh" 2>&1)"
+    "$CHECK_SH" 2>&1)"
   local seed_status=$?
   set -e
   rm -rf "$seed_dir"
@@ -96,7 +120,7 @@ run_storage_seed() {
   local storage_seed_output
   storage_seed_output="$(TLA_MODEL_DIR="$storage_seed_dir" \
     TLA_MODELS="CidxStorageLifecycleSmoke" \
-    "$ROOT/tools/check.sh" 2>&1)"
+    "$CHECK_SH" 2>&1)"
   local storage_seed_status=$?
   set -e
   rm -rf "$storage_seed_dir"
@@ -123,7 +147,7 @@ mv "$boundary_dir/CidxStorageLifecycleSmoke.cfg.seed" \
 set +e
 boundary_output="$(TLA_MODEL_DIR="$boundary_dir" \
   TLA_MODELS="CidxStorageLifecycleSmoke" \
-  "$ROOT/tools/check.sh" 2>&1)"
+  "$CHECK_SH" 2>&1)"
 boundary_status=$?
 set -e
 rm -rf "$boundary_dir"
@@ -159,7 +183,7 @@ set +e
 boundary_mutation_output="$(TLA_MODULE_DIR="$boundary_modules" \
   TLA_MODEL_DIR="$boundary_mutation_dir" \
   TLA_MODELS="CidxStorageLifecycleSmoke" \
-  "$ROOT/tools/check.sh" 2>&1)"
+  "$CHECK_SH" 2>&1)"
 boundary_mutation_status=$?
 set -e
 rm -rf "$boundary_modules" "$boundary_mutation_dir"
@@ -182,7 +206,7 @@ mv "$multi_generation_dir/CidxStorageLifecycleSmoke.cfg.seed" \
 set +e
 multi_generation_output="$(TLA_MODEL_DIR="$multi_generation_dir" \
   TLA_MODELS="CidxStorageLifecycleSmoke" \
-  "$ROOT/tools/check.sh" 2>&1)"
+  "$CHECK_SH" 2>&1)"
 multi_generation_status=$?
 set -e
 rm -rf "$multi_generation_dir"
@@ -211,7 +235,7 @@ set +e
 negative_storage_output="$(TLA_MODULE_DIR="$negative_storage_modules" \
   TLA_MODEL_DIR="$negative_storage_dir" \
   TLA_MODELS="CidxStorageLifecycleSmoke" \
-  "$ROOT/tools/check.sh" 2>&1)"
+  "$CHECK_SH" 2>&1)"
 negative_storage_status=$?
 set -e
 rm -rf "$negative_storage_modules" "$negative_storage_dir"
@@ -238,7 +262,7 @@ sed -e 's#\\/ PrepareStagedArtifact##' \
 set +e
 storage_liveness_output="$(TLA_MODULE_DIR="$storage_liveness_modules" \
   TLA_MODELS="CidxStorageLifecycleSmoke" \
-  "$ROOT/tools/check.sh" 2>&1)"
+  "$CHECK_SH" 2>&1)"
 storage_liveness_status=$?
 set -e
 rm -rf "$storage_liveness_modules"
@@ -263,7 +287,7 @@ mv "$progress_modules/CidxWorkspaceLifecycle.tla.mutated" \
 set +e
 progress_output="$(TLA_MODULE_DIR="$progress_modules" \
   TLA_MODELS="CidxWorkspaceLifecycleSmoke" \
-  "$ROOT/tools/check.sh" 2>&1)"
+  "$CHECK_SH" 2>&1)"
 progress_status=$?
 set -e
 rm -rf "$progress_modules"
@@ -295,7 +319,7 @@ run_semantic_seed() {
   set +e
   local seed_output
   seed_output="$(TLA_MODEL_DIR="$seed_dir" TLA_MODELS="CidxSemanticGraphSmoke" \
-    "$ROOT/tools/check.sh" 2>&1)"
+    "$CHECK_SH" 2>&1)"
   local seed_status=$?
   set -e
   rm -rf "$seed_dir"
@@ -365,7 +389,7 @@ set +e
 liveness_output="$(JAVA_BIN="${JAVA_BIN:-}" \
   TLA_MODEL_DIR="$ROOT/models" \
   TLA_MODULE_DIR="$WORK/modules" \
-  "$ROOT/tools/check.sh" 2>&1)"
+  "$CHECK_SH" 2>&1)"
 liveness_status=$?
 set -e
 
@@ -406,7 +430,7 @@ set +e
 edge_output="$(JAVA_BIN="${JAVA_BIN:-}" \
   TLA_MODEL_DIR="$EDGE_WORK/models" \
   TLA_MODULE_DIR="$EDGE_WORK/modules" \
-  "$ROOT/tools/check.sh" 2>&1)"
+  "$CHECK_SH" 2>&1)"
 edge_status=$?
 set -e
 

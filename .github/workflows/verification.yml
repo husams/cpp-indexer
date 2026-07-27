@@ -6,30 +6,549 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
-  tla-spec:
-    name: TLA+ syntax and TLC
+  # Changed-spec/changed-code dependency selection (HSE-89): a push always
+  # runs every gate as a safety net; a pull_request runs only the gates
+  # spec/tla/ci-dependency-map.json says the changed files require, driven
+  # by an explicit map (spec paths AND their real C++ implementation files),
+  # not by assuming only spec/tla/ paths matter.
+  changes:
+    name: Select required TLA+/conformance gates
+    runs-on: cpp-indexer-runner
+    outputs:
+      tla_syntax_and_model: ${{ steps.select.outputs.run_tla_syntax_and_model }}
+      tla_proofs: ${{ steps.select.outputs.run_tla_proofs }}
+      tla_conformance: ${{ steps.select.outputs.run_tla_conformance }}
+      tla_sidecar_conformance: ${{ steps.select.outputs.run_tla_sidecar_conformance }}
+      tla_policy: ${{ steps.select.outputs.run_tla_policy }}
+      cpp_default: ${{ steps.select.outputs.run_cpp_default }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch base ref
+        if: github.event_name == 'pull_request'
+        run: git fetch origin "${{ github.event.pull_request.base.ref }}"
+      - name: Extract the trusted (base-commit) gate-selection regression test
+        if: github.event_name == 'pull_request'
+        # Same self-policing gap as check-protected-review.sh below: a PR
+        # could narrow ci-dependency-map.json's flow->gates mapping and
+        # delete the matching run_case assertion in check-gate-selection.sh
+        # in the same change, so the checker that proves the mapping is
+        # unweakened must itself come from a revision the PR cannot edit.
+        # Extract the script as it existed at the base commit and run THAT
+        # copy; CIDX_REPO_ROOT points it back at the real checkout (this
+        # PR's head) so it tests the PR's actual map/selector against the
+        # base's untamperable test cases. extract-trusted-checker.sh is the
+        # single shared implementation (round-6 security fix): it hard-fails
+        # if the base SHA itself does not resolve, rather than treating that
+        # as "checker missing, fall back to head"; and it writes outside the
+        # checkout ($RUNNER_TEMP), never into a path the PR's own commit
+        # could pre-populate as a regular file, symlink, or directory.
+        run: |
+          spec/tla/tools/extract-trusted-checker.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            spec/tla/tools/check-gate-selection.sh \
+            "$RUNNER_TEMP/check-gate-selection.sh"
+      - name: Regression-test the gate selector's path-to-gate mapping (pull_request)
+        if: github.event_name == 'pull_request'
+        env:
+          CIDX_REPO_ROOT: ${{ github.workspace }}
+        run: "$RUNNER_TEMP/check-gate-selection.sh"
+      - name: Regression-test the gate selector's path-to-gate mapping (push)
+        # A push event has no PR base to extract a trusted copy from and by
+        # definition already bypassed PR review (branch protection permitting);
+        # push always runs every gate as a safety net (see MODE=all below), so
+        # this step is exercised for its own correctness, not as a bypassable
+        # policy gate.
+        if: github.event_name != 'pull_request'
+        run: spec/tla/tools/check-gate-selection.sh
+      - name: Extract the trusted (base-commit) gate-selection defense regression
+        id: gate-selection-defense
+        if: github.event_name == 'pull_request'
+        # P2 fix (round 5): this regression test is itself CODEOWNERS-
+        # protected but was not base-pinned, and it sourced its "known good"
+        # fixtures from the working tree (the PR's own head) rather than
+        # from GITHUB_BASE_SHA -- a PR editing both ci-dependency-map.json
+        # and this script together could make the self-test self-consistent
+        # and green. Extract the script itself from the base commit, same as
+        # check-gate-selection.sh above, via the shared helper; its printed
+        # `mode=` determines whether CIDX_FIXTURE_REF should point at the
+        # base commit (extracted) or stay empty (genuine first-introduction
+        # bootstrap).
+        run: |
+          result="$(spec/tla/tools/extract-trusted-checker.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            spec/tla/tools/check-gate-selection-defense-regression.sh \
+            "$RUNNER_TEMP/check-gate-selection-defense-regression.sh")"
+          echo "$result"
+          if [[ "$result" == *" mode=base "* ]]; then
+            echo "fixture_ref=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "fixture_ref=" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Regression-test the gate-selection anti-tamper defense itself (pull_request)
+        # Self-contained (builds its own throwaway git repo), so it runs on
+        # every event, not just pull_request. CIDX_FIXTURE_REF makes the
+        # extracted, base-commit copy also source its own internal fixtures
+        # from the base commit, not from head, closing the P2 gap above.
+        if: github.event_name == 'pull_request'
+        env:
+          CIDX_REPO_ROOT: ${{ github.workspace }}
+          CIDX_FIXTURE_REF: ${{ steps.gate-selection-defense.outputs.fixture_ref }}
+        run: "$RUNNER_TEMP/check-gate-selection-defense-regression.sh"
+      - name: Regression-test the gate-selection anti-tamper defense itself (push)
+        # A push event has no PR base to extract a trusted copy or fixture
+        # ref from and by definition already bypassed PR review; runs the
+        # in-tree copy against its own working-tree fixtures, as before.
+        if: github.event_name != 'pull_request'
+        run: spec/tla/tools/check-gate-selection-defense-regression.sh
+      - name: Select gates
+        id: select
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            spec/tla/tools/select-changed-gates.sh \
+              "origin/${{ github.event.pull_request.base.ref }}" \
+              "${{ github.event.pull_request.head.sha }}"
+          else
+            spec/tla/tools/select-changed-gates.sh --all
+          fi
+
+  tla-syntax-and-model:
+    name: TLA+ syntax, TLC model checking, and mutation regression
+    needs: changes
+    if: needs.changes.outputs.tla_syntax_and_model == 'true'
     runs-on: cpp-indexer-runner
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch base ref
+        if: github.event_name == 'pull_request'
+        run: git fetch origin "${{ github.event.pull_request.base.ref }}"
+      - name: Extract the trusted (base-commit) normative TLA+ gate checker
+        if: github.event_name == 'pull_request'
+        # Internal-critic P1 (round 5): the scripts that actually RUN
+        # TLC/TLAPS/conformance were never covered by the base-pinning
+        # already applied to check-protected-review.sh and
+        # check-gate-selection.sh. A PR could weaken a protected invariant
+        # (protected/CidxProtected.tla, modules/CidxTypes.tla, models/*.cfg,
+        # ...) and, in the same commit, replace check.sh with a stub that
+        # exits 0; CI would then run that tampered copy straight from the
+        # PR's own checkout. Extract the script as it existed at the base
+        # commit and run THAT copy; CIDX_REPO_ROOT points it back at the real
+        # checkout (this PR's head) so it model-checks the PR's actual
+        # (possibly weakened) spec against the base's untamperable checker
+        # logic. extract-trusted-checker.sh is the shared implementation
+        # (round-6 security fix) -- see its header for why the destination is
+        # outside the checkout and why base-commit resolvability is checked
+        # before any "missing checker" bootstrap decision.
+        run: |
+          spec/tla/tools/extract-trusted-checker.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            spec/tla/tools/check.sh \
+            "$RUNNER_TEMP/check.sh"
       - name: Set up pinned Java runtime
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-      - name: Run normative TLA+ gate
+      - name: Regression-test the verification-script anti-tamper defense
+        # Self-contained (builds its own throwaway git repo, seeds its own
+        # base/head commits), so it runs on every event, not just
+        # pull_request -- mirroring check-gate-selection-defense-regression.sh
+        # in the changes job above, but for the check.sh base-pin fixed in
+        # this round rather than the gate-selection map/selector.
+        run: spec/tla/tools/check-verification-tamper-regression.sh
+      - name: Regression-test the self-test anti-tamper defense
+        # Self-contained (builds its own throwaway git repo, seeds its own
+        # base/head commits), so it runs on every event, not just
+        # pull_request. Proves the two-generation trust-root-poisoning fix
+        # below: check-regression.sh and export-counterexample.sh are
+        # themselves self-tests of check.sh's detection logic, and until
+        # this fix they always invoked HEAD's own tools/check.sh -- not the
+        # base-extracted copy the real gate below already trusts -- so a
+        # single PR could weaken check.sh and neuter these self-tests'
+        # assertions together and still print PASS. See the script header
+        # for the full attack and the CIDX_CHECK_SH fix that closes it.
+        run: spec/tla/tools/check-self-test-tamper-regression.sh
+      - name: Extract the trusted (base-commit) invariant mutation regression
+        if: github.event_name == 'pull_request'
+        # check-regression.sh is itself a self-test of check.sh's detection
+        # logic, so it has the identical two-generation trust-root-poisoning
+        # gap check-self-test-tamper-regression.sh above proves and closes:
+        # a PR could weaken check.sh's detection and neuter this self-test's
+        # assertions in the same commit, and CI would run that tampered pair
+        # straight from the PR's own checkout. Extract it from the base
+        # commit alongside check.sh above; CIDX_CHECK_SH (set on the run
+        # step below) wires it to the SAME base-extracted check.sh, from the
+        # same immutable base revision, rather than letting it resolve
+        # tools/check.sh from its own (now $RUNNER_TEMP) location.
+        run: |
+          spec/tla/tools/extract-trusted-checker.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            spec/tla/tools/check-regression.sh \
+            "$RUNNER_TEMP/check-regression.sh"
+      - name: Prepare compatibility tree for the base-pinned mutation regression
+        if: github.event_name == 'pull_request'
+        # check-regression.sh at the current base predates CIDX_REPO_ROOT and
+        # derives its TLA root from its own location. Keep that checker
+        # base-pinned, but place both extracted trusted scripts and an archive
+        # of the PR's spec inputs in a runner-temp tree matching its historical
+        # layout. This is data-only PR content; executable enforcement remains
+        # the immutable copies extracted above.
+        run: |
+          compatibility_root="$RUNNER_TEMP/tla-compat"
+          mkdir -p "$compatibility_root/tools"
+          git archive --format=tar "${{ github.event.pull_request.head.sha }}" \
+            spec/tla/models spec/tla/modules spec/tla/protected \
+            | tar -x --strip-components=2 -C "$compatibility_root"
+          cp "$RUNNER_TEMP/check.sh" "$compatibility_root/tools/check.sh"
+          cp "$RUNNER_TEMP/check-regression.sh" \
+            "$compatibility_root/tools/check-regression.sh"
+          chmod +x "$compatibility_root/tools/check.sh" \
+            "$compatibility_root/tools/check-regression.sh"
+      - name: Run normative TLA+ gate (pull_request)
+        if: github.event_name == 'pull_request'
+        env:
+          CIDX_REPO_ROOT: ${{ github.workspace }}
+          TLA_MODEL_DIR: ${{ github.workspace }}/spec/tla/models
+          TLA_MODULE_DIR: ${{ github.workspace }}/spec/tla/modules
+          TLA_PROTECTED_DIR: ${{ github.workspace }}/spec/tla/protected
+          TLA_MODEL_SOURCE_DIR: ${{ github.workspace }}/spec/tla/models
+        run: "$RUNNER_TEMP/check.sh"
+      - name: Run normative TLA+ gate (push)
+        # A push event has no PR base to extract a trusted copy from and by
+        # definition already bypassed PR review (branch protection
+        # permitting); push always runs every gate as a safety net (see
+        # select-changed-gates.sh --all), so this step is exercised for its
+        # own correctness, not as a bypassable policy gate.
+        if: github.event_name != 'pull_request'
         run: spec/tla/tools/check.sh
-      - name: Run invariant mutation regression
+      - name: Run invariant mutation regression (pull_request)
+        if: github.event_name == 'pull_request'
+        env:
+          CIDX_CHECK_SH: ${{ runner.temp }}/tla-compat/tools/check.sh
+        run: "$RUNNER_TEMP/tla-compat/tools/check-regression.sh"
+      - name: Run invariant mutation regression (push)
+        # See the equivalent push step above: no base to extract from, and
+        # push already bypassed PR review.
+        if: github.event_name != 'pull_request'
         run: spec/tla/tools/check-regression.sh
-      - name: Check conformance mappings and deterministic traces
+
+  tla-proofs:
+    name: TLAPS proof checking
+    needs: changes
+    if: needs.changes.outputs.tla_proofs == 'true'
+    runs-on: cpp-indexer-runner
+    container: ubuntu:24.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Install Git for the containerized checkout
+        run: |
+          apt-get update
+          apt-get install --no-install-recommends -y ca-certificates git
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Trust the mounted checkout for containerized Git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Fetch base ref
+        if: github.event_name == 'pull_request'
+        run: git fetch origin "${{ github.event.pull_request.base.ref }}"
+      - name: Extract the trusted (base-commit) TLAPS proof checker
+        if: github.event_name == 'pull_request'
+        # See the equivalent step in the tla-syntax-and-model job: a PR could
+        # weaken a proof obligation in proofs/ and replace check-proofs.sh
+        # with a stub that exits 0 in the same commit. CIDX_REPO_ROOT points
+        # the extracted, base-commit copy back at the real checkout (this
+        # PR's head) so it checks the PR's actual modules/proofs.
+        run: |
+          spec/tla/tools/extract-trusted-checker.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            spec/tla/tools/check-proofs.sh \
+            "$RUNNER_TEMP/check-proofs.sh"
+      - name: Extract the trusted (base-commit) TLAPS proof binding helper
+        if: github.event_name == 'pull_request'
+        # check-proofs.sh sources check-proofs-binding.sh (the theorem/
+        # invariant structural-binding logic, factored out for direct
+        # unit-testability) as a sibling file relative to its own location.
+        # Extract it into the SAME $RUNNER_TEMP directory as check-proofs.sh
+        # above so the base-pinned copy resolves it there instead of falling
+        # through to a missing file; otherwise a PR could weaken the binding
+        # logic in check-proofs-binding.sh alone while leaving check-proofs.sh
+        # itself untouched and unextracted-around.
+        run: |
+          spec/tla/tools/extract-trusted-checker.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            spec/tla/tools/check-proofs-binding.sh \
+            "$RUNNER_TEMP/check-proofs-binding.sh"
+      - name: Install TLAPS build prerequisites
+        run: |
+          apt-get update
+          apt-get install --no-install-recommends -y ca-certificates curl make gcc python3
+      - name: Cache TLAPS install prefix
+        uses: actions/cache@v4
+        with:
+          path: /tmp/tlaps-1.5.0
+          key: tlaps-1.5.0-x86_64-linux-gnu-${{ runner.os }}-ebb7a3f2
+      - name: Extract the trusted (base-commit) proof binding regression
+        if: github.event_name == 'pull_request'
+        # QA round-2 fix: check-proofs.sh's manifest-declared theorem/
+        # invariant binding check must reject a vacuous proof even when a
+        # decoy comment elsewhere in the module contains the invariant
+        # names. This regression is itself a self-test of check-proofs.sh's
+        # detection logic, so it has the identical two-generation
+        # trust-root-poisoning gap check-regression.sh closes for check.sh: a
+        # PR could weaken the binding check and neuter this self-test's
+        # assertions in the same commit, and CI would run that tampered pair
+        # straight from the PR's own checkout. Extract it from the base
+        # commit alongside check-proofs.sh above; CIDX_CHECK_PROOFS_SH (set
+        # on the run step below) wires it to the SAME base-extracted
+        # check-proofs.sh, from the same immutable base revision, rather than
+        # letting it resolve tools/check-proofs.sh from its own (now
+        # $RUNNER_TEMP) location.
+        run: |
+          spec/tla/tools/extract-trusted-checker.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            spec/tla/tools/check-proofs-vacuous-comment-regression.sh \
+            "$RUNNER_TEMP/check-proofs-vacuous-comment-regression.sh"
+      - name: Run TLAPS proof gate (pull_request)
+        if: github.event_name == 'pull_request'
+        env:
+          CIDX_REPO_ROOT: ${{ github.workspace }}
+          TLA_MODULE_DIR: ${{ github.workspace }}/spec/tla/modules
+          TLA_PROOF_DIR: ${{ github.workspace }}/spec/tla/proofs
+          TLA_MANIFEST: ${{ github.workspace }}/spec/tla/manifest.json
+        run: "$RUNNER_TEMP/check-proofs.sh"
+      - name: Run TLAPS proof gate (push)
+        if: github.event_name != 'pull_request'
+        run: spec/tla/tools/check-proofs.sh
+      - name: Run proof theorem/invariant binding regression (pull_request)
+        if: github.event_name == 'pull_request'
+        env:
+          CIDX_REPO_ROOT: ${{ github.workspace }}
+          CIDX_CHECK_PROOFS_SH: ${{ runner.temp }}/check-proofs.sh
+        run: "$RUNNER_TEMP/check-proofs-vacuous-comment-regression.sh"
+      - name: Run proof theorem/invariant binding regression (push)
+        # See the equivalent push step above: no base to extract from, and
+        # push already bypassed PR review.
+        if: github.event_name != 'pull_request'
+        run: spec/tla/tools/check-proofs-vacuous-comment-regression.sh
+
+  tla-conformance:
+    name: Conformance mappings and deterministic scenario replay
+    needs: changes
+    if: needs.changes.outputs.tla_conformance == 'true'
+    runs-on: cpp-indexer-runner
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch base ref
+        if: github.event_name == 'pull_request'
+        run: git fetch origin "${{ github.event.pull_request.base.ref }}"
+      - name: Extract the trusted (base-commit) conformance checker
+        if: github.event_name == 'pull_request'
+        # See the equivalent step in the tla-syntax-and-model job: a PR could
+        # weaken a conformance mapping or a protected invariant and replace
+        # check-conformance.sh with a stub that exits 0 in the same commit.
+        # CIDX_REPO_ROOT points the extracted, base-commit copy back at the
+        # real checkout (this PR's head) so it replays the PR's actual
+        # conformance data.
+        run: |
+          spec/tla/tools/extract-trusted-checker.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            spec/tla/tools/check-conformance.sh \
+            "$RUNNER_TEMP/check-conformance.sh"
+      - name: Extract the trusted (base-commit) normative TLA+ gate checker
+        if: github.event_name == 'pull_request'
+        # export-counterexample.sh's --demo path invokes tools/check.sh
+        # internally (see CIDX_CHECK_SH below); this job does not otherwise
+        # extract check.sh, so pin it here too, from the same base commit as
+        # the conformance checker and the exporter itself below.
+        run: |
+          spec/tla/tools/extract-trusted-checker.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            spec/tla/tools/check.sh \
+            "$RUNNER_TEMP/check.sh"
+      - name: Extract the trusted (base-commit) counterexample export pipeline
+        if: github.event_name == 'pull_request'
+        # export-counterexample.sh is a self-test of check.sh's detection
+        # logic (its --demo path seeds a TrustedOutcomeInvariant defect and
+        # asserts check.sh fails on it before exporting), so it has the
+        # identical two-generation trust-root-poisoning gap check-regression.sh
+        # has -- see that script's header, and
+        # check-self-test-tamper-regression.sh for the executable proof. The
+        # run step below wires CIDX_CHECK_SH to the check.sh extracted just
+        # above, from the same immutable base revision.
+        run: |
+          spec/tla/tools/extract-trusted-checker.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            spec/tla/tools/export-counterexample.sh \
+            "$RUNNER_TEMP/export-counterexample.sh"
+      - name: Prepare compatibility tree for the base-pinned conformance checker
+        if: github.event_name == 'pull_request'
+        # check-conformance.sh at the current base predates CIDX_REPO_ROOT and
+        # derives its TLA root from its own location. Keep that checker
+        # base-pinned, but place it beside an archive of only the PR's
+        # conformance inputs in a runner-temp tree matching its historical
+        # layout. Executable enforcement remains the immutable extracted copy.
+        run: |
+          compatibility_root="$RUNNER_TEMP/tla-conformance-compat"
+          mkdir -p "$compatibility_root/spec/tla/tools"
+          git archive --format=tar "${{ github.event.pull_request.head.sha }}" \
+            spec/tla/manifest.json spec/tla/models spec/tla/modules \
+            spec/tla/protected spec/tla/conformance \
+            | tar -x -C "$compatibility_root"
+          cp "$RUNNER_TEMP/check-conformance.sh" \
+            "$compatibility_root/spec/tla/tools/check-conformance.sh"
+          chmod +x "$compatibility_root/spec/tla/tools/check-conformance.sh"
+      - name: Set up pinned Java runtime
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Check conformance mappings and deterministic traces (pull_request)
+        if: github.event_name == 'pull_request'
+        run: "$RUNNER_TEMP/tla-conformance-compat/spec/tla/tools/check-conformance.sh"
+      - name: Check conformance mappings and deterministic traces (push)
+        if: github.event_name != 'pull_request'
         run: spec/tla/tools/check-conformance.sh
+      - name: Verify the exported-counterexample pipeline is reproducible (pull_request)
+        if: github.event_name == 'pull_request'
+        env:
+          CIDX_REPO_ROOT: ${{ github.workspace }}
+          CIDX_CHECK_SH: ${{ runner.temp }}/check.sh
+          TLA_MODEL_DIR: ${{ github.workspace }}/spec/tla/models
+          TLA_MODULE_DIR: ${{ github.workspace }}/spec/tla/modules
+          TLA_PROTECTED_DIR: ${{ github.workspace }}/spec/tla/protected
+          TLA_MODEL_SOURCE_DIR: ${{ github.workspace }}/spec/tla/models
+        run: |
+          "$RUNNER_TEMP/export-counterexample.sh" --demo --out /tmp/trusted-outcome-violation.json
+          diff /tmp/trusted-outcome-violation.json \
+            spec/tla/counterexamples/golden/trusted-outcome-violation.json
+      - name: Verify the exported-counterexample pipeline is reproducible (push)
+        # See the equivalent push step above: no base to extract from, and
+        # push already bypassed PR review.
+        if: github.event_name != 'pull_request'
+        run: |
+          spec/tla/tools/export-counterexample.sh --demo --out /tmp/trusted-outcome-violation.json
+          diff /tmp/trusted-outcome-violation.json \
+            spec/tla/counterexamples/golden/trusted-outcome-violation.json
+
+  tla-sidecar-conformance:
+    name: Sidecar-publication conformance replay
+    needs: changes
+    if: needs.changes.outputs.tla_sidecar_conformance == 'true'
+    runs-on: cpp-indexer-runner
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch base ref
+        if: github.event_name == 'pull_request'
+        run: git fetch origin "${{ github.event.pull_request.base.ref }}"
+      - name: Extract the trusted (base-commit) sidecar conformance checker
+        if: github.event_name == 'pull_request'
+        # See the equivalent step in the tla-syntax-and-model job: a PR could
+        # weaken a sidecar conformance mapping or a protected invariant and
+        # replace check-sidecar-conformance.sh with a stub that exits 0 in
+        # the same commit. CIDX_REPO_ROOT points the extracted, base-commit
+        # copy back at the real checkout (this PR's head) so it replays the
+        # PR's actual sidecar conformance data.
+        run: |
+          spec/tla/tools/extract-trusted-checker.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            spec/tla/tools/check-sidecar-conformance.sh \
+            "$RUNNER_TEMP/check-sidecar-conformance.sh"
+      - name: Set up pinned Java runtime
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Check sidecar-publication conformance and rejection (pull_request)
+        if: github.event_name == 'pull_request'
+        env:
+          CIDX_REPO_ROOT: ${{ github.workspace }}
+        run: "$RUNNER_TEMP/check-sidecar-conformance.sh"
+      - name: Check sidecar-publication conformance and rejection (push)
+        if: github.event_name != 'pull_request'
+        run: spec/tla/tools/check-sidecar-conformance.sh
+
+  tla-policy:
+    name: Protected invariant review policy
+    needs: changes
+    if: needs.changes.outputs.tla_policy == 'true'
+    runs-on: cpp-indexer-runner
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
       - name: Check protected invariant review policy
         run: spec/tla/tools/check-policy.sh
 
+  tla-protected-diff-review:
+    name: Protected-path change requires CODEOWNER approval
+    if: github.event_name == 'pull_request'
+    runs-on: cpp-indexer-runner
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch base ref
+        run: |
+          git fetch origin "${{ github.event.pull_request.base.ref }}"
+      - name: Extract the trusted (base-commit) checker
+        # The PR's own checkout must never be the code that polices the PR:
+        # a PR could otherwise rewrite check-protected-review.sh to always
+        # pass. Extract the script as it existed at the base commit and run
+        # THAT copy; CIDX_REPO_ROOT points it back at the real checkout for
+        # git/CODEOWNERS access.
+        #
+        # A first-introduction PR has no base copy to extract. The shared
+        # helper's bootstrap is fail-closed in check-protected-review.sh: it
+        # accepts only a current-head approval from a reviewer other than the
+        # PR author, never a self-approval or a base CODEOWNER row that cannot
+        # yet describe the new checker. Because both the helper and checker
+        # are head-controlled when first introduced, this bootstrap is not an
+        # immutable self-protection boundary; external enforcement and a real
+        # independent reviewer remain required. The helper still hard-fails
+        # for an unresolved base commit and writes only outside the checkout.
+        run: |
+          result="$(spec/tla/tools/extract-trusted-checker.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            spec/tla/tools/check-protected-review.sh \
+            "$RUNNER_TEMP/check-protected-review.sh")"
+          echo "$result"
+          if [[ "$result" == *" mode=bootstrap "* ]]; then
+            echo "TLA_PROTECTED_REVIEW_BOOTSTRAP=true" >> "$GITHUB_ENV"
+          fi
+      - name: Require CODEOWNER approval for protected-path changes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_PR_NUMBER: ${{ github.event.pull_request.number }}
+          GITHUB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GITHUB_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CIDX_REPO_ROOT: ${{ github.workspace }}
+        run: "$RUNNER_TEMP/check-protected-review.sh"
+
   cpp-default:
     name: C++ default tests
+    needs: changes
+    if: needs.changes.outputs.cpp_default == 'true'
     runs-on: cpp-indexer-runner
     # The self-hosted runner image is not Ubuntu 24.04; the job runs in a
     # noble container so the llvm-toolchain-noble-22 and gcc-13 packages
@@ -70,11 +589,8 @@ jobs:
             "https://github.com/souffle-lang/souffle/releases/download/${SOUFFLE_VERSION}/x86_64-ubuntu-2404-souffle-${SOUFFLE_VERSION}-Linux.deb" \
             --output "$souffle_deb"
           echo "${SOUFFLE_DEB_SHA512}  ${souffle_deb}" | sha512sum --check
-          if [ "$(id -u)" -eq 0 ]; then
-            dpkg --install "$souffle_deb"
-          else
-            sudo dpkg --install "$souffle_deb"
-          fi
+          test "$(id -u)" -eq 0
+          dpkg --install "$souffle_deb"
           souffle_path="$(command -v souffle)"
           test -x "$souffle_path"
           souffle --version 2>&1 | tee /tmp/souffle-version.txt

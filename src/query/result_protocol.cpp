@@ -188,12 +188,17 @@ Value artifacts_json(const std::vector<ArtifactRef> &artifacts) {
     if (artifact.schema_version < 1 || artifact.catalog_version < 1) {
       throw std::invalid_argument("artifact versions must be positive");
     }
-    out.push_back(Value::obj(
-        {{"kind", Value::of(redact_text(artifact.kind))},
-         {"id", Value::of(redact_text(artifact.id))},
-         {"schema_version", Value::of(artifact.schema_version)},
-         {"catalog_version", Value::of(artifact.catalog_version)},
-         {"catalog_hash", Value::of(redact_text(artifact.catalog_hash))}}));
+    Object artifact_json{
+        {"kind", Value::of(redact_text(artifact.kind))},
+        {"id", Value::of(redact_text(artifact.id))},
+        {"schema_version", Value::of(artifact.schema_version)},
+        {"catalog_version", Value::of(artifact.catalog_version)},
+        {"catalog_hash", Value::of(redact_text(artifact.catalog_hash))}};
+    if (artifact.generation) {
+      artifact_json.emplace_back("generation",
+                                 Value::of(redact_text(*artifact.generation)));
+    }
+    out.push_back(Value::obj(std::move(artifact_json)));
   }
   return Value::arr(std::move(out));
 }
@@ -401,7 +406,9 @@ bool ResultEnvelope::valid() const {
     if (!one_of(artifact.kind, generated::kArtifactKinds) ||
         artifact.schema_version < 1 || artifact.catalog_version < 1 ||
         !valid_text(artifact.kind) || !valid_text(artifact.id) ||
-        !valid_text(artifact.catalog_hash)) {
+        !valid_text(artifact.catalog_hash) ||
+        (artifact.generation &&
+         (artifact.generation->empty() || !valid_text(*artifact.generation)))) {
       return false;
     }
   }

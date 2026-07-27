@@ -1,5 +1,5 @@
 {
-  "specVersion": "1.1.0",
+  "specVersion": "1.2.0",
   "normativeBoundary": "The checked-in TLA+ modules, model configurations, protected predicates, and trusted-assumption register define observable CIDX behavior independently of implementation structure.",
   "modules": [
     "modules/CidxTypes.tla",
@@ -10,18 +10,53 @@
     "modules/CidxWorkspaceLifecycle.tla",
     "modules/CidxSemanticGraph.tla",
     "conformance/CidxConformance.tla",
+    "conformance/CidxStorageConformance.tla",
     "protected/CidxProtected.tla"
   ],
+  "proofs": [
+    {
+      "module": "proofs/CidxResultProof.tla",
+      "extends": "modules/CidxResult.tla",
+      "theorem": "ResultInvarianceTheorem",
+      "provesInvariants": ["SharedResultTypeInvariant", "TrustedOutcomeInvariant"],
+      "trustedAssumptions": [
+        "ASSUME QueryIdWellFormed == QueryId \\in QueryIds",
+        "ASSUME ResultIdWellFormed == ResultId \\in ResultIds",
+        "ASSUME EvidenceIdWellFormed == EvidenceId \\in EvidenceIds"
+      ],
+      "checker": "tools/check-proofs.sh"
+    }
+  ],
+  "assurance": "ASSURANCE.md",
   "models": [
     {
       "module": "models/CidxRepositorySmoke.tla",
       "config": "models/CidxRepositorySmoke.cfg",
-      "invariants": ["TypeInvariant", "RepositoryStructureInvariant", "SharedStatusInvariant", "ProtectedInvariant"]
+      "invariants": ["TypeInvariant", "RepositoryStructureInvariant", "SharedStatusInvariant", "ProtectedInvariant"],
+      "properties": ["Fairness"]
     },
     {
       "module": "models/CidxResultSmoke.tla",
       "config": "models/CidxResultSmoke.cfg",
-      "invariants": ["SharedResultTypeInvariant", "SharedStatusInvariant", "TrustedOutcomeInvariant"]
+      "invariants": ["SharedResultTypeInvariant", "SharedStatusInvariant", "TrustedOutcomeInvariant"],
+      "properties": ["Fairness"]
+    },
+    {
+      "module": "models/CidxWorkspaceLifecycleSmoke.tla",
+      "config": "models/CidxWorkspaceLifecycleSmoke.cfg",
+      "invariants": [
+        "LifecycleTypeInvariant",
+        "WorkspaceContainmentInvariant",
+        "ScopedSymbolIdentityInvariant",
+        "ConfigurationApplicabilityInvariant",
+        "NoPartialPublicationInvariant",
+        "GenerationPublicationInvariant",
+        "FailedGenerationInvariant",
+        "InvalidationInvariant",
+        "ReadHonestyInvariant",
+        "ProtectedInvariant"
+      ],
+      "properties": ["RebuildEventuallySettles"]
     },
     {
       "module": "models/CidxBehaviorSmoke.tla",
@@ -41,6 +76,14 @@
         "TraceInvariant",
         "BoundedProgressInvariant",
         "ProtectedInvariant"
+      ],
+      "properties": [
+        "IndexingLiveness",
+        "PublicationLiveness",
+        "QueryLiveness",
+        "RecoveryLiveness",
+        "TransformLiveness",
+        "IncludePlanLiveness"
       ]
     },
     {
@@ -54,11 +97,18 @@
         "UnknownTargetInvariant",
         "PlanTransitionInvariant",
         "SetSemanticsInvariant",
+        "QueryResultInvariant",
         "WitnessInvariant",
         "CompletenessInvariant",
         "ReadOnlyExecutionInvariant",
-        "TransformPublicationInvariant",
+        "TransformDependencyInvariant",
+        "TransformStalePropagationInvariant",
         "TransformConsumptionInvariant",
+        "TransformPublicationInvariant",
+        "TransformInvariant",
+        "CycleExecutionInvariant",
+        "DiamondExecutionInvariant",
+        "FanoutExecutionInvariant",
         "CycleAdversarialInvariant",
         "DiamondAdversarialInvariant",
         "FanoutAdversarialInvariant",
@@ -66,6 +116,11 @@
         "PartialEvidenceAdversarialInvariant",
         "RecoveryTraceInvariant",
         "RecoveryFailureHonestyInvariant"
+      ],
+      "properties": [
+        "SemanticLiveness",
+        "RecoveryLiveness",
+        "FailureRecoveryLiveness"
       ]
     },
     {
@@ -139,11 +194,46 @@
     "protected/",
     "trusted/",
     "modules/CidxTypes.tla",
-    "models/*.cfg"
+    "models/*.cfg",
+    "proofs/",
+    "counterexamples/golden/",
+    "/.github/CODEOWNERS",
+    "/spec/tla/manifest.json",
+    "tools/check-protected-review.sh",
+    "tools/check-policy.sh",
+    "tools/select-changed-gates.sh",
+    "tools/check-gate-selection.sh",
+    "tools/check-gate-selection-defense-regression.sh",
+    "tools/check-verification-tamper-regression.sh",
+    "tools/check-self-test-tamper-regression.sh",
+    "tools/extract-trusted-checker.sh",
+    "tools/validate-manifest.py",
+    "tools/check.sh",
+    "tools/check-regression.sh",
+    "tools/check-conformance.sh",
+    "tools/check-sidecar-conformance.sh",
+    "tools/check-proofs.sh",
+    "tools/check-proofs-binding.sh",
+    "tools/check-proofs-binding-unit-test.sh",
+    "tools/check-proofs-vacuous-comment-regression.sh",
+    "tools/export-counterexample.sh",
+    "ci-dependency-map.json",
+    "/.github/workflows/verification.yml"
   ],
   "conformance": {
     "operations": "conformance/operation-map.json",
     "observations": "conformance/observation-map.json",
-    "scenarios": "conformance/scenarios.json"
+    "scenarios": "conformance/scenarios.json",
+    "sidecarOperations": "conformance/sidecar-operation-map.json",
+    "sidecarObservations": "conformance/sidecar-observation-map.json",
+    "sidecarScenarios": "conformance/sidecar-scenarios.json",
+    "sidecarChecker": "tools/check-sidecar-conformance.sh"
+  },
+  "counterexampleExport": {
+    "tool": "tools/export-counterexample.sh",
+    "golden": "counterexamples/golden/",
+    "cppRegressionSeededFrom": {
+      "counterexamples/golden/trusted-outcome-violation.json": "tests/tla_counterexample_regression_test.cpp"
+    }
   }
 }

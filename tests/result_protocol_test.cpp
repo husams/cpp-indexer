@@ -44,8 +44,12 @@ cidx::protocol::ResultEnvelope golden_envelope() {
                                "bounded QueryPlan execution",
                                "query://demo",
                                {}});
-  envelope.artifacts.push_back(
-      {"query-result", "query-result://demo", 1, 1, "sha256:catalog"});
+  envelope.artifacts.push_back({.kind = "query-result",
+                                .id = "query-result://demo",
+                                .schema_version = 1,
+                                .catalog_version = 1,
+                                .catalog_hash = "sha256:catalog",
+                                .generation = std::nullopt});
   return envelope;
 }
 
@@ -81,6 +85,19 @@ TEST_CASE("error truncation golden is byte-identical and schema-shaped") {
   CHECK(envelope.valid());
   CHECK(cidx::json_out::dumps_indent2(envelope.to_json()) ==
         read_file(CIDX_ERROR_TRUNCATED_GOLDEN));
+}
+
+TEST_CASE("artifact generation provenance survives serialization and rejects "
+          "empty tokens") {
+  auto envelope = golden_envelope();
+  envelope.artifacts.front().generation = "generation-7";
+
+  CHECK(envelope.valid());
+  CHECK(cidx::json_out::dumps_indent2(envelope.to_json())
+            .find("\"generation\": \"generation-7\"") != std::string::npos);
+
+  envelope.artifacts.front().generation = "";
+  CHECK_FALSE(envelope.valid());
 }
 
 TEST_CASE("result protocol keeps status, truncation, stale input, and exit "

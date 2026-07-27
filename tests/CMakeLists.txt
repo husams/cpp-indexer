@@ -31,6 +31,8 @@ set(CIDX_DEFAULT_TESTS
   application_services_test
   extraction_plan_test
   extraction_engine_test
+  tla_counterexample_regression_test
+  conformance_recorder_test
 )
 
 foreach(test_name IN LISTS CIDX_DEFAULT_TESTS)

@@ -1,8 +1,19 @@
 #!/usr/bin/env bash
+#
+# HSE-89 internal-critic P1 (round 5): verification.yml extracts this script
+# from GITHUB_BASE_SHA for pull_request events and runs THAT copy rather than
+# the PR's own checkout, exactly as it already does for
+# check-protected-review.sh and check-gate-selection.sh -- a PR that weakens
+# a protected invariant could otherwise replace this script with a stub that
+# exits 0 in the same commit. CIDX_REPO_ROOT lets that extracted copy -- which
+# no longer lives inside the repository tree -- still resolve ROOT to the
+# real checkout's spec/tla/ (this PR's head), so it model-checks the PR's
+# actual spec files, not files relative to its own $RUNNER_TEMP location.
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="${CIDX_REPO_ROOT:+$CIDX_REPO_ROOT/spec/tla}"
+ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 MODEL_DIR="${TLA_MODEL_DIR:-$ROOT/models}"
 MODULE_DIR="${TLA_MODULE_DIR:-$ROOT/modules}"
 PROTECTED_DIR="${TLA_PROTECTED_DIR:-$ROOT/protected}"
@@ -255,6 +266,22 @@ run_model() {
   local invariants
   invariants="$(paste -sd, "$actual_file")"
   echo "TLA_MODEL_STATUS=PASS model=$model invariants=$invariants"
+
+  # Model bounds are not exhaustive proof (spec/tla/ASSURANCE.md): report the
+  # exact explored state count and diameter so a reader never has to guess
+  # how much of the state space this specific finite constant instantiation
+  # actually covered.
+  local coverage_line
+  coverage_line="$(grep -E '^[0-9]+ states generated, [0-9]+ distinct states found, [0-9]+ states left on queue\.$' \
+    "$tlc_log" | tail -n 1 || true)"
+  local depth_line
+  depth_line="$(grep -E '^The depth of the complete state graph search is [0-9]+\.$' \
+    "$tlc_log" | tail -n 1 || true)"
+  local states_generated distinct_states diameter
+  states_generated="$(sed -nE 's/^([0-9]+) states generated,.*/\1/p' <<<"$coverage_line")"
+  distinct_states="$(sed -nE 's/^[0-9]+ states generated, ([0-9]+) distinct states found,.*/\1/p' <<<"$coverage_line")"
+  diameter="$(sed -nE 's/^The depth of the complete state graph search is ([0-9]+)\.$/\1/p' <<<"$depth_line")"
+  echo "TLA_MODEL_COVERAGE=PASS model=$model states_generated=${states_generated:-unknown} distinct_states=${distinct_states:-unknown} diameter=${diameter:-unknown} exhaustive=false"
 }
 
 for model in ${TLA_MODELS:-CidxRepositorySmoke CidxResultSmoke CidxWorkspaceLifecycleSmoke CidxBehaviorSmoke CidxSemanticGraphSmoke CidxStorageLifecycleSmoke}; do

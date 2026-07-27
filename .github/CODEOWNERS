@@ -3,3 +3,101 @@
 /spec/tla/trusted/ @husams
 /spec/tla/modules/CidxTypes.tla @husams
 /spec/tla/models/*.cfg @husams
+# HSE-89: TLAPS proofs and exported counterexamples are trust artifacts --
+# an AI agent must not weaken a proof obligation or replace a golden
+# counterexample to make a gate green.
+/spec/tla/proofs/ @husams
+/spec/tla/counterexamples/golden/ @husams
+# HSE-89 review fix: the policy files that DEFINE what is protected and who
+# owns it must themselves be protected, or a change could edit them to
+# silently narrow protectedPaths or replace the owner before the same PR
+# merges. check-protected-review.sh resolves both files from the base commit
+# specifically so this cannot be bypassed by editing them at HEAD.
+/.github/CODEOWNERS @husams
+/spec/tla/manifest.json @husams
+# HSE-89 review round 2: the scripts that ENFORCE this policy are themselves
+# protected. verification.yml also executes check-protected-review.sh from
+# the base commit rather than the PR's own checkout, so this file's edits
+# cannot make that one gate evaluate itself against its own tampered copy;
+# the other two scripts here rely on this CODEOWNERS entry as their
+# protection since they are not similarly pinned-to-base.
+/spec/tla/tools/check-protected-review.sh @husams
+/spec/tla/tools/check-policy.sh @husams
+/spec/tla/tools/select-changed-gates.sh @husams
+# HSE-89 P1 fix (internal critic): the gate-selection defense had the same
+# self-policing gap check-protected-review.sh was already fixed for -- a PR
+# could narrow ci-dependency-map.json's flow->gates mapping and delete the
+# matching assertion in check-gate-selection.sh in the same change. Both
+# files are now protected, and verification.yml executes check-gate-selection.sh
+# from the base commit (mirroring check-protected-review.sh) so the base's
+# unedited assertions are what actually validate the PR's (head) map.
+/spec/tla/tools/check-gate-selection.sh @husams
+/spec/tla/tools/check-gate-selection-defense-regression.sh @husams
+/spec/tla/tools/validate-manifest.py @husams
+/spec/tla/ci-dependency-map.json @husams
+# HSE-89 internal-critic P1 (round 5): the scripts that ENFORCE the actual
+# formal-verification results -- TLC model checking, TLAPS proofs,
+# conformance/sidecar-conformance replay, and the counterexample-export
+# pipeline -- were themselves unprotected, even though the meta-scripts that
+# police gate SELECTION and review APPROVAL were already fixed in prior
+# rounds. A PR could weaken a protected invariant and replace one of these
+# with a stub that exits 0 in the same commit. check.sh,
+# check-conformance.sh, check-sidecar-conformance.sh, and check-proofs.sh are
+# additionally pinned-to-base in verification.yml (mirroring
+# check-protected-review.sh and check-gate-selection.sh). check-regression.sh
+# and export-counterexample.sh are self-tests of those pinned checkers and
+# had the same two-generation trust-root-poisoning gap check-gate-selection-
+# defense-regression.sh was already fixed for: a single PR could weaken
+# check.sh's detection and neuter these self-tests' assertions in the same
+# commit, so every gate would still go green. They are now ALSO pinned-to-
+# base in verification.yml, and their CIDX_CHECK_SH wiring points them at the
+# SAME base-extracted check.sh as the real gate, from the same immutable
+# base revision -- see check-self-test-tamper-regression.sh for the
+# executable proof. CODEOWNERS remains a defense-in-depth backstop for both.
+/spec/tla/tools/check.sh @husams
+/spec/tla/tools/check-regression.sh @husams
+/spec/tla/tools/check-conformance.sh @husams
+/spec/tla/tools/check-sidecar-conformance.sh @husams
+/spec/tla/tools/check-proofs.sh @husams
+/spec/tla/tools/export-counterexample.sh @husams
+/spec/tla/tools/check-verification-tamper-regression.sh @husams
+/spec/tla/tools/check-self-test-tamper-regression.sh @husams
+# HSE-89 round-3 acceptance-review finding: check-proofs-vacuous-comment-
+# regression.sh is check-proofs.sh's self-test, the same role
+# check-regression.sh plays for check.sh -- and check-regression.sh is listed
+# here. This entry closes the same coverage-consistency gap for the newer
+# file; it was already base-extracted in verification.yml (mirroring
+# check-regression.sh) and covered by check-verification-tamper-regression.sh's
+# checker table, so this is defense-in-depth, not a new protection mechanism.
+/spec/tla/tools/check-proofs-vacuous-comment-regression.sh @husams
+# HSE-89 round-8 (QA + senior-developer round-2 acceptance review):
+# check-proofs.sh's theorem/invariant structural-binding logic was factored
+# out into this sibling file so it is directly unit-testable without a real
+# tlapm run; it carries the identical sensitivity as check-proofs.sh itself
+# (a weakened spec-operator resolution here reintroduces the vacuous-proof
+# bypass that check-proofs-vacuous-comment-regression.sh's fifth seed
+# pins), so it is base-pinned in verification.yml alongside check-proofs.sh
+# and protected here too. check-proofs-binding-unit-test.sh is its
+# tlapm-free self-test, the same role check-regression.sh plays for check.sh.
+/spec/tla/tools/check-proofs-binding.sh @husams
+/spec/tla/tools/check-proofs-binding-unit-test.sh @husams
+# HSE-89 round-6 security fix: extract-trusted-checker.sh is the single
+# shared implementation every base-pinning extraction step in
+# verification.yml now calls (except check-protected-review.sh, which stays
+# unconditional and hand-written on purpose -- see its own workflow
+# comment). It decides, for every OTHER pinned checker, whether the base
+# commit resolves at all and whether a missing path is genuine
+# first-introduction versus an unresolvable ref; a PR that could edit it
+# unreviewed could make every one of those checkers' bootstrap fallbacks
+# degrade silently to head. It is itself always invoked straight from head
+# (there is no lower layer left to extract it from), so CODEOWNERS review is
+# its only protection, same as select-changed-gates.sh below.
+/spec/tla/tools/extract-trusted-checker.sh @husams
+# HSE-89 critic finding: the workflow file itself was unprotected -- a PR
+# could remove or defang the tla-protected-diff-review job (or what it
+# extracts/executes) and nothing would flag it as needing review. Known
+# residual limitation, not fixable in-repo: at the base commit for the PR
+# that FIRST adds these protectedPaths/CODEOWNERS entries, none of them
+# exist yet, so this and the other HSE-89 self-protection entries only take
+# effect for PRs based on a commit at or after this one merges.
+/.github/workflows/verification.yml @husams
