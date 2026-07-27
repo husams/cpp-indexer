@@ -1083,6 +1083,205 @@ TEST_CASE("Live explorer: an applicability filter that empties every edge "
   CHECK(terminated);
 }
 
+TEST_CASE("Live explorer: a byte budget that trims every edge window still "
+          "lets the continuation chain terminate (HSE-92 senior-dev "
+          "round-2)") {
+  // Reviewer's exact repro shape: a root with 9 unconditional `calls`
+  // targets, node/edge budgets wide enough that every node and edge would
+  // normally fit on page one (limit=10, edge_limit=9), but a byte_limit
+  // small enough that byte-trim pops every edge (and, once those run out,
+  // primary nodes too) back out of the rendered response on every page.
+  // The bug: byte-trim decremented `delivered_edge_count`/
+  // `delivered_node_count` for every popped item, and apply_continuation_
+  // token() used those SAME post-trim counters to advance the next
+  // continuation offset -- so a page that legitimately consumed every
+  // remaining candidate, but couldn't fit any of them under the byte
+  // budget, re-minted the exact same node_offset/edge_offset forever:
+  // "edges": [] and the byte-identical token on every page, "Load more"
+  // a permanent no-op. The fix freezes the offset-advancing counters
+  // BEFORE byte-trim runs and stops minting a token at all once neither
+  // candidate window has more to offer AND this page's own consumption
+  // didn't move either offset -- so the chain must reach `"token": null`
+  // within a small, bounded number of pages regardless of how aggressively
+  // byte-trim empties the rendered page.
+  Storage db(":memory:");
+  const int64_t component =
+      db.add_component("test", "/tmp/cidx-ui-byte-trim-terminate");
+  const int64_t directory = db.add_directory(component, "");
+  const int64_t file = db.add_file(directory, "bytetrim.cpp");
+  const auto make_node = [&](const char *usr, const char *name, int line) {
+    auto sym = symbol(usr, name, "function");
+    sym.file_id = file;
+    sym.line = line;
+    return db.add_symbol(sym);
+  };
+  const int64_t root = make_node("USR::bytetrim_root", "ns::bytetrim_root", 1);
+  std::vector<int64_t> targets;
+  for (int index = 0; index < 9; ++index) {
+    const std::string usr = "USR::bytetrim_t" + std::to_string(index);
+    const std::string name = "ns::bytetrim_t" + std::to_string(index);
+    targets.push_back(make_node(usr.c_str(), name.c_str(), index + 2));
+  }
+  const auto add_edge = [&](int64_t dst, int line) {
+    cidx::Edge edge;
+    edge.src_id = root;
+    edge.dst_id = dst;
+    edge.kind = cidx::graph::edge_kinds_map().at("calls");
+    const int64_t edge_id = db.add_edge(edge);
+    cidx::EdgeSite site;
+    site.edge_id = edge_id;
+    site.file_id = file;
+    site.line = line;
+    site.col = 4;
+    site.conditional = 0;
+    db.add_edge_site(site);
+  };
+  for (int index = 0; index < 9; ++index) {
+    add_edge(targets[static_cast<std::size_t>(index)], 100 + index * 10);
+  }
+
+  RunningServer server(graph_provider_for(db));
+  const std::string base =
+      "/api/graph?token=" + server.token +
+      "&root=ns::bytetrim_root&direction=out&depth=1&limit=10&edge_limit=9"
+      "&byte_limit=24000";
+
+  std::string continuation;
+  std::set<std::string> tokens_seen;
+  bool terminated = false;
+  for (int page = 0; page < 20; ++page) {
+    std::string url = base;
+    if (!continuation.empty()) {
+      url += "&continuation=";
+      url += continuation;
+    }
+    const auto response = http_get(server.port, url);
+    CHECK(response.status == 200);
+    const std::string token_marker = R"("token": ")";
+    const std::size_t token_start = response.body.find(token_marker);
+    if (token_start == std::string::npos) {
+      // "token": null -- the chain has genuinely run out of candidates
+      // (rather than looping on byte-trimmed, byte-identical pages).
+      terminated = true;
+      break;
+    }
+    const std::size_t value_start = token_start + token_marker.size();
+    const std::size_t value_end = response.body.find('"', value_start);
+    REQUIRE(value_end != std::string::npos);
+    continuation = response.body.substr(value_start, value_end - value_start);
+    REQUIRE_FALSE(continuation.empty());
+    // A non-terminating chain re-mints the exact same token forever (the
+    // reported defect: byte-identical bodies with the same token on every
+    // page); a repeated token proves the offset never advanced.
+    CHECK(tokens_seen.insert(continuation).second);
+  }
+  CHECK(terminated);
+}
+
+TEST_CASE("Live explorer: the edge-continuation phase reuses its frozen full "
+          "scan instead of re-reading storage on every page (HSE-92 "
+          "senior-dev round-2 cost finding)") {
+  // Deterministic (non-flaky) proof that the full adjacency scan performed
+  // once node delivery is exhausted is memoized rather than re-executed
+  // against storage on every edge-continuation page: a root with 5 targets
+  // but only 2 wired-up `calls` edges, node budget wide enough that all 6
+  // nodes land on page one (so the edge-continuation phase, and therefore
+  // the scan this test cares about, starts immediately), edge_limit=1 so
+  // paging needs (at least) two edge pages to exhaust 2 edges. A THIRD edge
+  // (root -> target2, an existing, already-delivered candidate node) is
+  // inserted directly into storage between the first and second page
+  // requests -- late enough that a FRESH scan on page two would see it, but
+  // a cached one (frozen from page one) would not. If the full scan were
+  // still being re-read from storage every page (the pre-fix behavior), the
+  // newly-inserted edge would surface by the following page and the chain
+  // would run at least one page longer to deliver it; with the scan
+  // memoized, it can never appear and the chain converges after exactly the
+  // original 2 edges.
+  Storage db(":memory:");
+  const int64_t component =
+      db.add_component("test", "/tmp/cidx-ui-edge-scan-cache");
+  const int64_t directory = db.add_directory(component, "");
+  const int64_t file = db.add_file(directory, "cache.cpp");
+  const auto make_node = [&](const char *usr, const char *name, int line) {
+    auto sym = symbol(usr, name, "function");
+    sym.file_id = file;
+    sym.line = line;
+    return db.add_symbol(sym);
+  };
+  const int64_t root = make_node("USR::cache_root", "ns::cache_root", 1);
+  std::vector<int64_t> targets;
+  for (int index = 0; index < 5; ++index) {
+    const std::string usr = "USR::cache_t" + std::to_string(index);
+    const std::string name = "ns::cache_t" + std::to_string(index);
+    targets.push_back(make_node(usr.c_str(), name.c_str(), index + 2));
+  }
+  const auto add_edge = [&](int64_t dst, int line) {
+    cidx::Edge edge;
+    edge.src_id = root;
+    edge.dst_id = dst;
+    edge.kind = cidx::graph::edge_kinds_map().at("calls");
+    const int64_t edge_id = db.add_edge(edge);
+    cidx::EdgeSite site;
+    site.edge_id = edge_id;
+    site.file_id = file;
+    site.line = line;
+    site.col = 4;
+    site.conditional = 0;
+    db.add_edge_site(site);
+  };
+  // Only the first two targets start out connected.
+  add_edge(targets[0], 10);
+  add_edge(targets[1], 20);
+
+  RunningServer server(graph_provider_for(db));
+  const std::string base =
+      "/api/graph?token=" + server.token +
+      "&root=ns::cache_root&direction=out&depth=1&limit=10&edge_limit=1";
+
+  std::set<std::string> seen_edges;
+  std::string continuation;
+  bool inserted_late_edge = false;
+  bool terminated = false;
+  for (int page = 0; page < 10; ++page) {
+    std::string url = base;
+    if (!continuation.empty()) {
+      url += "&continuation=";
+      url += continuation;
+    }
+    const auto response = http_get(server.port, url);
+    CHECK(response.status == 200);
+    for (const auto &edge_id :
+         edge_portable_ids_for_kind(response.body, "calls")) {
+      seen_edges.insert(edge_id);
+    }
+    if (!inserted_late_edge) {
+      // Inserted after the first page's response has already been read --
+      // late enough that only a scan re-executed against storage on a LATER
+      // page could ever observe it.
+      add_edge(targets[2], 30);
+      inserted_late_edge = true;
+    }
+    const std::string token_marker = R"("token": ")";
+    const std::size_t token_start = response.body.find(token_marker);
+    if (token_start == std::string::npos) {
+      terminated = true;
+      break;
+    }
+    const std::size_t value_start = token_start + token_marker.size();
+    const std::size_t value_end = response.body.find('"', value_start);
+    REQUIRE(value_end != std::string::npos);
+    continuation = response.body.substr(value_start, value_end - value_start);
+    REQUIRE_FALSE(continuation.empty());
+  }
+  CHECK(inserted_late_edge);
+  CHECK(terminated);
+  // The chain converges having delivered exactly the 2 edges that existed
+  // when the frozen scan was first computed -- the late-inserted third edge
+  // never surfaces, proving the scan was served from cache rather than
+  // re-read from storage on the pages that followed the insert.
+  CHECK(seen_edges.size() == 2);
+}
+
 // Rebuilds a continuation token with a FORGED node_offset/edge_offset pair
 // but the SAME query-identity prefix as a real, server-issued token (HSE-92
 // review P2-1 / senior-dev round-1 P3 finding: this rejection path had no

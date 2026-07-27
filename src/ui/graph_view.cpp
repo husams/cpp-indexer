@@ -3,10 +3,13 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <list>
 #include <map>
+#include <mutex>
 #include <set>
 #include <string_view>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 
 #include "catalogs/generated_catalog.hpp"
@@ -76,6 +79,16 @@ using json_out::Value;
 
 constexpr int kGraphViewVersion = 1;
 
+// Named alias for the recurring "optional list-of-strings filter" parameter
+// shape (edge_kinds/node_kinds/files/components/repositories/namespaces).
+// Spelling the nested-template type out at each call site is repetitive and
+// also happens to trip a clang-tidy 22 readability-named-parameter
+// mislocation on a bare `std::optional<std::vector<std::string>> &name`
+// parameter (verified: the false positive disappears once the type has a
+// name of its own, confirmed on both previously-flagged declarations by
+// reverting this alias and observing the diagnostic return).
+using StringListFilter = std::optional<std::vector<std::string>>;
+
 Value optional_string(const std::optional<std::string> &value) {
   return value ? Value::of(*value) : Value::null();
 }
@@ -88,8 +101,7 @@ Value optional_int(const std::optional<int64_t> &value) {
 // canonical (sorted) form graph_query_identity() hashes -- used to echo
 // filters back in the response's `request` object so an action can be
 // explained/replayed from the response alone (HSE-92 round 2).
-Value sorted_string_list(
-    const std::optional<std::vector<std::string>> &values) {
+Value sorted_string_list(const StringListFilter &values) {
   Array array;
   if (values) {
     std::vector<std::string> sorted = *values;
@@ -687,14 +699,16 @@ template <typename T> void skip_offset(std::vector<T> &ordered, int offset) {
                 ordered.begin() + static_cast<std::ptrdiff_t>(count));
 }
 
-void append_typed_facts(
-    Storage &db, graph::GraphQuery &graph,
-    const std::vector<int64_t> &entity_ids,
-    const std::vector<int64_t> &type_ids, bool entity_view, int node_budget,
-    int edge_budget, const std::string &freshness, bool &truncated,
-    bool &partial_facts, const std::optional<std::string> &workspace,
-    const std::optional<std::vector<std::string>> &node_kinds, int node_offset,
-    bool &more_nodes_available, Array &nodes, Array &edges) {
+void append_typed_facts(Storage &db, graph::GraphQuery &graph,
+                        const std::vector<int64_t> &entity_ids,
+                        const std::vector<int64_t> &type_ids, bool entity_view,
+                        int node_budget, int edge_budget,
+                        const std::string &freshness, bool &truncated,
+                        bool &partial_facts,
+                        const std::optional<std::string> &workspace,
+                        const StringListFilter &node_kinds, int node_offset,
+                        bool &more_nodes_available, Array &nodes,
+                        Array &edges) {
   if (entity_view) {
     std::map<int64_t, std::pair<graph::Sym, EntityNode>> available;
     std::vector<EntityEdge> candidate_edges;
@@ -1294,11 +1308,10 @@ std::string graph_query_identity(const GraphViewRequest &request,
   material.emplace_back("workspace", request.workspace
                                          ? Value::of(*request.workspace)
                                          : Value::null());
-  const auto sorted_list_field =
-      [&](std::string_view name,
-          const std::optional<std::vector<std::string>> &values) {
-        material.emplace_back(std::string(name), sorted_string_list(values));
-      };
+  const auto sorted_list_field = [&](std::string_view name,
+                                     const StringListFilter &values) {
+    material.emplace_back(std::string(name), sorted_string_list(values));
+  };
   sorted_list_field("edge_kinds", request.edge_kinds);
   // HSE-92: every filter that changes which nodes/edges a request can ever
   // return must be part of the query identity a continuation token is
@@ -1627,12 +1640,12 @@ void apply_continuation_token(Value &continuation,
                               bool witness_view, bool more_nodes_available,
                               bool more_edges_available,
                               bool byte_trim_dropped_content, int node_offset,
-                              int edge_offset, int delivered_node_count,
-                              int delivered_edge_count) {
+                              int edge_offset, int node_offset_advance,
+                              int edge_offset_advance) {
   // Deterministic progressive paging: a token is only emitted when this
   // exact normalized query still has more nodes/edges beyond what was just
   // delivered. Bounded witness paths never page.
-  const bool continuation_possible =
+  bool continuation_possible =
       !witness_view && (more_nodes_available || more_edges_available ||
                         byte_trim_dropped_content);
   Value token = Value::null();
@@ -1640,23 +1653,43 @@ void apply_continuation_token(Value &continuation,
     int next_node_offset = node_offset;
     int next_edge_offset = 0;
     if (more_nodes_available) {
-      next_node_offset = node_offset + delivered_node_count;
+      next_node_offset = node_offset + node_offset_advance;
       next_edge_offset = 0;
     } else {
-      next_edge_offset = edge_offset + delivered_edge_count;
+      next_edge_offset = edge_offset + edge_offset_advance;
     }
-    // decode_continuation() rejects any offset outside
-    // [0, kCandidateUniverseCap] (HSE-92 review P2-1). Clamp here on the
-    // MINT side too, symmetrically, so the server can never hand out a
-    // token it would immediately reject on the client's very next request
-    // (HSE-92 senior-dev round-1 finding): the candidate universe itself is
-    // already bounded by that same cap (make_query_plan()'s own LIMIT), so
-    // this clamp is a defensive symmetry guarantee, not expected to change
-    // behavior for any request within the supported candidate-universe size.
-    next_node_offset = std::clamp(next_node_offset, 0, kCandidateUniverseCap);
-    next_edge_offset = std::clamp(next_edge_offset, 0, kCandidateUniverseCap);
-    token = Value::of(encode_continuation(query_identity, next_node_offset,
-                                          next_edge_offset));
+    // A page can only be re-offered to the client (rather than treated as
+    // the end of the chain) if it would hand back a token that actually
+    // moves the cursor. `byte_trim_dropped_content` alone is not sufficient:
+    // it only says content was popped from the RENDERED response, not that
+    // this page consumed anything new from the deterministic node/edge
+    // candidate windows (`node_offset_advance`/`edge_offset_advance` are
+    // frozen before byte-trim runs specifically so they cannot be walked
+    // back to 0 by it -- see the call site). If neither window has more to
+    // offer AND this page's own consumption didn't move either offset,
+    // minting a token here would just hand the client back the
+    // byte-identical request forever (HSE-92 senior-dev round-2 blocker).
+    // Treat that as the true end of the chain instead.
+    const bool would_advance =
+        next_node_offset != node_offset || next_edge_offset != edge_offset;
+    if (!more_nodes_available && !more_edges_available && !would_advance) {
+      continuation_possible = false;
+    }
+    if (continuation_possible) {
+      // decode_continuation() rejects any offset outside
+      // [0, kCandidateUniverseCap] (HSE-92 review P2-1). Clamp here on the
+      // MINT side too, symmetrically, so the server can never hand out a
+      // token it would immediately reject on the client's very next request
+      // (HSE-92 senior-dev round-1 finding): the candidate universe itself
+      // is already bounded by that same cap (make_query_plan()'s own
+      // LIMIT), so this clamp is a defensive symmetry guarantee, not
+      // expected to change behavior for any request within the supported
+      // candidate-universe size.
+      next_node_offset = std::clamp(next_node_offset, 0, kCandidateUniverseCap);
+      next_edge_offset = std::clamp(next_edge_offset, 0, kCandidateUniverseCap);
+      token = Value::of(encode_continuation(query_identity, next_node_offset,
+                                            next_edge_offset));
+    }
   }
   const auto set_token = [&](const Value &value) {
     bool set = false;
@@ -1671,6 +1704,69 @@ void apply_continuation_token(Value &continuation,
     }
   };
   set_token(token);
+}
+
+// HSE-92 senior-dev round-2 cost finding: once node delivery is exhausted,
+// every remaining edge-continuation page re-scans EVERY candidate node's
+// adjacency from storage (one `graph.edges()` call per node in the full,
+// frozen candidate set) just to slice out a small edge_offset window --
+// O(total candidate-set size) work repeated on every single page instead of
+// O(page size). The full scan's own output (`ordered_edges`, deduped and
+// sorted by portable edge id) is, by construction, IDENTICAL on every page
+// once the candidate set has frozen (that is the whole reason skip_offset()
+// over it is safe -- see select_symbol_edges()'s own comment), so recomputing
+// it from storage every page is pure waste, not a correctness requirement.
+// This cache memoizes exactly that frozen result, keyed by the same
+// query_identity a continuation chain is already bound to plus a storage
+// content fingerprint, so a re-index invalidates it automatically instead of
+// ever serving stale topology. It is a pure performance optimization: a
+// cache miss (cold cache, evicted entry, or a fresh process) falls back to
+// the original full scan and produces the exact same result, so correctness
+// never depends on the cache being warm.
+class EdgeScanCache {
+public:
+  std::optional<std::vector<graph::Edge>> get(const std::string &key) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = index_.find(key);
+    if (found == index_.end()) {
+      return std::nullopt;
+    }
+    order_.splice(order_.begin(), order_, found->second);
+    return found->second->second;
+  }
+
+  void put(std::string key, std::vector<graph::Edge> edges) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = index_.find(key);
+    if (found != index_.end()) {
+      order_.erase(found->second);
+      index_.erase(found);
+    }
+    order_.emplace_front(key, std::move(edges));
+    index_.emplace(std::move(key), order_.begin());
+    while (order_.size() > kMaxEntries) {
+      index_.erase(order_.back().first);
+      order_.pop_back();
+    }
+  }
+
+private:
+  // A handful of concurrently-open continuation chains is the realistic
+  // ceiling for one loopback developer session; bounding entry count (not
+  // just relying on process lifetime) keeps memory use predictable even
+  // across a very long session that explores many distinct queries.
+  static constexpr std::size_t kMaxEntries = 16;
+  std::mutex mutex_;
+  std::list<std::pair<std::string, std::vector<graph::Edge>>> order_;
+  std::unordered_map<
+      std::string,
+      std::list<std::pair<std::string, std::vector<graph::Edge>>>::iterator>
+      index_;
+};
+
+EdgeScanCache &edge_scan_cache() {
+  static EdgeScanCache cache;
+  return cache;
 }
 
 // Non-witness edge selection: gathers every candidate edge whose both
@@ -1703,21 +1799,30 @@ void apply_continuation_token(Value &continuation,
 // reason); a non-total order would let SQLite return the same nominal
 // prefix as a different SET of rows across otherwise-identical queries.
 //
-// `nodes_to_scan` is the FULL (unpaginated, filter-applied) candidate node
-// set, not just the nodes delivered through this page: a cross-page edge
-// whose SOURCE node's own page has already passed is only ever discoverable
-// through THAT source's adjacency -- scanning only nodes delivered so far
-// would mean any edge deferred for lack of bridging-node room on an earlier
-// page is never reconsidered again once its source's page has gone by
-// (HSE-92 round 3). Scanning the full set (rather than a page-progress-sized
-// prefix of it) also keeps THIS function's own output stable across the
-// chain (HSE-92 review P2-2) -- see the call site for why a growing scan
-// scope reintroduces the P1-1 instability on the edge side. Re-scanning
-// already-delivered nodes is redundant work but never loses topology; the
-// caller (build_graph_view) treats a bridging endpoint already delivered on
-// an earlier page as already known to the client (see `known_ids`), so an
-// edge becomes deliverable the moment BOTH its endpoints have appeared as
-// primary nodes on any page, without needing fresh node-budget room.
+// `nodes_to_scan` is the candidate node set the CALLER decided this page may
+// scan -- NOT necessarily the full, unpaginated candidate set (HSE-92
+// senior-dev round-2 cost finding updated this: while node continuation is
+// still outstanding, the caller narrows it to only the nodes delivered so
+// far, since apply_continuation_token() always resets edge_offset to 0 for
+// as long as more_nodes_available is true, so there is no accumulated
+// edge_offset for a narrower scan scope to destabilize -- see the call
+// site). Once node delivery is exhausted, `nodes_to_scan` becomes IDENTICAL
+// to the full, frozen candidate set for the rest of the chain: a cross-page
+// edge whose SOURCE node's own page has already passed is only ever
+// discoverable through THAT source's adjacency, so once the full set is
+// reachable this way, scanning anything narrower would mean an edge deferred
+// for lack of bridging-node room on an earlier page is never reconsidered
+// again once its source's page has gone by (HSE-92 round 3). This is also
+// the point at which `full_scan_cache_key` (see EdgeScanCache above) may be
+// safely non-empty: `nodes_to_scan`'s content is now provably identical on
+// every remaining page, so the caller-decided cache key lets this function
+// skip repeating a full, storage-backed scan whose result cannot change.
+// Re-scanning already-delivered nodes is redundant work but never loses
+// topology; the caller (build_graph_view) treats a bridging endpoint already
+// delivered on an earlier page as already known to the client (see
+// `known_ids`), so an edge becomes deliverable the moment BOTH its endpoints
+// have appeared as primary nodes on any page, without needing fresh
+// node-budget room.
 std::vector<graph::Edge>
 select_symbol_edges(graph::GraphQuery &graph, const GraphViewRequest &request,
                     const std::vector<graph::Sym> &nodes_to_scan,
@@ -1725,36 +1830,54 @@ select_symbol_edges(graph::GraphQuery &graph, const GraphViewRequest &request,
                     const std::map<int64_t, graph::Sym> &symbols_by_id,
                     int edge_offset, int edge_budget, std::size_t edges_so_far,
                     const std::function<void()> &check_cancelled,
-                    bool &truncated, bool &more_edges_available) {
-  std::map<std::string, graph::Edge> by_key;
-  const auto kind_ids = graph::GraphQuery::kind_ids(request.edge_kinds);
-  for (const auto &symbol : nodes_to_scan) {
-    check_cancelled();
-    const auto adjacent = graph.edges(symbol.id, request.direction, kind_ids,
-                                      kCandidateUniverseCap, false);
-    for (const auto &edge : adjacent) {
-      // Both endpoints must belong to the FULL filtered candidate set, not
-      // just this page -- otherwise an edge whose other endpoint lands on a
-      // different continuation page would be dropped and never appear on
-      // any page.
-      if (!full_candidates_by_id.contains(edge.src_id) ||
-          !full_candidates_by_id.contains(edge.dst_id)) {
-        continue;
-      }
-      const auto source = symbols_by_id.find(edge.src_id);
-      const auto target = symbols_by_id.find(edge.dst_id);
-      if (source == symbols_by_id.end() || target == symbols_by_id.end()) {
-        continue;
-      }
-      by_key.emplace(portable_edge_id(source->second, edge, target->second),
-                     edge);
+                    bool &truncated, bool &more_edges_available,
+                    const std::string &full_scan_cache_key = {}) {
+  // `full_scan_cache_key` is only ever non-empty when the caller has
+  // confirmed `nodes_to_scan` IS the full, frozen candidate set (see the
+  // call site) -- never during node-continuation, when it is a genuinely
+  // growing prefix and caching it would serve a stale, partial scan on a
+  // later page.
+  std::vector<graph::Edge> ordered_edges;
+  bool have_full_scan = false;
+  if (!full_scan_cache_key.empty()) {
+    if (auto cached = edge_scan_cache().get(full_scan_cache_key)) {
+      ordered_edges = *std::move(cached);
+      have_full_scan = true;
     }
   }
-  std::vector<graph::Edge> ordered_edges;
-  ordered_edges.reserve(by_key.size());
-  for (auto &[key, edge] : by_key) {
-    (void)key;
-    ordered_edges.push_back(edge);
+  if (!have_full_scan) {
+    std::map<std::string, graph::Edge> by_key;
+    const auto kind_ids = graph::GraphQuery::kind_ids(request.edge_kinds);
+    for (const auto &symbol : nodes_to_scan) {
+      check_cancelled();
+      const auto adjacent = graph.edges(symbol.id, request.direction, kind_ids,
+                                        kCandidateUniverseCap, false);
+      for (const auto &edge : adjacent) {
+        // Both endpoints must belong to the FULL filtered candidate set, not
+        // just this page -- otherwise an edge whose other endpoint lands on
+        // a different continuation page would be dropped and never appear
+        // on any page.
+        if (!full_candidates_by_id.contains(edge.src_id) ||
+            !full_candidates_by_id.contains(edge.dst_id)) {
+          continue;
+        }
+        const auto source = symbols_by_id.find(edge.src_id);
+        const auto target = symbols_by_id.find(edge.dst_id);
+        if (source == symbols_by_id.end() || target == symbols_by_id.end()) {
+          continue;
+        }
+        by_key.emplace(portable_edge_id(source->second, edge, target->second),
+                       edge);
+      }
+    }
+    ordered_edges.reserve(by_key.size());
+    for (auto &[key, edge] : by_key) {
+      (void)key;
+      ordered_edges.push_back(edge);
+    }
+    if (!full_scan_cache_key.empty()) {
+      edge_scan_cache().put(full_scan_cache_key, ordered_edges);
+    }
   }
   skip_offset(ordered_edges, edge_offset);
   // The window this call may return is capped at whatever edge_budget room
@@ -2493,10 +2616,28 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request,
             all_sorted_for_scan.begin() +
                 static_cast<std::ptrdiff_t>(std::min(
                     nodes_delivered_so_far, all_sorted_for_scan.size())));
+        // The full adjacency scan select_symbol_edges() performs over
+        // `nodes_to_scan` is only safe to memoize once node delivery is
+        // exhausted -- i.e. once `nodes_to_scan` genuinely IS the full,
+        // frozen candidate set, not a still-growing node-continuation
+        // prefix (HSE-92 senior-dev round-2 cost finding: every
+        // edge-continuation page was re-scanning that full set's adjacency
+        // from storage, O(total candidate-set size) work on every page).
+        // The cache key binds the same query_identity a continuation
+        // chain's tokens are already bound to together with a storage
+        // content fingerprint, so a re-index -- or a different query
+        // entirely -- can never serve a stale or mismatched scan.
+        std::string edge_scan_cache_key;
+        if (nodes_delivered_so_far >= all_sorted_for_scan.size()) {
+          edge_scan_cache_key = query_identity + "|" +
+                                identity.source_revision.value_or("") + "|" +
+                                identity.source_fingerprint.value_or("") + "|" +
+                                std::to_string(identity.schema_version);
+        }
         selected_edges = select_symbol_edges(
             graph, request, nodes_to_scan, full_candidates_by_id, symbols_by_id,
             edge_offset, edge_budget, edges.size(), check_cancelled, truncated,
-            more_edges_available);
+            more_edges_available, edge_scan_cache_key);
       }
       // The continuation offset must advance by how many candidates this
       // page CONSUMED from the deterministic edge-offset window (i.e. how
@@ -2689,6 +2830,24 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request,
   out.emplace_back("edges", Value::arr(std::move(edges)));
   out.emplace_back("view_state", Value::obj({}));
   Value result = Value::obj(std::move(out));
+  // Freeze the continuation-offset advancement BEFORE byte-trim can touch
+  // it. `delivered_node_count`/`delivered_edge_count` continue to be
+  // mutated below by the byte-trim loops, but only for their own
+  // rendering-boundary bookkeeping (see `popping_bridging_node`); the
+  // offsets minted into the next continuation token must reflect how many
+  // candidates this page CONSUMED from the deterministic node/edge-offset
+  // windows, not how many survived being rendered into JSON afterwards
+  // (HSE-92 senior-dev round-2 blocker: byte-trim popping every rendered
+  // edge/node walked `delivered_edge_count`/`delivered_node_count` back to
+  // 0, so a page that consumed real candidates but couldn't fit any of them
+  // under the byte budget re-minted the SAME offset forever -- the
+  // byte-identical-token-forever defect, reproduced with a byte_limit small
+  // enough to trim an entire page's window on every retry). This is exactly
+  // the same "advance by consumed, not by emitted" principle already
+  // applied to the applicability-filter case above; byte-trim is just
+  // another post-selection filter and must obey the same rule.
+  const int node_offset_advance = delivered_node_count;
+  const int edge_offset_advance = delivered_edge_count;
   bool byte_truncated = false;
   bool byte_trim_dropped_content = false;
 
@@ -2748,11 +2907,16 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request,
     while (script_safe_size(json_out::dumps_indent2(result)) > trim_budget &&
            (member(result, "edges") != nullptr &&
             !member(result, "edges")->a.empty())) {
+      // Deliberately does NOT touch `delivered_edge_count`/
+      // `edge_offset_advance`: edges have no primary/bridging split to
+      // track (unlike nodes below), so nothing downstream needs a
+      // rendering-scoped edge counter, and the continuation offset must
+      // stay pinned to what this page actually consumed from the
+      // deterministic edge-offset window regardless of how much of that
+      // got byte-trimmed back out of the response (see `edge_offset_advance`
+      // above).
       member(result, "edges")->a.pop_back();
       byte_trim_dropped_content = true;
-      if (delivered_edge_count > 0) {
-        --delivered_edge_count;
-      }
     }
     while (script_safe_size(json_out::dumps_indent2(result)) > trim_budget &&
            (member(result, "nodes") != nullptr &&
@@ -2858,7 +3022,7 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request,
       apply_continuation_token(
           *continuation, query_identity, witness_view, more_nodes_available,
           more_edges_available, byte_trim_dropped_content, node_offset,
-          edge_offset, delivered_node_count, delivered_edge_count);
+          edge_offset, node_offset_advance, edge_offset_advance);
     }
   }
   for (Value &node : member(result, "nodes")->a) {
