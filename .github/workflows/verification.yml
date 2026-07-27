@@ -193,10 +193,33 @@ jobs:
             "${{ github.event.pull_request.base.sha }}" \
             spec/tla/tools/check-regression.sh \
             "$RUNNER_TEMP/check-regression.sh"
+      - name: Prepare compatibility tree for the base-pinned mutation regression
+        if: github.event_name == 'pull_request'
+        # check-regression.sh at the current base predates CIDX_REPO_ROOT and
+        # derives its TLA root from its own location. Keep that checker
+        # base-pinned, but place both extracted trusted scripts and an archive
+        # of the PR's spec inputs in a runner-temp tree matching its historical
+        # layout. This is data-only PR content; executable enforcement remains
+        # the immutable copies extracted above.
+        run: |
+          compatibility_root="$RUNNER_TEMP/tla-compat"
+          mkdir -p "$compatibility_root/tools"
+          git archive --format=tar "${{ github.event.pull_request.head.sha }}" \
+            spec/tla/models spec/tla/modules spec/tla/protected \
+            | tar -x --strip-components=2 -C "$compatibility_root"
+          cp "$RUNNER_TEMP/check.sh" "$compatibility_root/tools/check.sh"
+          cp "$RUNNER_TEMP/check-regression.sh" \
+            "$compatibility_root/tools/check-regression.sh"
+          chmod +x "$compatibility_root/tools/check.sh" \
+            "$compatibility_root/tools/check-regression.sh"
       - name: Run normative TLA+ gate (pull_request)
         if: github.event_name == 'pull_request'
         env:
           CIDX_REPO_ROOT: ${{ github.workspace }}
+          TLA_MODEL_DIR: ${{ github.workspace }}/spec/tla/models
+          TLA_MODULE_DIR: ${{ github.workspace }}/spec/tla/modules
+          TLA_PROTECTED_DIR: ${{ github.workspace }}/spec/tla/protected
+          TLA_MODEL_SOURCE_DIR: ${{ github.workspace }}/spec/tla/models
         run: "$RUNNER_TEMP/check.sh"
       - name: Run normative TLA+ gate (push)
         # A push event has no PR base to extract a trusted copy from and by
@@ -209,9 +232,8 @@ jobs:
       - name: Run invariant mutation regression (pull_request)
         if: github.event_name == 'pull_request'
         env:
-          CIDX_REPO_ROOT: ${{ github.workspace }}
-          CIDX_CHECK_SH: ${{ runner.temp }}/check.sh
-        run: "$RUNNER_TEMP/check-regression.sh"
+          CIDX_CHECK_SH: ${{ runner.temp }}/tla-compat/tools/check.sh
+        run: "$RUNNER_TEMP/tla-compat/tools/check-regression.sh"
       - name: Run invariant mutation regression (push)
         # See the equivalent push step above: no base to extract from, and
         # push already bypassed PR review.

@@ -342,11 +342,16 @@ for checker, expected_count in checkers.items():
     # base-pinned copy instead of falling through to a missing file.
     if checker == "check-proofs-binding.sh":
         continue
-    execution_marker = (
-        f'"$RUNNER_TEMP/{checker}" --demo'
-        if checker == "export-counterexample.sh"
-        else f'run: "$RUNNER_TEMP/{checker}"'
-    )
+    if checker == "export-counterexample.sh":
+        execution_marker = f'"$RUNNER_TEMP/{checker}" --demo'
+    elif checker == "check-regression.sh":
+        # The base checker predates CIDX_REPO_ROOT and derives its root from
+        # its own location. The workflow runs it from the runner-temp
+        # compatibility tree containing the base-pinned checker and archived
+        # PR spec inputs.
+        execution_marker = 'run: "$RUNNER_TEMP/tla-compat/tools/check-regression.sh"'
+    else:
+        execution_marker = f'run: "$RUNNER_TEMP/{checker}"'
     if execution_marker not in workflow:
         raise SystemExit(
             "TLA_VERIFICATION_TAMPER_REGRESSION_STATUS=FAIL "
@@ -358,19 +363,35 @@ for checker, expected_count in checkers.items():
 # pull_request run step, not merely extract it and leave it unused -- that
 # would silently reintroduce the CIDX_CHECK_SH-shaped hole this fix closes.
 for checker in ("check-regression.sh", "export-counterexample.sh"):
-    run_marker = (
-        f'"$RUNNER_TEMP/{checker}" --demo'
-        if checker == "export-counterexample.sh"
-        else f'run: "$RUNNER_TEMP/{checker}"'
-    )
+    if checker == "export-counterexample.sh":
+        run_marker = f'"$RUNNER_TEMP/{checker}" --demo'
+    elif checker == "check-regression.sh":
+        run_marker = 'run: "$RUNNER_TEMP/tla-compat/tools/check-regression.sh"'
+    else:
+        run_marker = f'run: "$RUNNER_TEMP/{checker}"'
     run_start = workflow.rindex(run_marker)
     step_start = workflow.rindex("- name:", 0, run_start)
     step_block = workflow[step_start:run_start]
-    if "CIDX_CHECK_SH: ${{ runner.temp }}/check.sh" not in step_block:
+    expected_check_sh = (
+        "CIDX_CHECK_SH: ${{ runner.temp }}/tla-compat/tools/check.sh"
+        if checker == "check-regression.sh"
+        else "CIDX_CHECK_SH: ${{ runner.temp }}/check.sh"
+    )
+    if expected_check_sh not in step_block:
         raise SystemExit(
             "TLA_VERIFICATION_TAMPER_REGRESSION_STATUS=FAIL "
             f"reason=cidx-check-sh-not-wired-to-runner-temp:{checker}"
         )
+
+if (
+    'compatibility_root="$RUNNER_TEMP/tla-compat"' not in workflow
+    or 'git archive --format=tar "${{ github.event.pull_request.head.sha }}"' not in workflow
+    or 'tar -x --strip-components=2 -C "$compatibility_root"' not in workflow
+):
+    raise SystemExit(
+        "TLA_VERIFICATION_TAMPER_REGRESSION_STATUS=FAIL "
+        "reason=base-regression-compatibility-tree-missing"
+    )
 
 # check-proofs-vacuous-comment-regression.sh must likewise pass
 # CIDX_CHECK_PROOFS_SH pointing at a $RUNNER_TEMP-extracted check-proofs.sh
