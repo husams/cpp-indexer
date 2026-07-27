@@ -1914,14 +1914,91 @@ def test_path_reconstruction_is_budget_bounded_when_every_walk_of_the_target_dep
         (start(symbol("USR::Explode_S"))
          | path(start(symbol("USR::Explode_N1")), "calls", depth, depth)).plan)
     elapsed = time.monotonic() - started
-    # Pre-fix, this same call measured ~0.22s at this depth in the review;
-    # 2s leaves generous headroom for slower CI hardware while still
-    # failing hard if the bound regresses to the seconds/minutes scale the
-    # review measured at deeper depths (6.14s at depth=12, unbounded
-    # growth beyond that).
+    # Non-timing, budget-attributable assertion (round-2 review F2): with
+    # the reconstruction-budget guard effectively disabled (e.g. the
+    # constant multiplied up), this same fixture still reports
+    # `result.paths == []` / `result.truncated` via the unrelated
+    # depth_limited path, so those two checks alone cannot tell the fixed
+    # code from the unfixed code -- only elapsed time could, which is flaky
+    # under CI load. Asserting the DFS actually paid for and hit
+    # PATH_RECONSTRUCTION_BUDGET (not merely stopped for some other reason)
+    # closes that gap.
+    assert (result.path_reconstruction_descents_examined
+            == qp.PATH_RECONSTRUCTION_BUDGET + 1)
+    # Wall-clock bound kept as a secondary, non-blocking sanity signal
+    # (pre-fix this measured ~0.22s at this depth in the review); the
+    # budget-count assertion above is now the primary discriminator.
     assert elapsed < 2.0, f"elapsed={elapsed}"
     assert result.paths == []
     assert result.truncated
+
+
+def test_path_reconstruction_retains_an_already_confirmed_witness_when_the_budget_trips_exploring_the_rest_of_that_depths_search_space():
+    # Round-2 review F1: a confirmed simple witness must be emitted even
+    # when `reconstruction_budget_exceeded` becomes true later in the same
+    # DFS enumeration (e.g. an unrelated dense region hanging off the same
+    # start exhausts the budget after the witness was already found).
+    # Discarding it is strictly worse than reporting it alongside
+    # truncated=True.
+    #
+    # Graph: s -> a1 -> a2 -> ... -> a11 -> n1 is a genuine SIMPLE witness
+    # of length 12 (all distinct nodes). The `a*` chain is given smaller
+    # node ids than n1 and the dense layers below, so lexicographic
+    # (sorted-by-id) DFS visits it FIRST and confirms the witness cheaply
+    # (12 descents) before ever touching the dense subtree. Separately,
+    # s -> n1 -> L2..L11 (5-wide fully-connected consecutive layers) -> n1
+    # reproduces the same combinatorial blowup as the test above (every
+    # walk here is non-simple, since it revisits n1), which exhausts
+    # PATH_RECONSTRUCTION_BUDGET while DFS explores it AFTER the witness
+    # chain, per sort order.
+    branch = 5
+    layers = 10  # L2..L11
+    depth = 12
+    db = Storage(":memory:")
+    s = db.add_symbol(_make_sym("USR::Retain_S", "s"))
+
+    witness_chain = [s]
+    for i in range(1, layers + 2):  # a1..a11 (11 nodes, depths 1..11)
+        witness_chain.append(
+            db.add_symbol(_make_sym(f"USR::Retain_A{i}", f"a{i}")))
+    for parent, child in zip(witness_chain, witness_chain[1:]):
+        db.add_edge(parent, child, 1)
+
+    n1 = db.add_symbol(_make_sym("USR::Retain_N1", "n1"))
+    db.add_edge(s, n1, 1)
+    db.add_edge(witness_chain[-1], n1, 1)  # a11 -> n1, hop 12
+
+    prev = [n1]
+    for layer in range(layers):
+        current = [
+            db.add_symbol(_make_sym(
+                f"USR::Retain_L{layer}_{i}", f"l{layer}_{i}"))
+            for i in range(branch)
+        ]
+        for p in prev:
+            for c in current:
+                db.add_edge(p, c, 1)
+        if layer == layers - 1:
+            for c in current:
+                db.add_edge(c, n1, 1)
+        prev = current
+
+    ex = Executor(db)
+    result = ex.run(
+        (start(symbol("USR::Retain_S"))
+         | path(start(symbol("USR::Retain_N1")), "calls", depth, depth)).plan)
+    # The witness was confirmed BEFORE the budget tripped -- it must
+    # survive.
+    assert len(result.paths) == 1
+    witness = result.paths[0]
+    assert witness.length == depth
+    assert [step.node_id for step in witness.steps] == witness_chain + [n1]
+    # The overall result is still truncated: the dense subtree exhausted
+    # the reconstruction budget, so other witnesses may have gone
+    # unexplored.
+    assert result.truncated
+    assert (result.path_reconstruction_descents_examined
+            == qp.PATH_RECONSTRUCTION_BUDGET + 1)
 
 
 def test_count_over_a_typed_node_stream_still_aggregates_partial_and_unknown_status():

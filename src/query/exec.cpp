@@ -628,6 +628,11 @@ struct Stream {
   // status via recompute_status().
   bool path_stream = false;
   int64_t path_rows_examined = 0;
+  // Cumulative DFS descents charged against kPathReconstructionBudget across
+  // the whole path_stage()/reverse_type_use_stage() call (see that
+  // constant's comment) -- a non-timing signal that the reconstruction
+  // budget, not some other cutoff, is what stopped a search.
+  int64_t path_reconstruction_descents_examined = 0;
   // True only while a limit() is in effect with NO cardinality-expanding
   // stage (nodes/out/in/union) after it -- otherwise finish() re-applies the
   // default result cap (PR #20 review: an early limit must not disable the
@@ -2184,7 +2189,9 @@ private:
           // examined at max_depth=16 on a 72-symbol fixture). Charging here
           // makes a dedicated budget bound total reconstruction work, not
           // just rows read.
-          if (++reconstruction_budget_used > kPathReconstructionBudget) {
+          ++reconstruction_budget_used;
+          ++st.path_reconstruction_descents_examined;
+          if (reconstruction_budget_used > kPathReconstructionBudget) {
             reconstruction_budget_exceeded = true;
             return;
           }
@@ -2315,10 +2322,17 @@ private:
         }
         frontier = std::move(level);
       }
-      if (truncated) {
-        break;
-      }
       if (found_depth < 0) {
+        // No witness was confirmed for this start: either the raw-row
+        // budget fired, or reconstruction was cut off before proving a
+        // witness or its absence (see the `reconstruction_budget_exceeded`
+        // branch above). Neither case has anything to emit, so stop the
+        // whole multi-start search here exactly like the pre-existing
+        // raw-row-budget behavior -- do NOT keep searching other starts
+        // once the cumulative budget is spent.
+        if (truncated) {
+          break;
+        }
         if (!frontier_exhausted && frontier_expandable(frontier)) {
           // Finite-depth exhaustion: the depth window (not a dead end in
           // the graph) is what stopped this start's search, so its "no
@@ -2328,6 +2342,15 @@ private:
         }
         continue;
       }
+      // A witness WAS confirmed for this start (chains is non-empty) --
+      // emit it even if `truncated` is also true, i.e. the reconstruction
+      // budget ran out partway through exploring the rest of this depth's
+      // search space. Discarding an already-proven simple witness here
+      // would be strictly worse than reporting it alongside
+      // `truncated: true` (docs/query-plan.md's budget section). The
+      // overall multi-start search still stops after this start once
+      // `truncated` is set, matching the raw-row-budget's "stop, don't
+      // silently keep going" contract -- see the `break` below.
       if (std::cmp_greater(chains.size(), kDefaultResultCap)) {
         result_truncated = true;
         chains.resize(kDefaultResultCap);
@@ -2364,6 +2387,9 @@ private:
                                      // abort the search for other starts
         }
         results.push_back(std::move(witness));
+      }
+      if (truncated) {
+        break;
       }
     }
 
@@ -3840,6 +3866,8 @@ public:
     Result res;
     res.view = st.view;
     res.path_rows_examined = st.path_rows_examined;
+    res.path_reconstruction_descents_examined =
+        st.path_reconstruction_descents_examined;
     reject_ambiguous_ungrouped(st);
     if (st.shape == Shape::Scalar) {
       // count() after path()/reverse_type_use() counts witnesses and

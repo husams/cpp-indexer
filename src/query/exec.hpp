@@ -147,6 +147,10 @@ struct Result {
   // Non-serialized execution metric used to verify that the path row budget
   // stops SQLite iteration at the first over-budget row.
   int64_t path_rows_examined = 0;
+  // Non-serialized execution metric: cumulative DFS descents charged
+  // against kPathReconstructionBudget, used to verify path() witness-chain
+  // reconstruction is bounded by its own budget rather than by wall clock.
+  int64_t path_reconstruction_descents_examined = 0;
   int64_t scalar = 0;                  // Shape::Scalar only
   std::vector<std::string> fields;     // row column names, select order
   std::vector<std::vector<Cell>> rows; // Shape::Nodes/Rows

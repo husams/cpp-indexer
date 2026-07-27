@@ -2530,12 +2530,102 @@ TEST_CASE("query_plan: path() reconstruction is budget-bounded when every "
   const auto elapsed_ms =
       std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
   INFO("elapsed_ms=", elapsed_ms);
-  // Pre-fix, this same call measured ~9661ms; bounded reconstruction must
-  // stay far below that -- 2000ms leaves generous headroom for slower CI
-  // hardware while still failing hard if the bound regresses.
+  // Non-timing, budget-attributable assertion (round-2 review F2): with the
+  // reconstruction-budget guard removed (e.g. the constant multiplied up),
+  // this same fixture still reports paths.empty()/truncated via the
+  // unrelated depth_limited path, so those two checks alone cannot tell the
+  // fixed code from the unfixed code -- only elapsed time could, which is
+  // flaky under CI load. Asserting the DFS actually paid for and hit
+  // kPathReconstructionBudget (not merely stopped for some other reason)
+  // closes that gap.
+  CHECK(result.path_reconstruction_descents_examined ==
+        kPathReconstructionBudget + 1);
+  // Wall-clock bound kept as a secondary, non-blocking sanity signal (pre-fix
+  // this measured ~9661ms); the budget-count assertion above is now the
+  // primary discriminator.
   CHECK(elapsed_ms < 2000);
   CHECK(result.paths.empty());
   CHECK(result.truncated);
+}
+
+TEST_CASE("query_plan: path() reconstruction retains an already-confirmed "
+          "witness when the budget trips exploring the rest of that depth's "
+          "search space") {
+  // Round-2 review F1: a confirmed simple witness must be emitted even when
+  // `reconstruction_budget_exceeded` becomes true later in the same DFS
+  // enumeration (e.g. an unrelated dense region hanging off the same start
+  // exhausts the budget after the witness was already found). Discarding it
+  // is strictly worse than reporting it alongside truncated=true.
+  //
+  // Graph: s -> a1 -> a2 -> ... -> a13 -> n1 is a genuine SIMPLE witness of
+  // length 14 (all distinct nodes). The `a*` chain is given smaller node ids
+  // than n1 and the dense layers below, so lexicographic (sorted-by-id) DFS
+  // visits it FIRST and confirms the witness cheaply (14 descents) before
+  // ever touching the dense subtree. Separately, s -> n1 -> L2..L13 (5-wide
+  // fully-connected consecutive layers) -> n1 reproduces the round-6
+  // combinatorial blowup (every walk here is non-simple, since it revisits
+  // n1), which exhausts kPathReconstructionBudget while DFS explores it
+  // AFTER the witness chain, per sort order.
+  constexpr int kBranch = 5;
+  constexpr int kLayers = 12; // L2..L13
+  constexpr int64_t kDepth = 14;
+  Storage db(":memory:");
+  const int64_t s = db.add_symbol(make_sym("USR::Retain_S", "s"));
+
+  std::vector<int64_t> witness_chain{s};
+  for (int i = 1; i <= kLayers + 1; ++i) { // a1..a13 (13 nodes, depths 1..13)
+    witness_chain.push_back(db.add_symbol(make_sym(
+        "USR::Retain_A" + std::to_string(i), "a" + std::to_string(i))));
+  }
+  for (size_t i = 0; i + 1 < witness_chain.size(); ++i) {
+    db.add_edge(make_edge(witness_chain[i], witness_chain[i + 1], 1));
+  }
+
+  const int64_t n1 = db.add_symbol(make_sym("USR::Retain_N1", "n1"));
+  db.add_edge(make_edge(s, n1, 1));
+  db.add_edge(make_edge(witness_chain.back(), n1, 1)); // a13 -> n1, hop 14
+
+  std::vector<int64_t> prev{n1};
+  for (int layer = 0; layer < kLayers; ++layer) {
+    std::vector<int64_t> current;
+    current.reserve(kBranch);
+    for (int i = 0; i < kBranch; ++i) {
+      current.push_back(db.add_symbol(make_sym(
+          "USR::Retain_L" + std::to_string(layer) + "_" + std::to_string(i),
+          "l" + std::to_string(layer) + "_" + std::to_string(i))));
+    }
+    for (const int64_t p : prev) {
+      for (const int64_t c : current) {
+        db.add_edge(make_edge(p, c, 1));
+      }
+    }
+    if (layer == kLayers - 1) {
+      for (const int64_t c : current) {
+        db.add_edge(make_edge(c, n1, 1));
+      }
+    }
+    prev = current;
+  }
+
+  QueryExecutor ex(db);
+  const auto result =
+      ex.run((start(symbol("USR::Retain_S")) |
+              path(start(symbol("USR::Retain_N1")), "calls", kDepth, kDepth))
+                 .plan());
+  // The witness was confirmed BEFORE the budget tripped -- it must survive.
+  REQUIRE(result.paths.size() == 1);
+  const auto &witness = result.paths[0];
+  CHECK(witness.length == kDepth);
+  REQUIRE(witness.steps.size() == static_cast<size_t>(kDepth) + 1);
+  for (size_t i = 0; i < witness_chain.size(); ++i) {
+    CHECK(witness.steps[i].node_id == witness_chain[i]);
+  }
+  CHECK(witness.steps.back().node_id == n1);
+  // The overall result is still truncated: the dense subtree exhausted the
+  // reconstruction budget, so other witnesses may have gone unexplored.
+  CHECK(result.truncated);
+  CHECK(result.path_reconstruction_descents_examined ==
+        kPathReconstructionBudget + 1);
 }
 
 TEST_CASE("query_plan: count() over a typed node stream still aggregates "

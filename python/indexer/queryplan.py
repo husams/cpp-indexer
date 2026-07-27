@@ -1387,6 +1387,10 @@ class Result:
     # Non-serialized execution metric used to verify that the path row budget
     # stops SQLite iteration at the first over-budget row.
     path_rows_examined: int = 0
+    # Non-serialized execution metric: cumulative DFS descents charged
+    # against PATH_RECONSTRUCTION_BUDGET, used to verify path() witness-chain
+    # reconstruction is bounded by its own budget rather than by wall clock.
+    path_reconstruction_descents_examined: int = 0
     scalar: int = 0
     fields: tuple[str, ...] = ()
     rows: list[tuple[Any, ...]] = field(default_factory=list)
@@ -1676,6 +1680,7 @@ class _Stream:
         # must still fold per-row/per-key status via _recompute_status().
         self.path_stream = False
         self.path_rows_examined = 0
+        self.path_reconstruction_descents_examined = 0
         # True only while a limit() is in effect with NO cardinality-expanding
         # stage (nodes/out/in/union) after it -- otherwise _finish()
         # re-applies the default result cap (PR #20 review).
@@ -2222,6 +2227,7 @@ class Executor:
                     # fixture). Charging here makes a dedicated budget
                     # bound total reconstruction work, not just rows read.
                     reconstruction_budget_used += 1
+                    st.path_reconstruction_descents_examined += 1
                     if reconstruction_budget_used > PATH_RECONSTRUCTION_BUDGET:
                         reconstruction_budget_exceeded = True
                         return
@@ -2315,9 +2321,17 @@ class Executor:
                         break
                 frontier = level
                 depth += 1
-            if truncated:
-                break
             if found_depth < 0:
+                # No witness was confirmed for this start: either the
+                # raw-row budget fired, or reconstruction was cut off
+                # before proving a witness or its absence (see the
+                # `reconstruction_budget_exceeded` branch above). Neither
+                # case has anything to emit, so stop the whole
+                # multi-start search here exactly like the pre-existing
+                # raw-row-budget behavior -- do NOT keep searching other
+                # starts once the cumulative budget is spent.
+                if truncated:
+                    break
                 if not frontier_exhausted and frontier_expandable(frontier):
                     # Finite-depth exhaustion: the depth window (not a dead
                     # end in the graph) is what stopped this start's
@@ -2326,6 +2340,17 @@ class Executor:
                     # other starts.
                     depth_limited = True
                 continue
+            # A witness WAS confirmed for this start (chains is non-empty)
+            # -- emit it even if `truncated` is also true, i.e. the
+            # reconstruction budget ran out partway through exploring the
+            # rest of this depth's search space. Discarding an
+            # already-proven simple witness here would be strictly worse
+            # than reporting it alongside `truncated: True`
+            # (docs/query-plan.md's budget section). The overall
+            # multi-start search still stops after this start once
+            # `truncated` is set, matching the raw-row-budget's "stop,
+            # don't silently keep going" contract -- see the `break`
+            # below.
             if len(chains) > DEFAULT_RESULT_CAP:
                 result_truncated = True
                 del chains[DEFAULT_RESULT_CAP:]
@@ -2354,6 +2379,8 @@ class Executor:
                     evidence_truncated = True
                 results.append(PathWitness(
                     steps=steps, length=found_depth, status=status))
+            if truncated:
+                break
 
         truncated = truncated or result_truncated
         truncated = self._sort_and_cap_witnesses(results, stage.n, truncated)
@@ -3489,7 +3516,10 @@ class Executor:
             return Result(
                 shape="scalar", view=st.view, truncated=st.truncated,
                 partial=partial, unknown=unknown,
-                path_rows_examined=st.path_rows_examined, scalar=scalar)
+                path_rows_examined=st.path_rows_examined,
+                path_reconstruction_descents_examined=(
+                    st.path_reconstruction_descents_examined),
+                scalar=scalar)
         if st.shape == "path":
             if not st.limit_in_effect and len(st.paths) > DEFAULT_RESULT_CAP:
                 del st.paths[DEFAULT_RESULT_CAP:]
@@ -3498,7 +3528,10 @@ class Executor:
                 shape="path", view=st.view, truncated=st.truncated,
                 partial=any(w.status == "partial" for w in st.paths),
                 unknown=st.unknown,
-                path_rows_examined=st.path_rows_examined, paths=st.paths)
+                path_rows_examined=st.path_rows_examined,
+                path_reconstruction_descents_examined=(
+                    st.path_reconstruction_descents_examined),
+                paths=st.paths)
         if st.shape == "nodes":
             if st.view not in (SYMBOL_VIEW, ENTITY_VIEW):
                 self._materialize(st, ("id", "identity_key"))
@@ -3517,4 +3550,6 @@ class Executor:
             shape=st.shape, view=st.view, truncated=st.truncated,
             partial=st.partial, unknown=st.unknown,
             path_rows_examined=st.path_rows_examined,
+            path_reconstruction_descents_examined=(
+                st.path_reconstruction_descents_examined),
             fields=st.fields, rows=st.rows)
