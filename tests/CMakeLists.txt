@@ -27,6 +27,7 @@ set(CIDX_DEFAULT_TESTS
   workspace_context_test
   ast_pass_test
   ui_graph_view_test
+  ui_server_test
   application_services_test
   extraction_plan_test
   extraction_engine_test
