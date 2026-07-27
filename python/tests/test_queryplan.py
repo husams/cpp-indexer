@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from dataclasses import replace
 
 import pytest
@@ -1481,6 +1482,7 @@ def test_explain_reports_budgets_shape_and_input_relations(seeded):
     assert explained["execution_shape"] == "path"
     assert explained["budgets"]["traverse_node_budget"] == 10000
     assert explained["budgets"]["path_node_budget"] == 10000
+    assert explained["budgets"]["path_reconstruction_budget"] == 200000
     assert explained["budgets"]["default_result_cap"] == 1000
     assert {"relation": "symbol.calls", "completeness": "partial"} in \
         explained["input_relations"]
@@ -1867,6 +1869,59 @@ def test_path_reports_a_self_recursive_witness_when_the_target_is_the_start():
     assert witness.length == 1
     assert [step.node_id for step in witness.steps] == [s, s]
     assert not result.truncated
+
+
+def test_path_reconstruction_is_budget_bounded_when_every_walk_of_the_target_depth_is_non_simple():
+    # A layered DAG shaped exactly like the round-6 review finding: S -> n1,
+    # n1 -> L2 (k nodes), L2 -> L3 -> ... -> L11 fully connected consecutive
+    # layers (k nodes each), and every L11 node closing back to n1. n1 is
+    # also the target, so the ONLY depth-12 walks reaching it revisit n1
+    # (once at hop 1, again at hop 12) -- every one of them is non-simple,
+    # so `chains` is provably empty at this depth, but proving that empty
+    # pre-fix required enumerating all k^(depth-2) simple prefixes (k=5,
+    # depth=12 -> 5^10 ~ 9.77M DFS descents, ~6.14s measured pre-fix per
+    # the review) even though the raw BFS itself only ever reads a couple
+    # hundred edge rows -- nowhere near PATH_NODE_BUDGET. Reconstruction
+    # must bound its own DFS work (PATH_RECONSTRUCTION_BUDGET)
+    # independently of the row-read budget, or this call runs unbounded
+    # relative to genuine query cost.
+    branch = 5
+    layers = 10  # L2..L11
+    depth = 12
+    db = Storage(":memory:")
+    s = db.add_symbol(_make_sym("USR::Explode_S", "s"))
+    n1 = db.add_symbol(_make_sym("USR::Explode_N1", "n1"))
+    db.add_edge(s, n1, 1)
+
+    prev = [n1]
+    for layer in range(layers):
+        current = [
+            db.add_symbol(_make_sym(
+                f"USR::Explode_L{layer}_{i}", f"l{layer}_{i}"))
+            for i in range(branch)
+        ]
+        for p in prev:
+            for c in current:
+                db.add_edge(p, c, 1)
+        if layer == layers - 1:
+            for c in current:
+                db.add_edge(c, n1, 1)
+        prev = current
+
+    ex = Executor(db)
+    started = time.monotonic()
+    result = ex.run(
+        (start(symbol("USR::Explode_S"))
+         | path(start(symbol("USR::Explode_N1")), "calls", depth, depth)).plan)
+    elapsed = time.monotonic() - started
+    # Pre-fix, this same call measured ~0.22s at this depth in the review;
+    # 2s leaves generous headroom for slower CI hardware while still
+    # failing hard if the bound regresses to the seconds/minutes scale the
+    # review measured at deeper depths (6.14s at depth=12, unbounded
+    # growth beyond that).
+    assert elapsed < 2.0, f"elapsed={elapsed}"
+    assert result.paths == []
+    assert result.truncated
 
 
 def test_count_over_a_typed_node_stream_still_aggregates_partial_and_unknown_status():

@@ -1251,6 +1251,22 @@ def canonical_json(plan: Plan) -> str:
 # total node/type expansions across the whole stage.
 PATH_NODE_BUDGET = 10000
 
+# Separate execution budget for path()'s witness-chain reconstruction (the
+# DFS that inverts the predecessor DAG back into simple witnesses): total
+# DFS descents across the whole stage. Kept independent from
+# PATH_NODE_BUDGET (rather than sharing the same counter) because a single
+# BFS level can legitimately hold up to PATH_NODE_BUDGET rows/successors --
+# reconstructing that one level alone costs O(PATH_NODE_BUDGET) DFS visits,
+# which would immediately exhaust a shared counter the row read already
+# spent up to its own cap on. Kept well above PATH_NODE_BUDGET so
+# legitimate single- or few-level reconstructions (bounded by rows actually
+# read) are never mistaken for the combinatorial blowup this budget exists
+# to catch: a DAG shaped as fully-connected layers has few edges (linear
+# in PATH_NODE_BUDGET) but exponentially many root-to-target walks through
+# it, so DFS visits can explode long before the row budget notices
+# anything is wrong (docs/query-plan.md).
+PATH_RECONSTRUCTION_BUDGET = 200000
+
 
 @dataclass
 class PathStep:
@@ -1719,6 +1735,7 @@ class Executor:
                 "traverse_node_budget": TRAVERSE_NODE_BUDGET,
                 "enumerate_budget": ENUMERATE_BUDGET,
                 "path_node_budget": PATH_NODE_BUDGET,
+                "path_reconstruction_budget": PATH_RECONSTRUCTION_BUDGET,
                 "default_result_cap": DEFAULT_RESULT_CAP,
             },
             "input_relations": relations,
@@ -2091,6 +2108,11 @@ class Executor:
         starts = sorted(set(st.ids))
         results: list[PathWitness] = []
         budget_used = 0
+        # Independent of budget_used (which bounds raw BFS row reads): see
+        # PATH_RECONSTRUCTION_BUDGET for why chain reconstruction needs its
+        # own budget rather than sharing that counter. Cumulative across
+        # every start's search in this stage call, like budget_used.
+        reconstruction_budget_used = 0
         truncated = False
         result_truncated = False
         evidence_truncated = False  # capped per-hop sites: partial, but the
@@ -2138,6 +2160,17 @@ class Executor:
             # does not prove no path exists, so it must not be reported as
             # a complete "not found" (docs/query-plan.md).
             frontier_exhausted = False
+            # Set by enumerate_chains (below) once total reconstruction
+            # work -- DFS descents, charged against
+            # PATH_RECONSTRUCTION_BUDGET (independent of budget_used's
+            # PATH_NODE_BUDGET -- see that constant's comment) -- exceeds
+            # the budget. A depth whose reconstruction was cut off this
+            # way can neither be reported as a witness (it may be
+            # incomplete) nor as a proven "no witness at this depth" (the
+            # negative was never actually established), so it is treated
+            # like the row-budget-exceeded case: stop the whole search and
+            # report truncated.
+            reconstruction_budget_exceeded = False
 
             def reconstruct(depth: int) -> None:
                 # Invert the predecessor DAG up through `depth` (extending,
@@ -2163,10 +2196,34 @@ class Executor:
                     successors.append(level_successors)
 
                 chains.clear()
+                nonlocal reconstruction_budget_used
+                nonlocal reconstruction_budget_exceeded
+                reconstruction_budget_exceeded = False
                 chain = [start]
 
                 def enumerate_chains(at_depth: int) -> None:
-                    if len(chains) > DEFAULT_RESULT_CAP:
+                    nonlocal reconstruction_budget_used
+                    nonlocal reconstruction_budget_exceeded
+                    if (len(chains) > DEFAULT_RESULT_CAP
+                            or reconstruction_budget_exceeded):
+                        return
+                    # Every DFS descent is charged against
+                    # PATH_RECONSTRUCTION_BUDGET (independent of
+                    # budget_used's PATH_NODE_BUDGET -- see that
+                    # constant's comment): without this, a graph shaped so
+                    # every walk of a given depth is non-simple (so
+                    # `chains` stays empty and enumeration never gets to
+                    # early-exit on the result cap) forces full exploration
+                    # of every simple prefix -- a search space that grows
+                    # combinatorially with depth and branching factor and
+                    # can run unbounded while budget_used's SQL-row count
+                    # stays tiny (round-6 finding: 242s wall-clock / 336
+                    # rows examined at max_depth=16 on a 72-symbol
+                    # fixture). Charging here makes a dedicated budget
+                    # bound total reconstruction work, not just rows read.
+                    reconstruction_budget_used += 1
+                    if reconstruction_budget_used > PATH_RECONSTRUCTION_BUDGET:
+                        reconstruction_budget_exceeded = True
                         return
                     if at_depth == depth:
                         if chain[-1] in targets:
@@ -2181,7 +2238,8 @@ class Executor:
                         chain.append(child)
                         enumerate_chains(at_depth + 1)
                         chain.pop()
-                        if len(chains) > DEFAULT_RESULT_CAP:
+                        if (len(chains) > DEFAULT_RESULT_CAP
+                                or reconstruction_budget_exceeded):
                             break
 
                 enumerate_chains(0)
@@ -2234,7 +2292,26 @@ class Executor:
                     # non-simple walk reached the target first).
                     reconstruct(depth)
                     if chains:
+                        # Any chain already collected is a genuine,
+                        # fully-reconstructed simple witness (chains is
+                        # only ever appended to at the exact target leaf,
+                        # never partially) -- keep it even if the budget
+                        # ran out partway through exploring the rest of
+                        # this depth's search space, but mark the result
+                        # truncated since other witnesses at this depth
+                        # may have gone unexplored.
                         found_depth = depth
+                        if reconstruction_budget_exceeded:
+                            truncated = True
+                        break
+                    if reconstruction_budget_exceeded:
+                        # The reconstruction at this depth was cut off
+                        # before it could prove either a witness or its
+                        # absence -- treat it like the raw-row budget
+                        # being exceeded (above): abandon the search
+                        # entirely rather than present "no witness" as a
+                        # proven negative.
+                        truncated = True
                         break
                 frontier = level
                 depth += 1

@@ -94,6 +94,22 @@ using Cell = std::variant<std::nullptr_t, int64_t, std::string>;
 // reverse_type_use()): total node/type expansions across the whole stage.
 constexpr int64_t kPathNodeBudget = 10000;
 
+// Separate execution budget for path()'s witness-chain reconstruction (the
+// DFS that inverts the predecessor DAG back into simple witnesses): total
+// DFS descents across the whole stage. Kept independent from
+// kPathNodeBudget (rather than sharing the same counter) because a single
+// BFS level can legitimately hold up to kPathNodeBudget rows/successors
+// -- reconstructing that one level alone costs O(kPathNodeBudget) DFS
+// visits, which would immediately exhaust a shared counter that the row
+// read already spent up to its own cap on. Kept well above kPathNodeBudget
+// so that legitimate single- or few-level reconstructions (bounded by rows
+// actually read) are never mistaken for the combinatorial blowup this
+// budget exists to catch: a DAG shaped as fully-connected layers has few
+// edges (linear in kPathNodeBudget) but exponentially many root-to-target
+// walks through it, so DFS visits can explode long before the row budget
+// notices anything is wrong (docs/query-plan.md).
+constexpr int64_t kPathReconstructionBudget = 200000;
+
 // One hop of a witness path: the node reached and the typed label of the
 // relation/type-edge that reached it. `through` is empty for the start node.
 // `position`/`pack_index` carry the typed view's own natural-key slot

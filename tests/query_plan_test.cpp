@@ -17,6 +17,7 @@
 #include "doctest/doctest.h"
 
 #include <algorithm>
+#include <chrono>
 #include <concepts>
 #include <cstdlib>
 #include <filesystem>
@@ -2007,6 +2008,8 @@ TEST_CASE("query_plan: explain() reports budgets, shape, and input relations") {
   CHECK(rendered.find("\"execution_shape\": \"path\"") != std::string::npos);
   CHECK(rendered.find("\"traverse_node_budget\": 10000") != std::string::npos);
   CHECK(rendered.find("\"path_node_budget\": 10000") != std::string::npos);
+  CHECK(rendered.find("\"path_reconstruction_budget\": 200000") !=
+        std::string::npos);
   CHECK(rendered.find("\"default_result_cap\": 1000") != std::string::npos);
   CHECK(rendered.find("\"relation\": \"symbol.calls\"") != std::string::npos);
   CHECK(rendered.find("\"completeness\": \"partial\"") != std::string::npos);
@@ -2470,6 +2473,69 @@ TEST_CASE("query_plan: path() reports a self-recursive witness when the "
   CHECK(witness.steps[0].node_id == s);
   CHECK(witness.steps[1].node_id == s);
   CHECK_FALSE(result.truncated);
+}
+
+TEST_CASE("query_plan: path() reconstruction is budget-bounded when every "
+          "walk of the target depth is non-simple") {
+  // A layered DAG shaped exactly like the round-6 review finding: S -> n1,
+  // n1 -> L2 (k nodes), L2 -> L3 -> ... -> L13 fully connected consecutive
+  // layers (k nodes each), and every L13 node closing back to n1. n1 is
+  // also the target, so the ONLY depth-14 walks reaching it revisit n1
+  // (once at hop 1, again at hop 14) -- every one of them is non-simple,
+  // so `chains` is provably empty at this depth, but proving that empty
+  // pre-fix required enumerating all k^(depth-2) simple prefixes (k=5,
+  // depth=14 -> 5^12 ~ 244M DFS descents, ~9.7s measured pre-fix) even
+  // though the raw BFS itself only ever reads ~286 edge rows -- nowhere
+  // near kPathNodeBudget. Reconstruction must bound its own DFS work
+  // (kPathReconstructionBudget) independently of the row-read budget, or
+  // this call runs unbounded relative to genuine query cost.
+  constexpr int kBranch = 5;
+  constexpr int kLayers = 12; // L2..L13
+  constexpr int64_t kDepth = 14;
+  Storage db(":memory:");
+  const int64_t s = db.add_symbol(make_sym("USR::Explode_S", "s"));
+  const int64_t n1 = db.add_symbol(make_sym("USR::Explode_N1", "n1"));
+  db.add_edge(make_edge(s, n1, 1));
+
+  std::vector<int64_t> prev{n1};
+  std::vector<int64_t> first_layer;
+  for (int layer = 0; layer < kLayers; ++layer) {
+    std::vector<int64_t> current;
+    current.reserve(kBranch);
+    for (int i = 0; i < kBranch; ++i) {
+      current.push_back(db.add_symbol(make_sym(
+          "USR::Explode_L" + std::to_string(layer) + "_" + std::to_string(i),
+          "l" + std::to_string(layer) + "_" + std::to_string(i))));
+    }
+    for (const int64_t p : prev) {
+      for (const int64_t c : current) {
+        db.add_edge(make_edge(p, c, 1));
+      }
+    }
+    if (layer == kLayers - 1) {
+      for (const int64_t c : current) {
+        db.add_edge(make_edge(c, n1, 1));
+      }
+    }
+    prev = current;
+  }
+
+  QueryExecutor ex(db);
+  const auto started = std::chrono::steady_clock::now();
+  const auto result =
+      ex.run((start(symbol("USR::Explode_S")) |
+              path(start(symbol("USR::Explode_N1")), "calls", kDepth, kDepth))
+                 .plan());
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  const auto elapsed_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+  INFO("elapsed_ms=", elapsed_ms);
+  // Pre-fix, this same call measured ~9661ms; bounded reconstruction must
+  // stay far below that -- 2000ms leaves generous headroom for slower CI
+  // hardware while still failing hard if the bound regresses.
+  CHECK(elapsed_ms < 2000);
+  CHECK(result.paths.empty());
+  CHECK(result.truncated);
 }
 
 TEST_CASE("query_plan: count() over a typed node stream still aggregates "

@@ -2067,6 +2067,11 @@ private:
 
     std::vector<PathWitness> results;
     int64_t budget_used = 0;
+    // Independent of budget_used (which bounds raw BFS row reads): see
+    // kPathReconstructionBudget for why chain reconstruction needs its own
+    // budget rather than sharing that counter. Cumulative across every
+    // start's search in this stage call, like budget_used.
+    int64_t reconstruction_budget_used = 0;
     bool truncated = false;
     bool result_truncated = false;
     bool evidence_truncated = false; // capped per-hop sites: partial, but the
@@ -2124,6 +2129,16 @@ private:
       // no path exists, so it must not be reported as a complete "not
       // found" (docs/query-plan.md).
       bool frontier_exhausted = false;
+      // Set by `enumerate` (below) once total reconstruction work -- DFS
+      // descents, charged against kPathReconstructionBudget (independent
+      // of budget_used's kPathNodeBudget -- see that constant's comment)
+      // -- exceeds the budget. A depth whose reconstruction was cut off
+      // this way can neither be reported as a witness (it may be
+      // incomplete) nor as a proven "no witness at this depth" (the
+      // negative was never actually established), so it is treated like
+      // the row-budget-exceeded case: stop the whole search and report
+      // truncated.
+      bool reconstruction_budget_exceeded = false;
       // Invert the predecessor DAG up through `depth` (extending, never
       // rebuilding, the shared `successors` levels) and enumerate every
       // *simple* complete witness of exactly that length. Children are
@@ -2150,9 +2165,27 @@ private:
           }
         }
         chains.clear();
+        reconstruction_budget_exceeded = false;
         std::vector<int64_t> chain{start};
         const auto enumerate = [&](const auto &self, int64_t at_depth) -> void {
-          if (std::cmp_greater(chains.size(), kDefaultResultCap)) {
+          if (std::cmp_greater(chains.size(), kDefaultResultCap) ||
+              reconstruction_budget_exceeded) {
+            return;
+          }
+          // Every DFS descent is charged against kPathReconstructionBudget
+          // (independent of budget_used's SQL-row count -- see that
+          // constant's comment): without this, a graph shaped so every
+          // walk of a given depth is non-simple (so `chains` stays empty
+          // and enumeration never gets to early-exit on the result cap)
+          // forces full exploration of every simple prefix -- a search
+          // space that grows combinatorially with depth and branching
+          // factor and can run unbounded while `budget_used`'s SQL-row
+          // count stays tiny (round-6 finding: 242s wall-clock / 336 rows
+          // examined at max_depth=16 on a 72-symbol fixture). Charging here
+          // makes a dedicated budget bound total reconstruction work, not
+          // just rows read.
+          if (++reconstruction_budget_used > kPathReconstructionBudget) {
+            reconstruction_budget_exceeded = true;
             return;
           }
           if (std::cmp_equal(at_depth, depth)) {
@@ -2177,7 +2210,8 @@ private:
             chain.push_back(child);
             self(self, at_depth + 1);
             chain.pop_back();
-            if (std::cmp_greater(chains.size(), kDefaultResultCap)) {
+            if (std::cmp_greater(chains.size(), kDefaultResultCap) ||
+                reconstruction_budget_exceeded) {
               break;
             }
           }
@@ -2257,7 +2291,25 @@ private:
           // first).
           reconstruct(depth);
           if (!chains.empty()) {
+            // Any chain already collected is a genuine, fully-reconstructed
+            // simple witness (chains is only ever appended to at the exact
+            // target leaf, never partially) -- keep it even if the budget
+            // ran out partway through exploring the rest of this depth's
+            // search space, but mark the result truncated since other
+            // witnesses at this depth may have gone unexplored.
             found_depth = depth;
+            if (reconstruction_budget_exceeded) {
+              truncated = true;
+            }
+            break;
+          }
+          if (reconstruction_budget_exceeded) {
+            // The reconstruction at this depth was cut off before it could
+            // prove either a witness or its absence -- treat it like the
+            // raw-row budget being exceeded (above): abandon the search
+            // entirely rather than present "no witness" as a proven
+            // negative.
+            truncated = true;
             break;
           }
         }
@@ -4183,6 +4235,8 @@ json_out::Value Executor::explain(const Plan &plan) {
   budgets.emplace_back("traverse_node_budget", Value::of(kTraverseNodeBudget));
   budgets.emplace_back("enumerate_budget", Value::of(kEnumerateBudget));
   budgets.emplace_back("path_node_budget", Value::of(kPathNodeBudget));
+  budgets.emplace_back("path_reconstruction_budget",
+                       Value::of(kPathReconstructionBudget));
   budgets.emplace_back("default_result_cap", Value::of(kDefaultResultCap));
   o.emplace_back("budgets", Value::obj(std::move(budgets)));
 

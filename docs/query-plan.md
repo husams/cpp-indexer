@@ -282,10 +282,26 @@ Step    := { "id": <int>, "domain": "symbol" | "entity" | "type" |
   the stream was mutated) and, when `top_n > 0`, keeps only the first
   `top_n` witnesses — the single documented stable tie-break for `rank()`/
   `shortest`.
-- Budgets: the witness search shares the `path_node_budget` (10 000
+- Budgets: the raw BFS/climb itself shares the `path_node_budget` (10 000
   cumulative node/type expansions) independent of the traversal/enumerate
-  budgets; the witness count itself is capped by the default result cap.
-  Either budget sets `truncated: true`, never a silently complete result.
+  budgets. `path()`'s witness-chain *reconstruction* (inverting the
+  predecessor DAG at a candidate depth back into simple witnesses) is
+  bounded separately by `path_reconstruction_budget` (200 000 cumulative
+  DFS descents across the whole stage call): a single BFS level can
+  legitimately hold up to `path_node_budget` rows, and reconstructing that
+  one level alone already costs on that order, so reconstruction cannot
+  share `path_node_budget`'s counter without falsely truncating a
+  legitimate wide-but-shallow witness search. The separate, larger budget
+  exists because a DAG shaped as fully-connected consecutive layers has
+  few edges (bounded by `path_node_budget`) but exponentially many
+  root-to-target walks through it — proving no *simple* witness exists at
+  a given depth can require enumerating all of them even though the raw
+  row-read budget never comes close to firing. The witness count itself is
+  capped by the default result cap. Any of these three budgets sets
+  `truncated: true`, never a silently complete result; a reconstruction cut
+  off mid-depth keeps any witnesses already confirmed before the budget
+  ran out rather than discarding proven results, but the search does not
+  continue past that point.
 
 `source_fingerprint` is a SHA-1 digest of a deterministic, ordered manifest of
 indexed file identities, current content MD5s, and indexed flags. The
@@ -304,7 +320,8 @@ row-producing stage:
   "execution_shape": "nodes" | "rows" | "scalar" | "path",
   "budgets": {
     "traverse_node_budget": 10000, "enumerate_budget": 10000,
-    "path_node_budget": 10000, "default_result_cap": 1000
+    "path_node_budget": 10000, "path_reconstruction_budget": 200000,
+    "default_result_cap": 1000
   },
   "input_relations": [ {"relation": <qualified name>,
                         "completeness": "complete" | "partial"} ... ],
