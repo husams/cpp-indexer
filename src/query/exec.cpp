@@ -621,6 +621,10 @@ struct Stream {
   bool truncated = false;
   bool partial = false;
   bool unknown = false;
+  // Completeness inherited from relations inspected by a witness-producing
+  // stage, independent of whether that stage emitted a witness.  This must
+  // survive an empty stream and terminal count().
+  bool source_partial = false;
   // Set once by path_stage()/reverse_type_use_stage() and never cleared: a
   // count() terminal stage uses this (not shape or emptiness -- an empty
   // node/row stream is also empty) to tell a witness-aggregating scalar
@@ -2067,12 +2071,16 @@ private:
     // search over a partial relation is never presented as a proven-complete
     // negative (empty is not evidence of completeness when the relation
     // itself is only partially captured).
-    st.partial = st.partial || rel->completeness != "complete";
+    st.source_partial = st.source_partial || rel->completeness != "complete";
 
     Stream target_stream = run_plan(*stage.operand);
     const std::set<int64_t> targets(target_stream.ids.begin(),
                                     target_stream.ids.end());
     st.truncated = st.truncated || target_stream.truncated;
+    st.source_partial = st.source_partial || target_stream.source_partial ||
+                        target_stream.partial;
+    st.partial = st.partial || target_stream.partial;
+    st.unknown = st.unknown || target_stream.unknown;
 
     std::vector<int64_t> starts = st.ids;
     std::ranges::sort(starts);
@@ -2613,7 +2621,7 @@ private:
     // owner table matched. Set the stream-level flag unconditionally,
     // independent of whether any owner is actually found, so an empty
     // result here is never presented as a proven-complete negative.
-    st.partial = true;
+    st.source_partial = true;
     std::vector<int64_t> seeds;
     if (st.view == View::Type) {
       for (const auto &key : st.keys) {
@@ -3896,12 +3904,13 @@ public:
       // routed into the witness-status branch.
       if (st.path_stream) {
         res.truncated = st.truncated;
-        // `st.partial` carries the stage's own catalogued-relation baseline
+        // `st.source_partial` carries the stage's own catalogued-relation
+        // baseline
         // (set unconditionally by path_stage()/reverse_type_use_stage(),
         // independent of whether any witness was found) -- OR it with the
         // per-witness fold so an empty witness set over a partial relation
         // still reports partial rather than a proven-complete negative.
-        res.partial = st.partial ||
+        res.partial = st.source_partial || st.partial ||
                       std::ranges::any_of(st.paths, [](const PathWitness &w) {
                         return w.status == "partial";
                       });
@@ -3932,13 +3941,13 @@ public:
       }
       res.shape = Shape::Path;
       res.truncated = st.truncated;
-      // See the Scalar/path_stream branch above: `st.partial` is the
+      // See the Scalar/path_stream branch above: `st.source_partial` is the
       // stage's own catalogued-relation baseline and must be folded in even
       // when `st.paths` is empty.
-      res.partial =
-          st.partial || std::ranges::any_of(st.paths, [](const PathWitness &w) {
-            return w.status == "partial";
-          });
+      res.partial = st.source_partial || st.partial ||
+                    std::ranges::any_of(st.paths, [](const PathWitness &w) {
+                      return w.status == "partial";
+                    });
       res.unknown = st.unknown;
       res.paths = std::move(st.paths);
       return res;

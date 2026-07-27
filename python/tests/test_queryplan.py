@@ -1363,6 +1363,16 @@ def test_path_reports_partial_when_a_fully_exhausted_search_proves_no_witness_ex
     assert result.paths == []
     assert not result.truncated
     assert result.partial
+    result.index = replace(result.index, freshness="current")
+    assert result.to_envelope_dict()["status"] == "partial"
+
+    counted = ex.run(
+        (start(symbol("USR::A"))
+         | path(start(symbol("USR::D")), "calls", 1, 8)
+         | count()).plan)
+    assert counted.shape == "scalar"
+    assert counted.scalar == 0
+    assert counted.partial
 
 
 def test_path_does_not_report_partial_for_an_empty_result_over_a_catalogued_complete_relation(  # noqa: E501
@@ -2343,3 +2353,11 @@ def test_reverse_type_use_reports_partial_when_a_fully_exhausted_search_proves_n
     assert result.paths == []
     assert not result.truncated
     assert result.partial
+
+    counted = ex.run(
+        (start(codebase()) | view("type") | nodes()
+         | where(eq("type_key", "b:lonely"))
+         | reverse_type_use(4) | count()).plan)
+    assert counted.shape == "scalar"
+    assert counted.scalar == 0
+    assert counted.partial

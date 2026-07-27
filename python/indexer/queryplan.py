@@ -1673,6 +1673,10 @@ class _Stream:
         self.truncated = False
         self.partial = False
         self.unknown = False
+        # Completeness inherited from relations inspected by a
+        # witness-producing stage, independent of whether that stage emitted
+        # a witness. This must survive an empty stream and terminal count().
+        self.source_partial = False
         # Set once by _path_stage()/_reverse_type_use_stage() and never
         # cleared: a count() terminal stage uses this (not shape or
         # emptiness -- an empty node/row stream is also empty) to tell a
@@ -2113,11 +2117,15 @@ class Executor:
         # a partial relation is never presented as a proven-complete
         # negative (empty is not evidence of completeness when the relation
         # itself is only partially captured).
-        st.partial = st.partial or rel_completeness != "complete"
+        st.source_partial = st.source_partial or rel_completeness != "complete"
 
         target_stream = self._run_plan(stage.operand)  # type: ignore[arg-type]
         targets = set(target_stream.ids)
         st.truncated = st.truncated or target_stream.truncated
+        st.source_partial = (st.source_partial or target_stream.source_partial
+                             or target_stream.partial)
+        st.partial = st.partial or target_stream.partial
+        st.unknown = st.unknown or target_stream.unknown
 
         starts = sorted(set(st.ids))
         results: list[PathWitness] = []
@@ -2470,7 +2478,7 @@ class Executor:
         # unconditionally, independent of whether any owner is actually
         # found, so an empty result here is never presented as a
         # proven-complete negative.
-        st.partial = True
+        st.source_partial = True
         seeds: list[int] = []
         if st.view == "type":
             seeds = [key[0] for key in st.keys]
@@ -3523,13 +3531,14 @@ class Executor:
             # `not st.paths and not st.rows` and must not be routed into the
             # witness-status branch.
             if st.path_stream:
-                # `st.partial` carries the stage's own catalogued-relation
-                # baseline (set unconditionally by _path_stage()/
+                # `st.source_partial` carries the stage's own
+                # catalogued-relation baseline (set unconditionally by
+                # _path_stage()/
                 # _reverse_type_use_stage(), independent of whether any
                 # witness was found) -- OR it with the per-witness fold so
                 # an empty witness set over a partial relation still
                 # reports partial rather than a proven-complete negative.
-                partial = st.partial or any(
+                partial = st.source_partial or st.partial or any(
                     w.status == "partial" for w in st.paths)
                 unknown = st.unknown
             else:
@@ -3550,12 +3559,12 @@ class Executor:
             if not st.limit_in_effect and len(st.paths) > DEFAULT_RESULT_CAP:
                 del st.paths[DEFAULT_RESULT_CAP:]
                 st.truncated = True
-            # See the scalar/path_stream branch above: `st.partial` is the
+            # See the scalar/path_stream branch above: `st.source_partial` is the
             # stage's own catalogued-relation baseline and must be folded
             # in even when `st.paths` is empty.
             return Result(
                 shape="path", view=st.view, truncated=st.truncated,
-                partial=st.partial or any(
+                partial=st.source_partial or st.partial or any(
                     w.status == "partial" for w in st.paths),
                 unknown=st.unknown,
                 path_rows_examined=st.path_rows_examined,

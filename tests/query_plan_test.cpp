@@ -1873,12 +1873,22 @@ TEST_CASE("query_plan: path() reports partial when a fully exhausted search "
   // negative: AC4, empty-plus-partial must not surface as complete.
   Seeded s;
   QueryExecutor ex(s.db);
-  const auto result = ex.run(
+  auto result = ex.run(
       (start(symbol("USR::A")) | path(start(symbol("USR::D")), "calls", 1, 8))
           .plan());
   CHECK(result.paths.empty());
   CHECK_FALSE(result.truncated);
   CHECK(result.partial);
+  result.index.freshness = "current";
+  CHECK(result.to_envelope().status == cidx::protocol::Status::Partial);
+
+  const auto counted =
+      ex.run((start(symbol("USR::A")) |
+              path(start(symbol("USR::D")), "calls", 1, 8) | count())
+                 .plan());
+  CHECK(counted.shape == Shape::Scalar);
+  CHECK(counted.scalar == 0);
+  CHECK(counted.partial);
 }
 
 TEST_CASE("query_plan: path() does not report partial for an empty result "
@@ -3004,4 +3014,12 @@ TEST_CASE("query_plan: reverse_type_use() reports partial when a fully "
   CHECK(result.paths.empty());
   CHECK_FALSE(result.truncated);
   CHECK(result.partial);
+
+  const auto counted =
+      ex.run((start(codebase()) | view(View::Type) | nodes() |
+              where(eq("type_key", "b:lonely")) | reverse_type_use(4) | count())
+                 .plan());
+  CHECK(counted.shape == Shape::Scalar);
+  CHECK(counted.scalar == 0);
+  CHECK(counted.partial);
 }
