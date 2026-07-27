@@ -156,28 +156,32 @@ class BudgetedStatementFactPorts final : public StatementFactPorts {
 public:
   BudgetedStatementFactPorts(StatementFactPorts &ports, PassMetrics &metrics);
 
-  auto lookup_symbol_id(const std::string &, const std::optional<std::string> &)
+  auto lookup_symbol_id(const std::string &usr,
+                        const std::optional<std::string> &source)
       -> std::optional<std::int64_t> override;
-  auto mint_symbol(const MintRequest &) -> std::int64_t override;
-  auto file_id_for_path(const std::string &)
+  auto mint_symbol(const MintRequest &request) -> std::int64_t override;
+  auto file_id_for_path(const std::string &path)
       -> std::optional<std::int64_t> override;
-  auto type_arg_candidates(const std::string &, bool)
+  auto type_arg_candidates(const std::string &name, bool qualified)
       -> std::vector<TypeArgCandidate> override;
-  auto symbol_ids_by_qual_name_kind(const std::string &, const std::string &)
+  auto symbol_ids_by_qual_name_kind(const std::string &qual_name,
+                                    const std::string &kind_name)
       -> std::vector<std::int64_t> override;
-  auto add_edge(const EdgeRecord &) -> std::int64_t override;
-  auto ensure_edge(const EdgeRecord &) -> std::int64_t override;
-  void add_edge_site(const EdgeSiteRecord &) override;
-  void add_call_arg(const CallArgRecord &) override;
-  void add_template_param(const TemplateParamRecord &) override;
-  void add_template_arg(const TemplateArgRecord &) override;
-  auto intern_type_node(const TypeNodeRecord &) -> std::int64_t override;
-  void add_type_edge(std::int64_t, std::int64_t, std::int64_t,
-                     std::int64_t) override;
-  void replace_parameters(std::int64_t,
-                          const std::vector<ParameterRecord> &) override;
-  void add_symbol_type(std::int64_t, std::int64_t, std::int64_t) override;
-  void emit(const EvidenceRecord &) override;
+  auto add_edge(const EdgeRecord &edge) -> std::int64_t override;
+  auto ensure_edge(const EdgeRecord &edge) -> std::int64_t override;
+  void add_edge_site(const EdgeSiteRecord &site) override;
+  void add_call_arg(const CallArgRecord &arg) override;
+  void add_template_param(const TemplateParamRecord &param) override;
+  void add_template_arg(const TemplateArgRecord &arg) override;
+  auto intern_type_node(const TypeNodeRecord &node) -> std::int64_t override;
+  void add_type_edge(std::int64_t src_id, std::int64_t kind,
+                     std::int64_t position, std::int64_t dst_id) override;
+  void
+  replace_parameters(std::int64_t owner_id,
+                     const std::vector<ParameterRecord> &parameters) override;
+  void add_symbol_type(std::int64_t symbol_id, std::int64_t kind,
+                       std::int64_t type_id) override;
+  void emit(const EvidenceRecord &evidence) override;
 
 private:
   StatementFactPorts &ports_;
@@ -189,27 +193,31 @@ public:
   BudgetedDeclarationPassPorts(DeclarationPassPorts &ports,
                                PassMetrics &metrics);
 
-  auto lookup_symbol_id(const std::string &, const std::optional<std::string> &)
+  auto lookup_symbol_id(const std::string &usr,
+                        const std::optional<std::string> &source)
       -> std::optional<std::int64_t> override;
-  auto mint_symbol(const MintRequest &) -> std::int64_t override;
-  auto file_id_for_path(const std::string &)
+  auto mint_symbol(const MintRequest &request) -> std::int64_t override;
+  auto file_id_for_path(const std::string &path)
       -> std::optional<std::int64_t> override;
-  auto type_arg_candidates(const std::string &, bool)
+  auto type_arg_candidates(const std::string &name, bool qualified)
       -> std::vector<TypeArgCandidate> override;
-  auto symbol_ids_by_qual_name_kind(const std::string &, const std::string &)
+  auto symbol_ids_by_qual_name_kind(const std::string &qual_name,
+                                    const std::string &kind_name)
       -> std::vector<std::int64_t> override;
-  auto add_edge(const EdgeRecord &) -> std::int64_t override;
-  auto ensure_edge(const EdgeRecord &) -> std::int64_t override;
-  void add_edge_site(const EdgeSiteRecord &) override;
-  void add_call_arg(const CallArgRecord &) override;
-  void add_template_param(const TemplateParamRecord &) override;
-  void add_template_arg(const TemplateArgRecord &) override;
-  auto intern_type_node(const TypeNodeRecord &) -> std::int64_t override;
-  void add_type_edge(std::int64_t, std::int64_t, std::int64_t,
-                     std::int64_t) override;
-  void replace_parameters(std::int64_t,
-                          const std::vector<ParameterRecord> &) override;
-  void add_symbol_type(std::int64_t, std::int64_t, std::int64_t) override;
+  auto add_edge(const EdgeRecord &edge) -> std::int64_t override;
+  auto ensure_edge(const EdgeRecord &edge) -> std::int64_t override;
+  void add_edge_site(const EdgeSiteRecord &site) override;
+  void add_call_arg(const CallArgRecord &arg) override;
+  void add_template_param(const TemplateParamRecord &param) override;
+  void add_template_arg(const TemplateArgRecord &arg) override;
+  auto intern_type_node(const TypeNodeRecord &node) -> std::int64_t override;
+  void add_type_edge(std::int64_t src_id, std::int64_t kind,
+                     std::int64_t position, std::int64_t dst_id) override;
+  void
+  replace_parameters(std::int64_t owner_id,
+                     const std::vector<ParameterRecord> &parameters) override;
+  void add_symbol_type(std::int64_t symbol_id, std::int64_t kind,
+                       std::int64_t type_id) override;
 
 private:
   DeclarationPassPorts &ports_;
@@ -233,21 +241,23 @@ class BudgetedNamespacePassPorts final : public NamespacePassPorts {
 public:
   BudgetedNamespacePassPorts(NamespacePassPorts &ports, PassMetrics &metrics);
 
-  auto lookup_symbol_id(const std::string &, const std::optional<std::string> &)
+  auto lookup_symbol_id(const std::string &usr,
+                        const std::optional<std::string> &source)
       -> std::optional<std::int64_t> override;
-  auto mint_symbol(const MintRequest &) -> std::int64_t override;
-  auto file_id_for_path(const std::string &)
+  auto mint_symbol(const MintRequest &request) -> std::int64_t override;
+  auto file_id_for_path(const std::string &path)
       -> std::optional<std::int64_t> override;
-  auto type_arg_candidates(const std::string &, bool)
+  auto type_arg_candidates(const std::string &name, bool qualified)
       -> std::vector<TypeArgCandidate> override;
-  auto symbol_ids_by_qual_name_kind(const std::string &, const std::string &)
+  auto symbol_ids_by_qual_name_kind(const std::string &qual_name,
+                                    const std::string &kind_name)
       -> std::vector<std::int64_t> override;
-  auto add_edge(const EdgeRecord &) -> std::int64_t override;
-  auto ensure_edge(const EdgeRecord &) -> std::int64_t override;
-  void add_edge_site(const EdgeSiteRecord &) override;
-  void add_call_arg(const CallArgRecord &) override;
-  void add_template_param(const TemplateParamRecord &) override;
-  void add_template_arg(const TemplateArgRecord &) override;
+  auto add_edge(const EdgeRecord &edge) -> std::int64_t override;
+  auto ensure_edge(const EdgeRecord &edge) -> std::int64_t override;
+  void add_edge_site(const EdgeSiteRecord &site) override;
+  void add_call_arg(const CallArgRecord &arg) override;
+  void add_template_param(const TemplateParamRecord &param) override;
+  void add_template_arg(const TemplateArgRecord &arg) override;
 
 private:
   NamespacePassPorts &ports_;
@@ -259,13 +269,16 @@ public:
   BudgetedDefinitionScopeEmitter(DefinitionScopeEmitter &definitions,
                                  PassMetrics &metrics);
 
-  auto get_or_create_definition(std::int64_t, std::int64_t, std::int64_t,
-                                std::int64_t, std::int64_t, std::int64_t,
-                                const std::optional<std::string> &)
+  auto get_or_create_definition(std::int64_t symbol_id, std::int64_t file_id,
+                                std::int64_t line, std::int64_t col,
+                                std::int64_t end_line, std::int64_t end_col,
+                                const std::optional<std::string> &init_text)
       -> std::int64_t override;
-  void add_def_edge(std::int64_t, std::int64_t, std::int64_t) override;
-  auto body_edge_count(std::int64_t) -> std::size_t override;
-  void copy_body_edges_to_def_edge(std::int64_t, std::int64_t) override;
+  void add_def_edge(std::int64_t definition_id, std::int64_t destination_id,
+                    std::int64_t kind) override;
+  auto body_edge_count(std::int64_t symbol_id) -> std::size_t override;
+  void copy_body_edges_to_def_edge(std::int64_t definition_id,
+                                   std::int64_t symbol_id) override;
 
 private:
   DefinitionScopeEmitter &definitions_;
