@@ -7,8 +7,8 @@
 #include "graph/query.hpp"
 
 #include "catalogs/generated_catalog.hpp"
-#include "util/version.hpp"
 #include "storage/storage.hpp"
+#include "util/version.hpp"
 
 #include <algorithm>
 #include <compare>
@@ -92,6 +92,22 @@ SqliteQueryReadAdapter::edge_sites_for(const std::vector<int64_t> &edge_ids) {
 std::vector<EdgeSiteRow> SqliteQueryReadAdapter::edge_sites_one(int64_t edge_id,
                                                                 int limit) {
   return service_->edge_sites_one(edge_id, limit);
+}
+
+std::vector<EdgeSiteRow>
+SqliteQueryReadAdapter::edge_sites_page(int64_t edge_id, int offset,
+                                        int limit) {
+  return service_->edge_sites_page(edge_id, offset, limit);
+}
+
+bool SqliteQueryReadAdapter::edge_has_conditional_site(int64_t edge_id) {
+  return service_->edge_has_conditional_site(edge_id);
+}
+
+std::optional<int64_t> SqliteQueryReadAdapter::edge_id_for(int64_t src_id,
+                                                           int64_t dst_id,
+                                                           int64_t kind) {
+  return service_->edge_id_for(src_id, dst_id, kind);
 }
 
 std::vector<Symbol> SqliteQueryReadAdapter::redefined_symbols(int limit) {
@@ -1417,8 +1433,7 @@ private:
       for (const auto &key : st.keys) {
         add_ids("SELECT ?", {SqlValue(key.a)});
       }
-    } else if (inbound && st.view == View::Symbol &&
-               rel.name == "of_type") {
+    } else if (inbound && st.view == View::Symbol && rel.name == "of_type") {
       for (const auto owner : st.ids) {
         add_keys(
             View::SignatureSlot,
@@ -2486,10 +2501,10 @@ private:
                 const std::optional<int64_t> &type_id,
                 const std::optional<int64_t> &declared,
                 const std::optional<int64_t> &adjusted,
-            const std::optional<std::string> &default_text,
-            const std::optional<std::string> &default_origin,
-            const std::optional<std::string> &reference,
-            const graph::GraphQuery::SlotFacts &facts) {
+                const std::optional<std::string> &default_text,
+                const std::optional<std::string> &default_origin,
+                const std::optional<std::string> &reference,
+                const graph::GraphQuery::SlotFacts &facts) {
               for (const auto &field : fields) {
                 if (field == "id") {
                   cells.emplace_back(logical_row_id(st.view, key));
@@ -2563,9 +2578,9 @@ private:
           const auto adjusted = int_at(query, 3);
           const auto facts = graph.slot_facts_for_ids(
               declared ? declared : type_id, adjusted ? adjusted : type_id);
-          push_slot("parameter", text_at(query, 0), type_id,
-                    declared, adjusted, text_at(query, 4), text_at(query, 5),
-                    text_at(query, 6), facts);
+          push_slot("parameter", text_at(query, 0), type_id, declared, adjusted,
+                    text_at(query, 4), text_at(query, 5), text_at(query, 6),
+                    facts);
         } else if (key.tag == 3) {
           auto query = read_.read_db().prepare(
               "SELECT name,type_id,default_txt,default_type_id FROM "

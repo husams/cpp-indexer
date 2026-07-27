@@ -11,12 +11,17 @@
 #include <functional>
 #include <ostream>
 #include <string>
+#include <string_view>
 
 #include "cli/args.hpp"
 #include "util/logger.hpp"
 
 namespace cidx::ast {
 struct IndexOneOutcome;
+}
+
+namespace cidx::ui {
+struct GraphViewRequest;
 }
 
 namespace cidx::cli {
@@ -83,6 +88,8 @@ int cmd_analyze(const ParsedArgs &args, Context &ctx);
 int cmd_ui_export(const ParsedArgs &args, Context &ctx);
 int cmd_ui_open(const ParsedArgs &args, Context &ctx);
 int cmd_ui_status(const ParsedArgs &args, Context &ctx);
+ui::GraphViewRequest parse_live_graph_request(const ui::GraphViewRequest &base,
+                                              std::string_view target);
 
 // Graph query commands (cidx graph callers|callees|refs|neighbors|walk|path|
 //                            hierarchy|dispatch)
