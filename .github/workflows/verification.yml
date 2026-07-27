@@ -70,7 +70,11 @@ jobs:
             "https://github.com/souffle-lang/souffle/releases/download/${SOUFFLE_VERSION}/x86_64-ubuntu-2404-souffle-${SOUFFLE_VERSION}-Linux.deb" \
             --output "$souffle_deb"
           echo "${SOUFFLE_DEB_SHA512}  ${souffle_deb}" | sha512sum --check
-          sudo dpkg --install "$souffle_deb"
+          if [ "$(id -u)" -eq 0 ]; then
+            dpkg --install "$souffle_deb"
+          else
+            sudo dpkg --install "$souffle_deb"
+          fi
           souffle_path="$(command -v souffle)"
           test -x "$souffle_path"
           souffle --version 2>&1 | tee /tmp/souffle-version.txt
