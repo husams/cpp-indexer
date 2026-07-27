@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cidx.dev/spec/contracts/extraction-plan.schema.json",
+  "title": "CIDX ExtractionPlan (HSE-64)",
+  "description": "Canonical JSON produced/consumed by cidx::extract::canonical_json / parse_plan_json (docs/extraction-plan.md).",
+  "type": "object",
+  "required": ["schema_version", "plan_id", "plan_version", "catalog_versions", "rules"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"type": "integer", "const": 1},
+    "plan_id": {"type": "string", "minLength": 1},
+    "plan_version": {"type": "integer", "minimum": 1},
+    "catalog_versions": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+    "rules": {"type": "array", "items": {"$ref": "#/$defs/rule"}}
+  },
+  "$defs": {
+    "endpointDomain": {"enum": ["declaration", "expression", "type", "custom_node"]},
+    "identityKind": {"enum": ["usr", "source_anchor", "owner_position", "type_key", "composed"]},
+    "identity": {
+      "type": "object",
+      "required": ["kind", "components"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"$ref": "#/$defs/identityKind"},
+        "components": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "binding": {
+      "type": "object",
+      "required": ["name", "domain"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "domain": {"$ref": "#/$defs/endpointDomain"}
+      }
+    },
+    "emitNode": {
+      "type": "object",
+      "required": ["namespace", "node_kind", "binding", "identity"],
+      "additionalProperties": false,
+      "properties": {
+        "namespace": {"type": "string", "minLength": 1},
+        "node_kind": {"type": "string", "minLength": 1},
+        "binding": {"type": "string", "minLength": 1},
+        "identity": {"$ref": "#/$defs/identity"}
+      }
+    },
+    "emitRelation": {
+      "type": "object",
+      "required": ["namespace", "relation_kind", "from_binding", "to_binding"],
+      "additionalProperties": false,
+      "properties": {
+        "namespace": {"type": "string", "minLength": 1},
+        "relation_kind": {"type": "string", "minLength": 1},
+        "from_binding": {"type": "string", "minLength": 1},
+        "to_binding": {"type": "string", "minLength": 1},
+        "with_evidence": {"type": "boolean"}
+      }
+    },
+    "emitAttribute": {
+      "type": "object",
+      "required": ["namespace", "attribute_name", "binding", "ast_property"],
+      "additionalProperties": false,
+      "properties": {
+        "namespace": {"type": "string", "minLength": 1},
+        "attribute_name": {"type": "string", "minLength": 1},
+        "binding": {"type": "string", "minLength": 1},
+        "ast_property": {"type": "string", "minLength": 1}
+      }
+    },
+    "emitUnknown": {
+      "type": "object",
+      "required": ["namespace", "reason_code", "binding"],
+      "additionalProperties": false,
+      "properties": {
+        "namespace": {"type": "string", "minLength": 1},
+        "reason_code": {"type": "string", "minLength": 1},
+        "binding": {"type": "string", "minLength": 1}
+      }
+    },
+    "emitOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "maxProperties": 1,
+      "properties": {
+        "node": {"$ref": "#/$defs/emitNode"},
+        "relation": {"$ref": "#/$defs/emitRelation"},
+        "attribute": {"$ref": "#/$defs/emitAttribute"},
+        "unknown": {"$ref": "#/$defs/emitUnknown"}
+      }
+    },
+    "budget": {
+      "type": "object",
+      "required": ["max_matches", "max_emitted_facts", "max_visited_nodes", "declared"],
+      "additionalProperties": false,
+      "properties": {
+        "max_matches": {"type": "integer"},
+        "max_emitted_facts": {"type": "integer"},
+        "max_visited_nodes": {"type": "integer"},
+        "declared": {"type": "boolean", "const": true}
+      }
+    },
+    "rule": {
+      "type": "object",
+      "required": [
+        "id", "version", "matcher_expression", "bindings", "emits", "scope",
+        "traversal", "completeness", "budget", "producer_package", "producer_version"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "version": {"type": "integer", "minimum": 1},
+        "matcher_expression": {"type": "string", "minLength": 1},
+        "bindings": {"type": "array", "items": {"$ref": "#/$defs/binding"}},
+        "emits": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/emitOperation"}},
+        "scope": {"enum": ["main_file", "translation_unit", "workspace"]},
+        "traversal": {"enum": ["as_is", "ignore_unless_spelled"]},
+        "completeness": {"enum": ["complete", "partial", "unknown_capable"]},
+        "budget": {"$ref": "#/$defs/budget"},
+        "producer_package": {"type": "string", "minLength": 1},
+        "producer_version": {"type": "integer", "minimum": 1}
+      }
+    }
+  }
+}
