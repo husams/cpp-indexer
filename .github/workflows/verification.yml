@@ -469,8 +469,11 @@ jobs:
         # helper's bootstrap is fail-closed in check-protected-review.sh: it
         # accepts only a current-head approval from a reviewer other than the
         # PR author, never a self-approval or a base CODEOWNER row that cannot
-        # yet describe the new checker. The helper still hard-fails for an
-        # unresolved base commit and writes only outside the checkout.
+        # yet describe the new checker. Because both the helper and checker
+        # are head-controlled when first introduced, this bootstrap is not an
+        # immutable self-protection boundary; external enforcement and a real
+        # independent reviewer remain required. The helper still hard-fails
+        # for an unresolved base commit and writes only outside the checkout.
         run: |
           result="$(spec/tla/tools/extract-trusted-checker.sh \
             "${{ github.event.pull_request.base.sha }}" \
@@ -523,7 +526,7 @@ jobs:
             | tee /etc/apt/sources.list.d/llvm-22.list >/dev/null
           apt-get update
           apt-get install \
-            --no-install-recommends -y gcc-13 g++-13 \
+            --no-install-recommends -y gcc-13 g++-13 g++ zlib1g-dev \
             clang-22 clang-tools-22 cmake mcpp libclang-22-dev \
             libclang-common-22-dev libclang-cpp22 libsqlite3-dev \
             llvm-22 llvm-22-dev ninja-build

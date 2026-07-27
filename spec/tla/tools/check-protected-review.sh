@@ -304,7 +304,9 @@ PY
 # only accepted attestation is a current-head APPROVED review by a real
 # reviewer other than the PR author. This preserves the fail-closed property:
 # the author cannot self-approve, and an absent independent reviewer remains a
-# visible CI failure until repository administration supplies one.
+# visible CI failure until repository administration supplies one. It is not
+# an immutable self-protection boundary: the first-introduction checker and
+# extractor are both head-controlled until external enforcement accepts them.
 if [[ "$BOOTSTRAP" == "true" ]]; then
   if ! curl --fail --location --silent --show-error \
     --header "Authorization: Bearer $GITHUB_TOKEN" \

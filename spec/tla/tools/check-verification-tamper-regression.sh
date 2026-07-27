@@ -388,8 +388,10 @@ if "CIDX_CHECK_PROOFS_SH: ${{ runner.temp }}/check-proofs.sh" not in proof_bindi
     )
 
 # The protected-review checker uses the shared extractor too. Its
-# first-introduction mode is safe only because the extracted checker requires
-# an independent approval on the current head before accepting bootstrap.
+# first-introduction mode remains fail-closed against self-approval, but is
+# not an immutable self-protection boundary while both new files are
+# head-controlled; external enforcement is required before this can be
+# treated as a complete introduction gate.
 protected_review_marker = (
     f"extract-trusted-checker.sh \\\n            \"${{{{ github.event.pull_request.base.sha }}}}\" \\\n            spec/tla/tools/check-protected-review.sh \\\n"
 )

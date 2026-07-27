@@ -619,8 +619,7 @@ public:
   // Stable, human-readable reasons for stale or unavailable fact sets.
   std::string transform_explain(const std::string &fact_set = {});
   // Named readiness contract for query and proof clients.
-  TransformFactSetStatus transform_fact_set_status(
-      const std::string &fact_set);
+  TransformFactSetStatus transform_fact_set_status(const std::string &fact_set);
   void mark_transform_pipeline_pending(const std::string &reason);
   [[nodiscard]] const std::vector<TransformRun> &transform_runs() const {
     return last_transform_runs_;
@@ -725,6 +724,28 @@ public:
 
   // A8: single-edge sites with LIMIT (query.py:884-906)
   std::vector<EdgeSiteRow> edge_sites_one(int64_t edge_id, int limit);
+
+  // HSE-92 round 3: bounded, delivery-order-correct (path, line, col) page
+  // over one edge's sites -- unlike edge_sites_one(), which orders by raw
+  // file_id (not delivery order) and has no offset, this transfers only
+  // O(distinct files touched by the edge + limit) rows regardless of how
+  // many total sites the edge has.
+  std::vector<EdgeSiteRow> edge_sites_page(int64_t edge_id, int offset,
+                                           int limit);
+
+  // Indexed EXISTS aggregate: whether ANY of this edge's sites is
+  // config-conditional. Bounded by the edge's own site count (edge_id is
+  // the leading column of edge_site's WITHOUT ROWID primary key), never by
+  // an arbitrary global row cap -- exact for edges of any size, and never
+  // materializes the site list just to answer this yes/no question.
+  bool edge_has_conditional_site(int64_t edge_id);
+
+  // Exact edge lookup by (src_id, dst_id, kind): an indexed point lookup
+  // against edge's own UNIQUE(src_id, dst_id, kind) constraint. Never a
+  // bounded adjacency scan -- a real edge is always found regardless of
+  // how many other edges its source participates in.
+  std::optional<int64_t> edge_id_for(int64_t src_id, int64_t dst_id,
+                                     int64_t kind);
 
   // -- labels (v14) ----------------------------------------------------------
   // Upsert on name; returns the row id.
