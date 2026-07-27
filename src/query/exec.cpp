@@ -7,8 +7,8 @@
 #include "graph/query.hpp"
 
 #include "catalogs/generated_catalog.hpp"
-#include "util/version.hpp"
 #include "storage/storage.hpp"
+#include "util/version.hpp"
 
 #include <algorithm>
 #include <compare>
@@ -733,7 +733,8 @@ class Exec {
 public:
   explicit Exec(QueryReadPort &read) : read_(read) {}
 
-  Stream run_plan(const Plan &plan) {
+  Stream run_plan(const Plan &plan,
+                  std::optional<int64_t> after_id = std::nullopt) {
     Stream st;
     st.view =
         plan.source.kind == SourceKind::Entity ? View::Entity : View::Symbol;
@@ -741,11 +742,13 @@ public:
       st.ids = resolve_source(plan.source);
     }
 
+    std::optional<int64_t> pending_after_id = after_id;
     for (const auto &stage : plan.stages) {
       reject_ambiguous_ungrouped(st);
       switch (stage.op) {
       case StageOp::Nodes:
-        enumerate(st, stage.pred, stage.unknown);
+        enumerate(st, stage.pred, stage.unknown, pending_after_id);
+        pending_after_id.reset();
         st.limit_in_effect = false;
         break;
       case StageOp::ChangeView:
@@ -966,8 +969,22 @@ private:
   }
 
   void enumerate(Stream &st, const std::optional<Pred> &pred,
-                 UnknownPolicy unknown) {
+                 UnknownPolicy unknown,
+                 const std::optional<int64_t> &after_id = std::nullopt) {
     if (st.view != View::Symbol && st.view != View::Entity) {
+      if (after_id.has_value() && st.view == View::Edge) {
+        st.keys = logical_rows(
+            st.view, "SELECT id FROM edge WHERE id > ? ORDER BY id LIMIT ?",
+            {SqlValue(after_id.value()), SqlValue(kEnumerateBudget + 1)});
+        if (st.keys.size() > static_cast<size_t>(kEnumerateBudget)) {
+          st.keys.resize(kEnumerateBudget);
+          st.truncated = true;
+        }
+        if (pred) {
+          filter(st, *pred, unknown);
+        }
+        return;
+      }
       std::string sql;
       switch (st.view) {
       case View::Parameter:
@@ -1061,6 +1078,10 @@ private:
         throw PlanError("E_UNKNOWN: predicate evaluation is unknown");
       }
       append_unknown_policy(sql, unknown);
+    }
+    if (after_id.has_value()) {
+      sql += pred ? " AND s.id > ?" : " WHERE s.id > ?";
+      args.emplace_back(after_id.value());
     }
     sql += " ORDER BY s.id LIMIT ?";
     args.emplace_back(kEnumerateBudget + 1);
@@ -1417,8 +1438,7 @@ private:
       for (const auto &key : st.keys) {
         add_ids("SELECT ?", {SqlValue(key.a)});
       }
-    } else if (inbound && st.view == View::Symbol &&
-               rel.name == "of_type") {
+    } else if (inbound && st.view == View::Symbol && rel.name == "of_type") {
       for (const auto owner : st.ids) {
         add_keys(
             View::SignatureSlot,
@@ -2486,10 +2506,10 @@ private:
                 const std::optional<int64_t> &type_id,
                 const std::optional<int64_t> &declared,
                 const std::optional<int64_t> &adjusted,
-            const std::optional<std::string> &default_text,
-            const std::optional<std::string> &default_origin,
-            const std::optional<std::string> &reference,
-            const graph::GraphQuery::SlotFacts &facts) {
+                const std::optional<std::string> &default_text,
+                const std::optional<std::string> &default_origin,
+                const std::optional<std::string> &reference,
+                const graph::GraphQuery::SlotFacts &facts) {
               for (const auto &field : fields) {
                 if (field == "id") {
                   cells.emplace_back(logical_row_id(st.view, key));
@@ -2563,9 +2583,9 @@ private:
           const auto adjusted = int_at(query, 3);
           const auto facts = graph.slot_facts_for_ids(
               declared ? declared : type_id, adjusted ? adjusted : type_id);
-          push_slot("parameter", text_at(query, 0), type_id,
-                    declared, adjusted, text_at(query, 4), text_at(query, 5),
-                    text_at(query, 6), facts);
+          push_slot("parameter", text_at(query, 0), type_id, declared, adjusted,
+                    text_at(query, 4), text_at(query, 5), text_at(query, 6),
+                    facts);
         } else if (key.tag == 3) {
           auto query = read_.read_db().prepare(
               "SELECT name,type_id,default_txt,default_type_id FROM "
@@ -3203,10 +3223,10 @@ protocol::ResultEnvelope Result::to_envelope() const {
   return envelope;
 }
 
-Result Executor::run(const Plan &plan) {
+Result Executor::run(const Plan &plan, std::optional<int64_t> after_id) {
   const Plan normalized = validate(plan);
   Exec exec(read_);
-  Stream st = exec.run_plan(normalized);
+  Stream st = exec.run_plan(normalized, after_id);
   Result res = exec.finish(std::move(st));
   res.index = read_.index_identity();
   return res;

@@ -186,11 +186,13 @@ class SemanticFacts:
     calls: list[tuple[int, int, int, int, int]]  # edge_id, src_id, dst_id, site_line, site_col
     truncated: bool
     unwitnessed_call_sites: int = 0
+    partial: bool = False
+    unknown: bool = False
 
 
 def _run_all_pages(
     executor: Executor, plan: Any, cursor_field_index: int
-) -> tuple[list[tuple[Any, ...]], bool]:
+) -> tuple[list[tuple[Any, ...]], bool, bool, bool]:
     """Run `plan` to genuine completion, not just its first page.
 
     A single `Executor.run()` call is hard-capped at ENUMERATE_BUDGET /
@@ -215,8 +217,12 @@ def _run_all_pages(
     """
     rows: list[tuple[Any, ...]] = []
     after_id: int | None = None
+    partial = False
+    unknown = False
     while True:
         page = executor.run(plan, after_id=after_id)
+        partial = partial or page.partial
+        unknown = unknown or page.unknown
         rows.extend(page.rows)
         if len(page.rows) < ENUMERATE_BUDGET:
             # [PR #67 internal critic] an earlier, FULL intermediate page's
@@ -232,7 +238,7 @@ def _run_all_pages(
             # THIS call still reports truncated despite returning fewer
             # than a full page, something else in the plan (not resolved
             # by this cursor) genuinely dropped evidence.
-            return rows, page.truncated
+            return rows, page.truncated, partial, unknown
         next_after_id = page.rows[-1][cursor_field_index]
         if next_after_id is None or next_after_id == after_id:
             # Defensive: a cursor that fails to strictly advance would loop
@@ -240,7 +246,7 @@ def _run_all_pages(
             # actually the query's own ascending enumeration key -- a real
             # bug in the caller, not a legitimately large result -- so
             # surface it as truncated rather than hang.
-            return rows, True
+            return rows, True, partial, unknown
         after_id = next_after_id
 
 
@@ -301,7 +307,7 @@ def _edge_site_count(
 
 def _run_all_site_pages(
     executor: Executor, plan: Any
-) -> tuple[list[tuple[Any, ...]], bool]:
+) -> tuple[list[tuple[Any, ...]], bool, bool, bool]:
     """Page the site/evidence enumeration (edge_id, src_id, dst_id, line,
     col, relation, ...) to genuine completion.
 
@@ -366,8 +372,12 @@ def _run_all_site_pages(
     """
     rows: list[tuple[Any, ...]] = []
     after_id: int | None = None
+    partial = False
+    unknown = False
     while True:
         page = executor.run(plan, after_id=after_id)
+        partial = partial or page.partial
+        unknown = unknown or page.unknown
         page_rows = page.rows
         if len(page_rows) == ENUMERATE_BUDGET and page_rows:
             last_edge_id, last_src_id, last_dst_id = page_rows[-1][0], page_rows[-1][1], page_rows[-1][2]
@@ -378,26 +388,28 @@ def _run_all_site_pages(
             if count_truncated or real_count != sites_in_page:
                 if sites_in_page == len(page_rows):
                     rows.extend(page_rows)
-                    return rows, True
+                    return rows, True, partial, unknown
                 page_rows = [row for row in page_rows if row[0] != last_edge_id]
                 rows.extend(page_rows)
                 next_after_id = last_edge_id - 1
                 if next_after_id == after_id:
-                    return rows, True
+                    return rows, True, partial, unknown
                 after_id = next_after_id
                 continue
         rows.extend(page_rows)
         if len(page_rows) < ENUMERATE_BUDGET:
-            return rows, page.truncated
+            return rows, page.truncated, partial, unknown
         next_after_id = page_rows[-1][0]
         if next_after_id is None or next_after_id == after_id:
-            return rows, True
+            return rows, True, partial, unknown
         after_id = next_after_id
 
 
 def _read_semantic_facts(db: Storage, root: Path) -> SemanticFacts:
     executor = Executor(db)
     truncated = False
+    partial = False
+    unknown = False
 
     # Every query below explicitly asks for up to ENUMERATE_BUDGET rows per
     # page (so QueryPlan's *artificial* DEFAULT_RESULT_CAP of 1,000 -- which
@@ -412,8 +424,12 @@ def _read_semantic_facts(db: Storage, root: Path) -> SemanticFacts:
         start(codebase()) | nodes() | select(["id", "name", "file", "line"])
         | limit(ENUMERATE_BUDGET)
     ).plan
-    symbol_rows, symbol_truncated = _run_all_pages(executor, symbol_plan, cursor_field_index=0)
+    symbol_rows, symbol_truncated, symbol_partial, symbol_unknown = _run_all_pages(
+        executor, symbol_plan, cursor_field_index=0
+    )
     truncated = truncated or symbol_truncated
+    partial = partial or symbol_partial
+    unknown = unknown or symbol_unknown
     symbol_name: dict[int, str] = {}
     symbol_file: dict[int, str] = {}
     symbol_line: dict[int, int] = {}
@@ -449,8 +465,12 @@ def _read_semantic_facts(db: Storage, root: Path) -> SemanticFacts:
         | select(["edge_id", "src_id", "dst_id", "line", "col", "relation"])
         | limit(ENUMERATE_BUDGET)
     ).plan
-    site_rows, site_truncated = _run_all_site_pages(executor, site_plan)
+    site_rows, site_truncated, site_partial, site_unknown = _run_all_site_pages(
+        executor, site_plan
+    )
     truncated = truncated or site_truncated
+    partial = partial or site_partial
+    unknown = unknown or site_unknown
     calls: list[tuple[int, int, int, int, int]] = []
     for edge_id, src_id, dst_id, line, col, relation in site_rows:
         if relation not in CALL_EDGE_KINDS:
@@ -467,7 +487,16 @@ def _read_semantic_facts(db: Storage, root: Path) -> SemanticFacts:
         1 for _edge_id, src_id, dst_id, _line, _col in calls
         if src_id not in symbol_file or dst_id not in symbol_file
     )
-    return SemanticFacts(symbol_name, symbol_file, symbol_line, calls, truncated, unwitnessed)
+    return SemanticFacts(
+        symbol_name,
+        symbol_file,
+        symbol_line,
+        calls,
+        truncated,
+        unwitnessed_call_sites=unwitnessed,
+        partial=partial,
+        unknown=unknown,
+    )
 
 
 @dataclass
@@ -1007,6 +1036,11 @@ def check_catalog_containment(root: Path, graph: ModuleGraph, policy: dict) -> l
     `(-4) << 1`). A sign directly in front of a `static_cast<...>` (e.g.
     `-static_cast<int>(8)`) is a structurally identical composition gap that
     remains genuinely undetected -- see `unresolvedLimitations` below.
+
+    Expressions outside that closed evaluator grammar cannot receive a clean
+    result when they appear in an explicit `std::pair` with a guarded catalog
+    name. The guard fails closed on the hand-authored declaration whenever
+    its id expression cannot be evaluated.
     """
     catalog_guard = policy.get("catalogGuard", {})
     generated = {str(Path(path).as_posix()) for path in catalog_guard.get("generatedOutputs", [])}
@@ -1015,6 +1049,7 @@ def check_catalog_containment(root: Path, graph: ModuleGraph, policy: dict) -> l
     for group in catalog_guard.get("guardedGroups", []):
         for row in catalog_source.get(group, []):
             guarded.add((row["id"], row["name"]))
+    guarded_names = {name for _id, name in guarded}
 
     errors: list[str] = []
     # `(` for a paren-call construction (std::pair(8, "function")) and `{`
@@ -1026,6 +1061,9 @@ def check_catalog_containment(root: Path, graph: ModuleGraph, policy: dict) -> l
     )
     name_colon_pattern = re.compile(
         r"\"([^\"]*)\"\s*:\s*(" + _CPP_CONST_VALUE + r")"
+    )
+    unresolved_std_pair_pattern = re.compile(
+        r"std::pair\s*[({]\s*([^,{}\n]+?)\s*,\s*\"([^\"]*)\""
     )
     for path in sorted(graph.module_of_path):
         if path in generated:
@@ -1050,6 +1088,16 @@ def check_catalog_containment(root: Path, graph: ModuleGraph, policy: dict) -> l
                 errors.append(
                     f"catalog guard {path}: duplicates a generated catalog declaration "
                     f"(id={value}, name={match.group(1)!r}, spelled {match.group(2)!r})"
+                )
+        for match in unresolved_std_pair_pattern.finditer(text):
+            if (
+                match.group(2) in guarded_names
+                and _eval_cpp_const_expr(match.group(1)) is None
+            ):
+                errors.append(
+                    f"catalog guard {path}: guarded catalog name "
+                    f"{match.group(2)!r} is paired with an unverifiable "
+                    f"hand-authored id expression {match.group(1)!r}"
                 )
     return sorted(set(errors))
 
@@ -1375,6 +1423,16 @@ def check_index_coverage(
             "traversal budget; this report's semantic findings are incomplete and "
             "must not be treated as a clean bill of health"
         )
+    # `partial` is expected for catalogued partial relations such as calls;
+    # preserve it visibly without treating it as a failed concrete read.
+    # `unknown` means this result contains unresolved provenance and must
+    # fail the architecture proof closed.
+    if facts.unknown:
+        issues.append(
+            "the QueryPlan semantic read reported unknown evidence; this "
+            "report cannot treat returned rows or missing "
+            "rows as a complete architecture proof"
+        )
 
     coverage = {
         "expectedTranslationUnits": len(expected_tus),
@@ -1385,6 +1443,8 @@ def check_index_coverage(
         "pendingFiles": pending,
         "filesWithFatalDiagnostics": failed,
         "enumerationTruncated": facts.truncated,
+        "queryPartial": facts.partial,
+        "queryUnknown": facts.unknown,
         "missingBuildConfig": missing_build_config,
         # Only `freshness` is surfaced here: HSE-32's own
         # `source_fingerprint`/`index_config_fingerprint`/`source_revision`
@@ -1617,15 +1677,10 @@ def generate_report(
         "signed or static_cast-wrapped); one enclosing layer of parentheses around any of the "
         "above or around one such binary operation; one leading unary +/- sign directly on that "
         "parenthesized form (e.g. -(4 << 1)); and one static_cast wrapping another "
-        "static_cast-of-a-literal. Anything outside that closed grammar is not detected: a "
-        "macro, an enum constant, or a reference to another named constexpr/const variable "
-        "defined elsewhere in the file or in another translation unit (none of these is a "
-        "literal this guard evaluates), a leading unary sign directly on a static_cast<...> "
-        "(e.g. -static_cast<int>(8)) or on a doubly-parenthesized/doubly-cast form, and any "
-        "expression nested or combined beyond the single extra layer of parentheses/cast/sign "
-        "described above (e.g. two operators, or two extra layers of parentheses). Detecting "
-        "those would require either a real semantic (AST-level) parse of the guarded file or "
-        "comparing it directly against the generated contract, not a wider textual pattern.",
+        "static_cast-of-a-literal. An explicit std::pair that associates a guarded name with "
+        "an expression outside that grammar fails closed when the expression cannot be "
+        "evaluated. A duplicate hidden behind a different user-defined container or generated "
+        "indirection still requires AST-level/generated-contract comparison to detect.",
     ]
     if not facts.calls:
         unresolved_limitations.append(

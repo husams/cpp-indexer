@@ -1382,11 +1382,11 @@ class Executor:
     # -- public -------------------------------------------------------------
 
     def run(self, plan: Plan, after_id: Optional[int] = None) -> Result:
-        """Run `plan`. `after_id` is an optional, execution-only pagination
-        cursor -- NOT part of the plan IR (it is invisible to `validate()`,
-        `plan_to_dict()`, and the golden plan-parity tests) -- that restricts
-        the plan's FIRST `nodes()` enumeration to ids strictly greater than
-        `after_id`. It exists so a caller can genuinely page past
+        """Run `plan`. `after_id` is the shared C++/Python execution cursor,
+        not part of the plan IR (it is invisible to `validate()`,
+        `plan_to_dict()`, and golden plan-parity tests). It restricts the
+        plan's FIRST `nodes()` enumeration to ids strictly greater than
+        `after_id`, so a caller can genuinely page past
         `ENUMERATE_BUDGET`/`TRAVERSE_NODE_BUDGET` (real, hard-coded ceilings
         inside a single call's own enumeration, not liftable via `limit()`)
         by re-running the same plan with an advancing cursor rather than

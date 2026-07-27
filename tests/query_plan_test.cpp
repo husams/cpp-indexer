@@ -27,10 +27,10 @@
 #include <unistd.h>
 #include <vector>
 
+#include "graph/query.hpp"
 #include "query/cxq.hpp"
 #include "query/exec.hpp"
 #include "query/plan.hpp"
-#include "graph/query.hpp"
 #include "storage/records.hpp"
 #include "storage/storage.hpp"
 #include "util/hashing.hpp"
@@ -59,7 +59,9 @@ class QueryExecutor {
 public:
   explicit QueryExecutor(Storage &db) : read_(db), executor_(read_) {}
 
-  Result run(const Plan &plan) { return executor_.run(plan); }
+  Result run(const Plan &plan, std::optional<int64_t> after_id = std::nullopt) {
+    return executor_.run(plan, after_id);
+  }
   cidx::json_out::Value explain(const Plan &plan) {
     return executor_.explain(plan);
   }
@@ -543,6 +545,51 @@ TEST_CASE("query_plan: default result cap reports truncation") {
   CHECK(!lim.truncated);
 }
 
+TEST_CASE("query_plan: execution cursor pages symbol and edge enumeration") {
+  Storage db(":memory:");
+  std::vector<int64_t> edge_ids;
+  edge_ids.reserve(static_cast<std::size_t>(kEnumerateBudget + 1));
+  {
+    auto txn = db.transaction();
+    const int64_t caller =
+        db.add_symbol(make_sym("USR::cursor-caller", "cursor-caller"));
+    for (int64_t i = 0; i <= kEnumerateBudget; ++i) {
+      const int64_t callee =
+          db.add_symbol(make_sym("USR::cursor-target-" + std::to_string(i),
+                                 "cursor-target-" + std::to_string(i)));
+      edge_ids.push_back(db.add_edge(make_edge(caller, callee, 1)));
+    }
+    txn.commit();
+  }
+
+  QueryExecutor ex(db);
+  const Plan symbol_plan =
+      (start(codebase()) | nodes() | select({"id"}) | limit(kEnumerateBudget))
+          .plan();
+  const Result first_symbols = ex.run(symbol_plan);
+  REQUIRE(first_symbols.rows.size() ==
+          static_cast<std::size_t>(kEnumerateBudget));
+  REQUIRE(first_symbols.truncated);
+  const int64_t symbol_cursor =
+      std::get<int64_t>(first_symbols.rows.back().front());
+  const Result remaining_symbols = ex.run(symbol_plan, symbol_cursor);
+  CHECK(remaining_symbols.rows.size() == 2);
+  CHECK_FALSE(remaining_symbols.truncated);
+
+  const Plan edge_plan = (start(codebase()) | view(View::Edge) | nodes() |
+                          select({"id"}) | limit(kEnumerateBudget))
+                             .plan();
+  const Result first_edges = ex.run(edge_plan);
+  REQUIRE(first_edges.rows.size() ==
+          static_cast<std::size_t>(kEnumerateBudget));
+  REQUIRE(first_edges.truncated);
+  const int64_t edge_cursor =
+      edge_ids[static_cast<std::size_t>(kEnumerateBudget - 1)];
+  const Result remaining_edges = ex.run(edge_plan, edge_cursor);
+  CHECK(remaining_edges.rows.size() == 1);
+  CHECK_FALSE(remaining_edges.truncated);
+}
+
 TEST_CASE(
     "query_plan: legacy identity and result key order are deterministic") {
   const std::string dir = make_temp_dir();
@@ -832,17 +879,15 @@ TEST_CASE(
   CHECK(std::get<std::string>(slots.rows[0][2]) == "value");
   CHECK(std::get<int64_t>(slots.rows[0][3]) == int_id);
   const auto callable_roundtrip =
-      ex.run((start(symbol("USR::typed_views")) |
-              out("has_signature_slot") | out("of_callable") |
-              select({"usr"}))
+      ex.run((start(symbol("USR::typed_views")) | out("has_signature_slot") |
+              out("of_callable") | select({"usr"}))
                  .plan());
   REQUIRE(callable_roundtrip.rows.size() == 1);
   CHECK(std::get<std::string>(callable_roundtrip.rows[0][0]) ==
         "USR::typed_views");
   const auto type_roundtrip =
-      ex.run((start(symbol("USR::typed_views")) |
-              out("has_signature_slot") | out("of_type") |
-              select({"type_key"}))
+      ex.run((start(symbol("USR::typed_views")) | out("has_signature_slot") |
+              out("of_type") | select({"type_key"}))
                  .plan());
   REQUIRE(type_roundtrip.rows.size() == 4);
   CHECK(std::get<std::string>(type_roundtrip.rows[0][0]) == "A4(b:int)");
@@ -850,17 +895,15 @@ TEST_CASE(
   CHECK(std::get<std::string>(type_roundtrip.rows[2][0]) == "b:float");
   CHECK(std::get<std::string>(type_roundtrip.rows[3][0]) == "b:char");
   const auto callable_inverse =
-      ex.run((start(symbol("USR::typed_views")) |
-              out("has_signature_slot") | in_("has_signature_slot") |
-              select({"usr"}))
+      ex.run((start(symbol("USR::typed_views")) | out("has_signature_slot") |
+              in_("has_signature_slot") | select({"usr"}))
                  .plan());
   REQUIRE(callable_inverse.rows.size() == 1);
   CHECK(std::get<std::string>(callable_inverse.rows[0][0]) ==
         "USR::typed_views");
   const auto type_inverse =
       ex.run((start(codebase()) | view(View::Type) | nodes() |
-              where(eq("type_key", "b:int")) |
-              in_("signature_slot.of_type") |
+              where(eq("type_key", "b:int")) | in_("signature_slot.of_type") |
               select({"slot_kind"}))
                  .plan());
   REQUIRE(type_inverse.rows.size() == 1);
@@ -893,7 +936,8 @@ TEST_CASE(
   CHECK(structure() == before);
 }
 
-TEST_CASE("query_plan: exact recursive and pointer type acceptance is read-only") {
+TEST_CASE(
+    "query_plan: exact recursive and pointer type acceptance is read-only") {
   Storage db(":memory:");
   Symbol owner = make_sym("cidx::version_re", "version_re", "function");
   const int64_t owner_id = db.add_symbol(owner);
@@ -979,19 +1023,18 @@ TEST_CASE("query_plan: exact recursive and pointer type acceptance is read-only"
   QueryExecutor ex(db);
   const auto version_return = ex.run(
       (start(symbol("cidx::version_re")) | out("has_signature_slot") |
-       where(all_of({eq("slot_kind", "return"),
-                     eq("mode", "lvalue-reference"),
+       where(all_of({eq("slot_kind", "return"), eq("mode", "lvalue-reference"),
                      eq("value_kind", "record"),
                      eq("named_decl", "std::regex")})) |
        select({"mode", "value_kind", "named_decl"}))
           .plan());
   REQUIRE(version_return.rows.size() == 1);
-  CHECK(std::get<std::string>(version_return.rows[0][0]) ==
-        "lvalue-reference");
+  CHECK(std::get<std::string>(version_return.rows[0][0]) == "lvalue-reference");
   CHECK(std::get<std::string>(version_return.rows[0][1]) == "record");
   CHECK(std::get<std::string>(version_return.rows[0][2]) == "std::regex");
   const auto signature = graph.signature(owner_id);
-  const auto type_only_graph = [&]() -> const cidx::graph::GraphQuery::ParamInfo * {
+  const auto type_only_graph =
+      [&]() -> const cidx::graph::GraphQuery::ParamInfo * {
     for (const auto &param : signature.params) {
       if (param.position == 10) {
         return &param;
@@ -1008,42 +1051,38 @@ TEST_CASE("query_plan: exact recursive and pointer type acceptance is read-only"
   CHECK(type_only_graph->value_kind == "record");
   REQUIRE(type_only_graph->named_decl.has_value());
   CHECK(*type_only_graph->named_decl == "std::regex");
-  const auto type_only_plan = ex.run(
-      (start(symbol("cidx::version_re")) | out("has_signature_slot") |
-       where(all_of({eq("slot_kind", "parameter"),
-                     eq("position", int64_t{10})})) |
-       select({"type_id", "declared_type_id", "adjusted_type_id", "mode",
-               "value_kind", "named_decl"}))
-          .plan());
+  const auto type_only_plan =
+      ex.run((start(symbol("cidx::version_re")) | out("has_signature_slot") |
+              where(all_of({eq("slot_kind", "parameter"),
+                            eq("position", int64_t{10})})) |
+              select({"type_id", "declared_type_id", "adjusted_type_id", "mode",
+                      "value_kind", "named_decl"}))
+                 .plan());
   REQUIRE(type_only_plan.rows.size() == 1);
   CHECK(std::get<int64_t>(type_only_plan.rows[0][0]) == regex_reference);
   CHECK(std::holds_alternative<std::nullptr_t>(type_only_plan.rows[0][1]));
   CHECK(std::holds_alternative<std::nullptr_t>(type_only_plan.rows[0][2]));
-  CHECK(std::get<std::string>(type_only_plan.rows[0][3]) ==
-        "lvalue-reference");
+  CHECK(std::get<std::string>(type_only_plan.rows[0][3]) == "lvalue-reference");
   CHECK(std::get<std::string>(type_only_plan.rows[0][4]) == "record");
   CHECK(std::get<std::string>(type_only_plan.rows[0][5]) == "std::regex");
   const auto type_only_filtered = ex.run(
       (start(symbol("cidx::version_re")) | out("has_signature_slot") |
-       where(all_of({eq("slot_kind", "parameter"),
-                     eq("position", int64_t{10}),
-                     eq("mode", "lvalue-reference"),
-                     eq("value_kind", "record"),
+       where(all_of({eq("slot_kind", "parameter"), eq("position", int64_t{10}),
+                     eq("mode", "lvalue-reference"), eq("value_kind", "record"),
                      eq("named_decl", "std::regex")})) |
        select({"position"}))
           .plan());
   REQUIRE(type_only_filtered.rows.size() == 1);
   CHECK(std::get<int64_t>(type_only_filtered.rows[0][0]) == 10);
-  const auto null_slot = ex.run(
-      (start(symbol("cidx::version_re")) | out("has_parameter") |
-       where(eq("position", int64_t{9})) | select({"type_id"}))
-          .plan());
+  const auto null_slot =
+      ex.run((start(symbol("cidx::version_re")) | out("has_parameter") |
+              where(eq("position", int64_t{9})) | select({"type_id"}))
+                 .plan());
   REQUIRE(null_slot.rows.size() == 1);
   CHECK(std::holds_alternative<std::nullptr_t>(null_slot.rows[0][0]));
   const auto counts = [&db] {
-    auto st = db.raw_db().prepare(
-        "SELECT (SELECT count(*) FROM symbol), "
-        "(SELECT count(*) FROM edge)");
+    auto st = db.raw_db().prepare("SELECT (SELECT count(*) FROM symbol), "
+                                  "(SELECT count(*) FROM edge)");
     REQUIRE(st.step());
     return std::tuple{st.col_int64(0), st.col_int64(1)};
   };

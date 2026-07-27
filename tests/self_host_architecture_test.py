@@ -828,32 +828,26 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         self.assertEqual(_eval_cpp_const_expr("-(4 - 1)"), -3)
         self.assertEqual(_eval_cpp_const_expr("+(4 - 1)"), 3)
 
-    def test_catalog_duplicate_signed_cast_remains_undetected(self) -> None:
-        # [Round-7 internal critic P1] documenting the guard's real,
-        # remaining boundary alongside the fix: a leading sign directly on
-        # a static_cast<...> (`-static_cast<int>(8)`) is a structurally
-        # identical composition to the one just closed (sign directly on a
-        # parenthesized term) but is NOT itself part of the closed grammar
-        # -- it must stay undetected, not silently start passing by
-        # accident of a future regex change.
+    def test_catalog_duplicate_signed_cast_fails_closed(self) -> None:
+        # The evaluator's closed grammar still cannot fold a sign directly
+        # on a static_cast, but an explicit std::pair with a guarded name
+        # must fail closed rather than receive a clean result.
         fixture = _Fixture()
         (fixture.root / "src/extraction/dup_signed_cast.hpp").write_text(
             'inline constexpr auto kSymbolKind = std::pair{-static_cast<int>(-8), "function"};\n',
             encoding="utf-8",
         )
         report = fixture.run()
-        self.assertEqual(report["findings"]["catalogGuard"], [])
+        self.assertTrue(
+            any("unverifiable hand-authored id expression" in error
+                for error in report["findings"]["catalogGuard"])
+        )
+        self.assertEqual(report["status"], "fail")
 
-    def test_catalog_duplicate_via_enum_constant_macro_or_named_variable_remains_undetected(self) -> None:
-        # [PR #67 internal critic, second finding] deliberately documenting
-        # the guard's real, remaining boundary: an identifier of any kind
-        # (an enum constant reached through a cast, a macro, or a named
-        # constexpr/const variable) is NOT a bare literal or a supported
-        # cast/shift/arithmetic expression over one, so evaluating it would
-        # require actually resolving what the identifier means elsewhere in
-        # the file/program -- a real semantic parse, not a wider textual
-        # pattern. This must stay undetected (see `unresolvedLimitations`),
-        # not silently start passing by accident of a future regex change.
+    def test_catalog_duplicate_via_enum_constant_macro_or_named_variable_fails_closed(self) -> None:
+        # A generated name paired with an identifier-based id must not receive
+        # a clean result merely because this textual gate cannot evaluate the
+        # identifier. Explicit std::pair declarations fail closed.
         fixture = _Fixture()
         (fixture.root / "src/extraction/dup_enum.hpp").write_text(
             "enum class Kind : int { Function = 8 };\n"
@@ -871,11 +865,32 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
             encoding="utf-8",
         )
         report = fixture.run()
-        self.assertEqual(report["findings"]["catalogGuard"], [])
+        self.assertEqual(
+            {
+                Path(error.split("catalog guard ", 1)[1].split(":", 1)[0]).name
+                for error in report["findings"]["catalogGuard"]
+            },
+            {"dup_enum.hpp", "dup_macro.hpp", "dup_named_var.hpp"},
+        )
+        self.assertEqual(report["status"], "fail")
+
+    def test_queryplan_unknown_evidence_fails_closed(self) -> None:
+        fixture = _Fixture()
+        fixture.add_call(fixture.sym_run, fixture.sym_value)
+        fixture._db._conn.execute(
+            "UPDATE symbol SET resolved = 0 WHERE id = ?", (fixture.sym_value,)
+        )
+        fixture._db._conn.commit()
+
+        report = fixture.run()
+
+        self.assertTrue(report["index"]["coverage"]["queryUnknown"])
+        self.assertEqual(report["completeness"]["semantic"], "partial")
+        self.assertEqual(report["status"], "fail")
         self.assertTrue(
             any(
-                "a macro, an enum constant" in limitation
-                for limitation in report["unresolvedLimitations"]
+                "QueryPlan semantic read reported unknown evidence" in issue
+                for issue in report["completeness"]["identityIssues"]
             )
         )
 
