@@ -105,7 +105,7 @@ Feature: Indexing a class template with an explicit and an implicit instantiatio
       | testMyClass                            | calls           | usr:c:@S@MyClass>#d@F@MyClass#d#       | 1     | 16:21 |
       | testMyClass                            | calls           | usr:c:@S@MyClass>#d@F@getValue#1       | 1     | 17:20 |
       | testMyClass                            | calls           | usr:c:@S@MyClass>#d@F@setValue#d#      | 1     | 18:5  |
-      | testMyClass                            | construct-value | usr:c:@S@MyClass>#d                    | 1     | -     |
+      | testMyClass                            | construct-value | usr:c:@S@MyClass>#d                    | 1     | 16:21 |
 
   Scenario: Every `uses` site is anchored at an exact source line and column
     # Sites only, and only `uses` -- no relationship totals, no call sites. A

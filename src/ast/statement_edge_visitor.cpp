@@ -287,11 +287,15 @@ void StatementEdgeVisitor::emit_factory_edge(const clang::CallExpr *call,
                     expansion_loc(ctx_.context(), fact_decl->getLocation())
                         .file)
               : std::nullopt)) {
-    EdgeRecord fe;
-    fe.src_id = ctx_.src_id();
-    fe.dst_id = *fact;
-    fe.kind = 15; // factory-construct
-    ctx_.ports().add_edge(fe);
+    // [P1-2 fix] every construction-family edge kind (10-16) records a call
+    // SITE the same way an ordinary `calls`/`uses` edge does
+    // (`emit_site_edge`/`emit_site_edge_at`, the shared add_edge+add_edge_site
+    // pair edge_emission_context.cpp defines) -- a real self-index used to
+    // record zero line/col evidence for any construction edge, making it
+    // structurally invisible to `edge_site`-driven checks such as the
+    // self-host architecture report's legacy-facade/module-boundary
+    // witnesses (scripts/self_host_architecture_report.py).
+    ctx_.emit_site_edge(call, *fact, 15); // factory-construct
   }
 }
 
@@ -355,11 +359,9 @@ void StatementEdgeVisitor::emit_construction_form(
   if (!var_init && form != 13 && form != 14) {
     form = 11; // construct-temp
   }
-  EdgeRecord fe;
-  fe.src_id = ctx_.src_id();
-  fe.dst_id = *dst;
-  fe.kind = form;
-  ctx_.ports().add_edge(fe);
+  // [P1-2 fix] see emit_factory_edge's comment above: record the call site,
+  // not just the edge.
+  ctx_.emit_site_edge(ctor, *dst, form);
 }
 
 // ---- heap -------------------------------------------------------------------
@@ -375,11 +377,8 @@ bool StatementEdgeVisitor::VisitCXXNewExpr(clang::CXXNewExpr *expr) {
                       expansion_loc(ctx_.context(), heap_decl->getLocation())
                           .file)
                 : std::nullopt)) {
-      EdgeRecord fe;
-      fe.src_id = ctx_.src_id();
-      fe.dst_id = *dst;
-      fe.kind = 12; // construct-heap
-      ctx_.ports().add_edge(fe);
+      // [P1-2 fix] see emit_factory_edge's comment above.
+      ctx_.emit_site_edge(expr, *dst, 12); // construct-heap
     }
   }
   // The allocated type name is spelled at the new-expr -> uses.
@@ -404,11 +403,8 @@ bool StatementEdgeVisitor::VisitCXXDeleteExpr(clang::CXXDeleteExpr *expr) {
                          expansion_loc(ctx_.context(), type_decl->getLocation())
                              .file)
                    : std::nullopt)) {
-    EdgeRecord fe;
-    fe.src_id = ctx_.src_id();
-    fe.dst_id = *dst;
-    fe.kind = 16; // destroy
-    ctx_.ports().add_edge(fe);
+    // [P1-2 fix] see emit_factory_edge's comment above.
+    ctx_.emit_site_edge(expr, *dst, 16); // destroy
   }
   return true;
 }

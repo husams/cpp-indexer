@@ -1357,6 +1357,52 @@ def test_after_id_cursor_pages_an_edge_enumeration_past_its_budget():
     assert executor.run(plan).rows == first_page.rows
 
 
+def test_edge_view_edge_id_field_exposes_the_raw_cursor_id_unlike_the_hashed_id_field():
+    # [P1-4 fix] The "edge" view's own "id" field is QueryPlan's PORTABLE
+    # logical identity (a hash of the edge's natural key), not the raw
+    # `edge.id` column -- correct and unchanged: it is what makes
+    # `packageHash`/canonical JSON checkout-location independent. But the
+    # `after_id` cursor argument (`Executor.run(plan, after_id=...)`) is
+    # wired against the RAW `edge.id` column for this view
+    # (`_enumerate`'s "edge" branch: "WHERE id > ?"), so a caller that must
+    # page the raw edge table to genuine completion -- independent of how
+    # many of those edges carry `edge_site` rows, which the self-host
+    # architecture report's `_run_all_site_pages` cannot assume are dense --
+    # needs a field that returns the SAME raw quantity `after_id` expects.
+    # That is "edge_id" (added to `_TYPED_FIELDS["edge"]` alongside this
+    # fix): every OTHER typed view's "edge_id" names its OWNING edge; on the
+    # "edge" view itself it names the row's own raw id.
+    db = Storage(":memory:")
+    component = db.add_component("project", "/tmp/edge-id-cursor-field")
+    directory = db.add_directory(component, "src")
+    db.add_file(directory, "cursor.cpp")
+    a = db.add_symbol(_make_sym("USR::edge-id-cursor-a", "a"))
+    b = db.add_symbol(_make_sym("USR::edge-id-cursor-b", "b"))
+    c = db.add_symbol(_make_sym("USR::edge-id-cursor-c", "c"))
+    e1 = db.add_edge(a, b, 1)
+    e2 = db.add_edge(b, c, 1)
+    db._conn.commit()
+
+    executor = Executor(db)
+    plan = (start(codebase()) | view("edge") | nodes()
+            | select(["edge_id", "id"]) | limit(100)).plan
+    result = executor.run(plan)
+    assert [row[0] for row in result.rows] == [e1, e2]
+    # The hashed "id" field is NOT the raw id -- proves the two fields are
+    # genuinely distinct, not accidental aliases of each other.
+    hashed_ids = [row[1] for row in result.rows]
+    assert e1 not in hashed_ids and e2 not in hashed_ids
+
+    # The raw "edge_id" value round-trips through `after_id` exactly like the
+    # symbol view's own "id" does; the hashed "id" value does not.
+    edge_id_plan = (start(codebase()) | view("edge") | nodes()
+                    | select(["edge_id"]) | limit(100)).plan
+    resumed = executor.run(edge_id_plan, after_id=e1)
+    assert [row[0] for row in resumed.rows] == [e2]
+    dead_end = executor.run(edge_id_plan, after_id=hashed_ids[0])
+    assert dead_end.rows == []
+
+
 def test_typed_view_compositions_are_rejected_before_execution():
     with pytest.raises(PlanError, match="^E_VIEW:"):
         validate((start(codebase()) | view("edge") | nodes()

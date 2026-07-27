@@ -685,9 +685,17 @@ bool field_available(View view, const std::string &name) {
                           "src_kind", "type_usr", "decl_usr", "callee_usr",
                           "type_id", "decl_id", "callee_id", "type_is_value"});
   case View::Edge:
-    return has(std::array{"src_id", "dst_id", "kind", "count", "base_access",
-                          "is_virtual", "vtable_slot", "relation", "source",
-                          "target", "evidence", "status", "partial", "unknown"});
+    // "edge_id" duplicates "id"'s underlying raw `edge.id` column here (every
+    // OTHER view's "edge_id" names its OWNING edge; the "edge" view names
+    // itself). "id" on this view is deliberately the portable logical
+    // identity (docs/query-plan.md: "physical SQLite row ids are
+    // implementation details"), which the `after_id` cursor cannot page on
+    // -- see `typed_column`'s matching special case and
+    // python/indexer/queryplan.py's `_TYPED_FIELDS["edge"]`.
+    return has(std::array{"edge_id", "src_id", "dst_id", "kind", "count",
+                          "base_access", "is_virtual", "vtable_slot",
+                          "relation", "source", "target", "evidence", "status",
+                          "partial", "unknown"});
   case View::Site:
     return has(std::array{"edge_id", "src_id", "dst_id", "file_id", "file",
                           "line", "col", "relation", "source", "target",

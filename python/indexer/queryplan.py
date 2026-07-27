@@ -152,7 +152,17 @@ _TYPED_FIELDS = {
     "template_argument": {"id", "identity_key", "owner_id", "position", "pack_index", "arg_kind", "ref_id", "literal", "type_id"},
     "signature_slot": {"id", "identity_key", "owner_id", "position", "pack_index", "slot_kind", "name", "type_id", "declared_type_id", "adjusted_type_id", "default_text", "default_origin", "reference_semantics", "mode", "value_kind", "named_decl"},
     "call_argument": {"id", "identity_key", "edge_id", "file_id", "line", "col", "position", "src_kind", "type_usr", "decl_usr", "callee_usr", "type_id", "decl_id", "callee_id", "type_is_value"},
-    "edge": {"id", "identity_key", "src_id", "dst_id", "kind", "count", "base_access", "is_virtual", "vtable_slot", "relation", "source", "target", "evidence", "status", "partial", "unknown"},
+    # "edge_id" duplicates "id"'s underlying raw `edge.id` column on this one
+    # view (every OTHER view's "edge_id" names its owning edge; the "edge"
+    # view names itself). It exists because "id" here is deliberately the
+    # portable logical identity (see docs/query-plan.md: "physical SQLite
+    # row ids are implementation details"), which cannot be cursored on --
+    # `after_id`'s "edge" branch filters the RAW `edge.id` column
+    # (`_enumerate`'s `WHERE id > ?`). A caller that must page the edge
+    # table itself to genuine completion independent of how many of those
+    # edges carry sites (self_host_architecture_report.py's
+    # `_run_all_site_pages`) needs the raw value back, not the hash.
+    "edge": {"id", "identity_key", "edge_id", "src_id", "dst_id", "kind", "count", "base_access", "is_virtual", "vtable_slot", "relation", "source", "target", "evidence", "status", "partial", "unknown"},
     "site": {"id", "identity_key", "edge_id", "src_id", "dst_id", "file_id", "file", "line", "col", "relation", "source", "target", "evidence", "status", "partial", "unknown"},
     "evidence": {"id", "identity_key", "owner_id", "position", "default_txt", "default_type_id", "default_ref_id", "edge_id", "file_id", "line", "col", "conditional", "args_sig", "recv_src_kind", "recv_type_usr", "recv_decl_usr", "recv_type_id", "recv_decl_id", "recv_param_pos", "recv_type_is_value", "relation", "source", "target", "evidence", "status", "partial", "unknown"},
     "type_layer": {"id", "identity_key", "root_id", "path", "relation", "position", "depth", "status", "type_id", "spelling", "kind", "extent", "element_type", "decl_usr", "canonical_id", "is_const", "is_volatile", "is_restrict"},

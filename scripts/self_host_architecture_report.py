@@ -359,6 +359,18 @@ def _edge_site_count(
     table. This stays a single, QueryPlan-only, bounded round trip; no
     full-table pagination loop is needed (and would be far more expensive,
     since this helper runs at every full-page boundary).
+
+    [P1-4 fix, round 2] The returned `truncated` flag fires on ANY codebase
+    with more than ENUMERATE_BUDGET total edges remaining past `edge_id_hint`
+    -- i.e. on essentially every boundary check the sparse-density case this
+    module exists to handle -- because `_enumerate`'s raw fetch-then-filter
+    order (see above) cannot distinguish "the whole table is large" from "our
+    one guaranteed-first-row edge was affected." `_run_all_site_pages` treats
+    it as advisory only, not as proof of ambiguity by itself: the returned
+    `count` is exact for `edge_id_hint` regardless (it can never have been
+    trimmed away), so callers should compare `count` against their own
+    already-observed evidence and use `truncated` only to explain a genuine
+    mismatch, never to override a match.
     """
     plan = (
         start(codebase()) | view("edge")
@@ -393,9 +405,12 @@ def _run_all_site_pages(
     refused to claim a clean pass.
 
     The fix pages the EDGE-id enumeration on its own dedicated, ground-truth
-    cursor (`edge_id_plan`, a plain `view("edge")|nodes()|select(["id"])`
-    read -- no `sites()` expansion, so its row count/truncation is a direct,
-    unambiguous read of QueryPlan's own edge cursor) run with the exact same
+    cursor (`edge_id_plan`, a plain `view("edge")|nodes()|select(["edge_id"])`
+    read -- "edge_id", NOT "id": the latter is this view's portable logical
+    identity, a hash the `after_id` cursor cannot page on, see `edge_id_plan`'s
+    own comment above for the full story -- no `sites()` expansion, so its row
+    count/truncation is a direct, unambiguous read of QueryPlan's own edge
+    cursor) run with the exact same
     `after_id` as the site plan for this iteration. The two reads enumerate
     identically (same "edge" view, same cursor, same underlying SQL branch
     in `_enumerate`), so `edge_page`'s ids are always the true edge-id window
@@ -425,8 +440,24 @@ def _run_all_site_pages(
     edge window's own true last id (`edge_page`'s last row, never a SITE
     row's edge_id) and another full-budget window is read.
     """
+    # [P1-4 fix] MUST select "edge_id", never "id": the "edge" view's "id"
+    # field is QueryPlan's PORTABLE logical identity (a hash of the edge's
+    # natural key -- see docs/query-plan.md, "physical SQLite row ids are
+    # implementation details"), not something the `after_id` cursor can page
+    # on (`_enumerate`'s "edge" branch filters the RAW `edge.id` column via
+    # `WHERE id > ?`). A prior version of this plan selected "id" and fed the
+    # resulting hash straight back in as `after_id` on the next iteration --
+    # `WHERE id > <hash>` against small sequential integers matches nothing,
+    # so every window past the first silently came back empty and the loop
+    # exited after one page, exactly the truncation-hiding bug this function
+    # exists to prevent. "edge_id" is the one field QueryPlan exposes on this
+    # view that maps straight to the raw `edge.id` column (added alongside
+    # this fix in both python/indexer/queryplan.py's `_TYPED_FIELDS["edge"]`
+    # and src/query/plan.cpp's `field_available` -- it already had a matching
+    # `typed_column`/`typed_column` SQL mapping in both languages, just no
+    # field-availability entry to reach it through `select()`).
     edge_id_plan = (
-        start(codebase()) | view("edge") | nodes() | select(["id"])
+        start(codebase()) | view("edge") | nodes() | select(["edge_id"])
         | limit(ENUMERATE_BUDGET)
     ).plan
     rows: list[tuple[Any, ...]] = []
@@ -446,10 +477,32 @@ def _run_all_site_pages(
         if page_rows and page.truncated:
             last_edge_id, last_src_id, last_dst_id = page_rows[-1][0], page_rows[-1][1], page_rows[-1][2]
             sites_in_page = sum(1 for row in page_rows if row[0] == last_edge_id)
-            real_count, count_truncated = _edge_site_count(
+            # [P1-4 fix, round 2] Only `real_count` is read; `_edge_site_
+            # count`'s own `truncated` flag is NOT treated as ambiguous on
+            # its own. `_edge_site_count` is always called with
+            # `after_id=last_edge_id - 1`, so `last_edge_id` is structurally
+            # guaranteed to be the FIRST row QueryPlan's own edge-view cursor
+            # considers (`_enumerate`'s trim only ever drops the TAIL of an
+            # over-full raw window, never the head) -- it can never be the
+            # row that overflow trimming excluded. That flag fires merely
+            # because the TABLE has more than ENUMERATE_BUDGET edges
+            # remaining past this cursor, unrelated to whether THIS edge's
+            # own sites were fully counted; on any codebase past
+            # ENUMERATE_BUDGET edges (the entire reason this pagination
+            # exists) it fires on EVERY boundary, and an earlier version of
+            # this check treated it alone as ambiguous, making the "give up,
+            # mark truncated" branch below fire unconditionally at the very
+            # first window -- silently dropping every edge past it, the
+            # sparse-density regression this function exists to fix. A real
+            # mismatch (`real_count != sites_in_page`) is still caught
+            # regardless, since it is symptomatic of the one genuine
+            # remaining risk `_edge_site_count`'s own docstring names (a
+            # second, same-endpoint edge -- a different kind -- sorting past
+            # the truncated window).
+            real_count = _edge_site_count(
                 executor, last_edge_id, last_src_id, last_dst_id
-            )
-            if count_truncated or real_count != sites_in_page:
+            )[0]
+            if real_count != sites_in_page:
                 if sites_in_page == len(page_rows):
                     rows.extend(page_rows)
                     return rows, True, partial, unknown

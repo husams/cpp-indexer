@@ -659,13 +659,26 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         # ids -- queryplan.py's `_enumerate` sets `st.truncated = True` on
         # ITS OWN result the moment that happens, even when the resulting
         # SITE page comes back far SHORTER than ENUMERATE_BUDGET (every
-        # filler edge below has zero sites of its own). Before this fix,
-        # neither `_run_all_pages` nor `_run_all_site_pages` ever read
-        # `page.truncated` -- both inferred truncation purely from
-        # `len(page.rows) == ENUMERATE_BUDGET` -- so a real violation whose
-        # edge sits past the cutoff was silently dropped and reported as a
-        # clean pass (`enumerationTruncated=False`, empty
-        # `moduleBoundaryViolations`, `semanticCompleteness: "complete"`).
+        # filler edge below has zero sites of its own). Before the round-2
+        # P1-4 fix (`edge_id_plan` selecting the "edge" view's "id" field,
+        # QueryPlan's PORTABLE/hashed logical identity, then feeding that hash
+        # straight back in as `after_id` -- which the raw `WHERE id > ?`
+        # cursor filter can never match) this pagination silently stopped
+        # after the first ENUMERATE_BUDGET-sized window every time, no matter
+        # how many real edges followed it: a violation whose edge sorts past
+        # the cutoff was dropped and the run under-reported
+        # (`enumerationTruncated` still correctly True from the raw `nodes()`
+        # truncation, but `moduleBoundaryViolations` empty and
+        # `semanticCompleteness: "partial"` masking the lost evidence rather
+        # than surfacing it). [PR #67 QA round 3] a version of this test that
+        # only asserts `enumerationTruncated`/`status`/`semantic` without
+        # checking `moduleBoundaryViolations` content passes identically
+        # whether or not the fix is present -- it never actually exercises
+        # whether the real violation past the cutoff was found. This version
+        # asserts the fixed, positive outcome (full enumeration, the real
+        # violation present with its exact witness) and is proven below (see
+        # this file's module docstring / implementation-notes.md) to go RED
+        # under the pre-fix `edge_id_plan.select(["id"])` implementation.
         fixture = _Fixture()
         fixture.manifest["modules"][2]["allowedDependencies"] = ["extraction", "model"]
         fixture.manifest_path.write_text(json.dumps(fixture.manifest), encoding="utf-8")
@@ -690,9 +703,19 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         # violation (extraction -> cli), with exactly one real call site.
         fixture.add_call(fixture.sym_run, fixture.sym_render, line=42, col=7)
         report = fixture.run()
-        self.assertTrue(report["index"]["coverage"]["enumerationTruncated"])
-        self.assertEqual(report["completeness"]["semantic"], "partial")
+        # Genuinely complete: both windows of the edge-id ground-truth cursor
+        # were read (the second came back short of the budget), so nothing
+        # was truncated and the pass is a real, positive proof rather than a
+        # closed-fail placeholder.
+        self.assertFalse(report["index"]["coverage"]["enumerationTruncated"])
+        self.assertEqual(report["completeness"]["semantic"], "complete")
         self.assertEqual(report["status"], "fail")
+        violations = report["findings"]["moduleBoundaryViolations"]
+        self.assertEqual(len(violations), 1, violations)
+        self.assertEqual(violations[0]["fromModule"], "extraction")
+        self.assertEqual(violations[0]["toModule"], "cli")
+        self.assertEqual(violations[0]["witness"]["call_site"]["line"], 42)
+        self.assertEqual(violations[0]["witness"]["call_site"]["col"], 7)
 
     def test_edge_site_count_finds_the_real_edge_past_the_enumerate_budget(self) -> None:
         # [Round-6 internal critic P1] `_edge_site_count` used to call
@@ -1618,6 +1641,49 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         self.assertIn("query.plan", module_ids)
         facades = {facade["id"]: facade for facade in real_policy["legacyFacades"]}
         self.assertIn("query.plan", facades["storage-facade"]["exemptModules"])
+
+    def test_real_policy_storage_facade_exempts_graph_querys_own_read_port(self) -> None:
+        # [P1-3, QA round-3 finding] a census against a real self-index of
+        # this repository found ~26 unbaselined `storage-facade` violations
+        # from src/graph/query.cpp (module analysis.graph) once P1-1/P1-2
+        # made the checker able to match resolved calls at all: GraphQuery
+        # (src/graph/query.hpp) holds a storage::GraphReadPort& (`db_`), a
+        # pure-virtual read port; the only class implementing that port is
+        # query.plan's own SqliteQueryReadAdapter (src/query/exec.hpp),
+        # which forwards to cidx::SqliteStorageService -- the exact same
+        # dependency-inversion shape query.plan's own adapter was already
+        # exempted for (see the sibling test above), and the one
+        # graph-query-bypass already exempts analysis.graph for on the
+        # equivalent cidx::graph::GraphQuery facade. Without this exemption
+        # AC1 ("a real clean self-index must complete") stays unreachable
+        # for analysis.graph specifically, even after every other P1 fix.
+        real_policy = json.loads((ROOT / "architecture/cidx-self-host-policy.json").read_text(encoding="utf-8"))
+        real_manifest = json.loads((ROOT / "architecture/cidx-module-manifest.json").read_text(encoding="utf-8"))
+        module_ids = {module["id"] for module in real_manifest["modules"]}
+        self.assertIn("analysis.graph", module_ids)
+        facades = {facade["id"]: facade for facade in real_policy["legacyFacades"]}
+        self.assertIn("analysis.graph", facades["storage-facade"]["exemptModules"])
+
+    def test_storage_facade_exempts_a_configured_read_port_module_end_to_end(self) -> None:
+        # Fixture-level companion to the two real-policy assertions above:
+        # proves the MECHANISM works, not just that the real policy file
+        # happens to list the right string. A call from a module that is
+        # NOT in storage-facade's exemptModules is rejected; the identical
+        # call from a module that IS listed is suppressed -- exercising
+        # `find_legacy_facade_violations`'s `from_module in exempt` check
+        # (scripts/self_host_architecture_report.py) on the signature-
+        # bearing resolved callee a real self-index actually produces.
+        fixture = _Fixture()
+        fixture.add_call(fixture.sym_plan, fixture.sym_write_sig, line=9, col=5)
+        report = fixture.run()
+        violations = report["findings"]["legacyFacadeViolations"]
+        self.assertEqual(len(violations), 1, violations)
+        self.assertEqual(violations[0]["fromModule"], "query")
+
+        fixture.policy["legacyFacades"][0]["exemptModules"].append("query")
+        fixture.policy_path.write_text(json.dumps(fixture.policy), encoding="utf-8")
+        report = fixture.run()
+        self.assertEqual(report["findings"]["legacyFacadeViolations"], [])
 
     def test_bootstrap_and_semantic_layers_agree_when_include_and_call_both_cross(self) -> None:
         fixture = _Fixture()

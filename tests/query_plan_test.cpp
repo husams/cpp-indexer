@@ -590,6 +590,52 @@ TEST_CASE("query_plan: execution cursor pages symbol and edge enumeration") {
   CHECK_FALSE(remaining_edges.truncated);
 }
 
+TEST_CASE("query_plan: edge view edge_id field exposes the raw cursor id, "
+          "not the hashed id field") {
+  // [P1-4 fix] Mirror of python/tests/test_queryplan.py's
+  // test_edge_view_edge_id_field_exposes_the_raw_cursor_id_unlike_the_hashed_id_field.
+  // The "edge" view's own "id" field is QueryPlan's portable logical
+  // identity (a hash of the edge's natural key); it is not something the
+  // `after_id` cursor -- wired against the raw `edge.id` column for this
+  // view -- can page on. "edge_id" is the field that returns that raw
+  // value (added to `field_available`'s View::Edge case alongside this fix;
+  // `typed_column` already mapped it to `edge.id`, just unreachably).
+  Storage db(":memory:");
+  int64_t e1 = 0;
+  int64_t e2 = 0;
+  {
+    auto txn = db.transaction();
+    const int64_t a = db.add_symbol(make_sym("USR::edge-id-cursor-a", "a"));
+    const int64_t b = db.add_symbol(make_sym("USR::edge-id-cursor-b", "b"));
+    const int64_t c = db.add_symbol(make_sym("USR::edge-id-cursor-c", "c"));
+    e1 = db.add_edge(make_edge(a, b, 1));
+    e2 = db.add_edge(make_edge(b, c, 1));
+    txn.commit();
+  }
+
+  QueryExecutor ex(db);
+  const Plan plan = (start(codebase()) | view(View::Edge) | nodes() |
+                     select({"edge_id", "id"}) | limit(100))
+                        .plan();
+  const Result result = ex.run(plan);
+  REQUIRE(result.rows.size() == 2);
+  CHECK(std::get<int64_t>(result.rows[0][0]) == e1);
+  CHECK(std::get<int64_t>(result.rows[1][0]) == e2);
+  const int64_t hashed0 = std::get<int64_t>(result.rows[0][1]);
+  const int64_t hashed1 = std::get<int64_t>(result.rows[1][1]);
+  CHECK(hashed0 != e1);
+  CHECK(hashed1 != e2);
+
+  const Plan edge_id_plan = (start(codebase()) | view(View::Edge) | nodes() |
+                             select({"edge_id"}) | limit(100))
+                                .plan();
+  const Result resumed = ex.run(edge_id_plan, e1);
+  REQUIRE(resumed.rows.size() == 1);
+  CHECK(std::get<int64_t>(resumed.rows[0][0]) == e2);
+  const Result dead_end = ex.run(edge_id_plan, hashed0);
+  CHECK(dead_end.rows.empty());
+}
+
 TEST_CASE(
     "query_plan: legacy identity and result key order are deterministic") {
   const std::string dir = make_temp_dir();

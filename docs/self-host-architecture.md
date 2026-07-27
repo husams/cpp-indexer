@@ -162,7 +162,7 @@ textual audit for a semantically complete one. Replace it with a
 report-derived baseline (the preferred path above) once a real self-index
 run completes.
 
-### Construction visibility (P1-2, partially closed)
+### Construction visibility (P1-2, fully closed)
 
 `find_module_boundary_violations`/`find_legacy_facade_violations` now read
 the construction-family edge kinds too (`construct-value`/`-temp`/`-heap`/
@@ -174,21 +174,28 @@ the checker presents it the same way a baseline entry already names a direct
 construction: `"cidx::Storage::Storage"`, synthesized from the record's own
 name, not looked up as a real symbol.
 
-This closes the *checker logic* gap: a construction-kind edge that does carry
-a call-site row is no longer silently dropped by `CALL_EDGE_KINDS`, and a
-baseline entry authored the way the real policy file already writes one now
+This closed the *checker logic* gap first: a construction-kind edge that does
+carry a call-site row is no longer silently dropped by `CALL_EDGE_KINDS`, and
+a baseline entry authored the way the real policy file already writes one now
 actually suppresses its matching witness (previously impossible even for an
-exact match — see the bare-vs-signature-bearing name fix below). It does
-**not** close a separate, still-open engine gap: `emit_construction_form`
-(and the heap-construct/destroy/factory-construct paths beside it) do not
-record an `edge_site` row for these edges at all today, so a real self-index
-still cannot produce a *witnessed* (line/col-anchored) construction finding —
-only a synthetic fixture that attaches a site manually (as this file's own
-mutation tests do) can exercise the fixed matching logic end-to-end. Closing
-that requires adding site emission to the C++ extraction pass, a larger,
-separate change (it changes several `tests/e2e/features/*.feature` goldens
-that currently pin "no site" for these kinds) tracked as a follow-up rather
-than folded into this fix.
+exact match — see the bare-vs-signature-bearing name fix below).
+
+A second, separate *engine* gap has since been closed too:
+`emit_construction_form`/`VisitCXXNewExpr`/`VisitCXXDeleteExpr`/
+`emit_factory_edge` (`src/ast/statement_edge_visitor.cpp`) previously called
+`ports().add_edge()` directly for every construction-family edge kind,
+skipping the shared `EdgeEmissionContext::emit_site_edge`/`emit_site_edge_at`
+pair every ordinary `calls`/`uses` edge goes through — so a real self-index
+recorded **zero** `edge_site` rows for any construction-family edge, and only
+a synthetic fixture that attaches a site manually could exercise the fixed
+matching logic end-to-end. All four call sites now route through
+`emit_site_edge`, anchored at the constructing/destroying expression itself
+(the `CXXConstructExpr`/`CXXNewExpr`/`CXXDeleteExpr`/`CallExpr` node), so a
+real self-index now produces a genuinely *witnessed* (line/col-anchored)
+construction finding. This changed several `tests/e2e/features/*.feature`
+goldens that previously pinned `sites: -` (no site) for these kinds
+(`basic_class_template`, `basic_method_template`, `std_library`) to their
+real, now-recorded line:col.
 
 ### Bare vs. signature-bearing callee names (P1-1, fixed)
 
