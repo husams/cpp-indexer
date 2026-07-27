@@ -123,6 +123,10 @@ cat >"$VACUOUS_SEED" <<'TLA'
    []SharedResultTypeInvariant []TrustedOutcomeInvariant *)
 EXTENDS CidxResult, TLAPS
 
+ASSUME QueryIdWellFormed == QueryId \in QueryIds
+ASSUME ResultIdWellFormed == ResultId \in ResultIds
+ASSUME EvidenceIdWellFormed == EvidenceId \in EvidenceIds
+
 THEOREM Trivial1 == 1 = 1 OBVIOUS
 
 THEOREM ResultInvarianceTheorem == TRUE  OBVIOUS
@@ -158,6 +162,10 @@ NEGATION_SEED="$WORK/negation-seed.tla"
 cat >"$NEGATION_SEED" <<'TLA'
 ----------------------------- MODULE CidxResultProof -----------------------------
 EXTENDS CidxResult, TLAPS
+
+ASSUME QueryIdWellFormed == QueryId \in QueryIds
+ASSUME ResultIdWellFormed == ResultId \in ResultIds
+ASSUME EvidenceIdWellFormed == EvidenceId \in EvidenceIds
 
 THEOREM ResultInvarianceTheorem == TRUE OBVIOUS
 
@@ -196,6 +204,10 @@ WEAK_ANTECEDENT_SEED="$WORK/weak-antecedent-seed.tla"
 cat >"$WEAK_ANTECEDENT_SEED" <<'TLA'
 ----------------------------- MODULE CidxResultProof -----------------------------
 EXTENDS CidxResult, TLAPS
+
+ASSUME QueryIdWellFormed == QueryId \in QueryIds
+ASSUME ResultIdWellFormed == ResultId \in ResultIds
+ASSUME EvidenceIdWellFormed == EvidenceId \in EvidenceIds
 
 THEOREM ResultInvarianceTheorem == TRUE OBVIOUS
 
@@ -278,6 +290,10 @@ WEAK_SPEC_SEED="$WORK/weak-spec-seed.tla"
 cat >"$WEAK_SPEC_SEED" <<'TLA'
 ----------------------------- MODULE CidxResultProof -----------------------------
 EXTENDS CidxResult, TLAPS
+
+ASSUME QueryIdWellFormed == QueryId \in QueryIds
+ASSUME ResultIdWellFormed == ResultId \in ResultIds
+ASSUME EvidenceIdWellFormed == EvidenceId \in EvidenceIds
 
 WeakSpec == Init /\ FALSE
 
