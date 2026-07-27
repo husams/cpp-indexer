@@ -328,6 +328,16 @@ std::string tu_content_fingerprint(clang::ASTContext &context,
 //   candidate; the RecursiveASTVisitor-derived counter below still visits
 //   this shape soundly (by construction, like everything else), it simply
 //   never was a demonstrated gap in the code it replaces.
+//
+// One documented consequence of this rewrite: visited() is now a superset
+// of what the old hand-written counter ever produced, so it can only grow
+// relative to prior releases, never shrink. For a rule with a
+// hasDescendant/hasAncestor combinator, that means the visited^2 *
+// combinators work estimate below (see estimated_work_exceeded) can trip
+// max_visited_nodes on a translation unit that previously passed, with no
+// source change -- see "max_visited_nodes counts more nodes than earlier
+// releases" in docs/extraction-plan.md for the plan-author-facing guidance
+// (raise the rule's budget, or narrow the matcher).
 class NodeBudgetCounter final {
 public:
   explicit NodeBudgetCounter(std::int64_t budget) : visitor_(budget) {}

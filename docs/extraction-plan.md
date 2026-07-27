@@ -73,6 +73,32 @@ Field reference:
 | `emits[].node/relation/attribute/unknown` | Exactly one payload per emit operation. `node` mints a namespaced custom node with an `IdentityRecipe`; `relation` connects two bindings; `attribute` reads one allow-listed typed AST property; `unknown` records an explicit "recognized but unclassifiable" finding. |
 | `identity.kind` | `usr \| source_anchor \| owner_position \| type_key \| composed`. There is deliberately no "AST pointer" kind — process-local Clang handles can never become a fact's identity. |
 
+### `max_visited_nodes` counts more nodes than earlier releases
+
+The node count behind `rule.budget.max_visited_nodes` is now derived from an
+actual `clang::RecursiveASTVisitor` traversal (`NodeBudgetCounter` in
+`src/extract/engine.cpp`), the same base class `clang::ast_matchers::
+MatchFinder` itself uses to run a rule's matcher. By construction, this
+counts every node a matcher could ever see, including compiler-generated and
+implicit content a hand-written counter previously missed — static_assert
+conditions/messages, concept constraints, trailing requires-clauses,
+parameter default arguments, constructor member-initializers, and similar.
+
+Practical consequence: for a rule whose `matcher_expression` uses
+`hasDescendant`/`hasAncestor`, the visited-node count feeding the
+`visited² × combinators` work estimate can only grow relative to older
+releases — never shrink. A rule that previously passed budget validation on
+a given translation unit may now trip `max_visited_nodes` or
+`estimated_work_exceeded` with no change to the source at all, if that TU
+has hidden-but-shallow content the old counter silently skipped.
+
+This is deliberate and conservative: the old behavior was an undercount, not
+a correct baseline, so the new one is strictly safer even though it rejects
+more. If a rule starts failing budget validation after upgrading with no
+plan or source change, raise that rule's `max_visited_nodes` (and/or
+`max_matches`) to match its real traversal cost, or narrow the matcher
+expression to avoid descending into the newly-counted content.
+
 ## Validation (before Clang execution)
 
 `validate(plan)` = `validate_structure(plan)` (Clang-free: schema version,
