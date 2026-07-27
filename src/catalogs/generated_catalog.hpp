@@ -6,7 +6,7 @@
 
 namespace cidx::catalog {
 inline constexpr int kCatalogVersion = 1;
-inline constexpr std::string_view kCatalogHash = "21497a89add82fba96293f97b34f9a19c68912b6cc823a915889acf0709c216d";
+inline constexpr std::string_view kCatalogHash = "c4f426232c34739c83a3d15c3bd91b4d4f8934ec8853f8efaa7a27939e37e9f7";
 enum class View : std::uint8_t { Symbol, Entity, Parameter, TemplateParameter, TemplateArgument, SignatureSlot, CallArgument, Edge, Site, Evidence, Type, TypeLayer };
 struct NamedId { int64_t id; std::string_view name; };
 struct Relation { int64_t id; std::string_view name; View layer; std::string_view source; std::string_view target; std::string_view inverse; std::string_view traversal; std::string_view evidence; std::string_view evidence_capabilities; std::string_view completeness; bool virtual_relation; };
@@ -137,7 +137,7 @@ inline constexpr std::array<Relation, 62> kRelations = {{
     {.id = 2, .name = "child", .layer = View::TypeLayer, .source = "type_layer", .target = "type_layer", .inverse = "parent", .traversal = "out|in", .evidence = "derived", .evidence_capabilities = "derived", .completeness = "complete", .virtual_relation = true},
 }};
 
-inline constexpr std::array<Field, 57> kFields = {{
+inline constexpr std::array<Field, 58> kFields = {{
     {.name = "id", .filterable = true, .is_string = false},
     {.name = "usr", .filterable = true, .is_string = true},
     {.name = "name", .filterable = true, .is_string = true},
@@ -155,6 +155,7 @@ inline constexpr std::array<Field, 57> kFields = {{
     {.name = "file", .filterable = false, .is_string = true},
     {.name = "line", .filterable = false, .is_string = false},
     {.name = "col", .filterable = false, .is_string = false},
+    {.name = "decl_path", .filterable = false, .is_string = true},
     {.name = "semantic_universe", .filterable = true, .is_string = true},
     {.name = "identity_key", .filterable = true, .is_string = true},
     {.name = "owner_id", .filterable = true, .is_string = false},

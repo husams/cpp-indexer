@@ -1168,6 +1168,17 @@ def _col_expr(field_name: str, symbol_alias: str = "s",
         return f"{symbol_alias}.line"
     if field_name == "col":
         return f"{symbol_alias}.col"
+    if field_name == "decl_path":
+        # The raw declaration path minted for a target in an unregistered
+        # (system/stdlib) file -- see `Symbol.decl_path`'s own docstring in
+        # storage.py. Deliberately independent of `file`/`file_id`: an
+        # implicit-instantiation symbol can carry BOTH a (buggy) `file_id`
+        # that resolves to a registered project file (the point where the
+        # engine attributed the specialization) and a `decl_path` that
+        # still names its true, external declaration site. A consumer that
+        # needs to know a symbol's real origin regardless of what `file_id`
+        # says should prefer this field when it is non-null.
+        return f"{symbol_alias}.decl_path"
     raise PlanError(f"E_FIELD: unknown field '{field_name}'")
 
 

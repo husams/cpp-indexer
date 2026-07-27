@@ -30,7 +30,10 @@ sys.path.insert(0, str(ROOT / "python"))
 from scripts.self_host_architecture_report import (  # noqa: E402
     _edge_site_count,
     _eval_cpp_const_expr,
+    ModuleGraph,
+    SemanticFacts,
     check_policy_metadata,
+    find_legacy_facade_violations,
     generate_report,
 )
 from indexer.storage import Storage, Symbol  # noqa: E402
@@ -141,11 +144,12 @@ class _Fixture:
         self.file_format = db.add_file(dir_cli, "format.hpp")
         self.file_plan = db.add_file(dir_query, "plan.cpp", compile_options=["-std=c++23"])
 
-        def sym(usr, spelling, qual_name, kind, file_id, line):
+        def sym(usr, spelling, qual_name, kind, file_id, line, decl_path=None):
             return db.add_symbol(
                 Symbol(
                     usr=usr, spelling=spelling, qual_name=qual_name, kind=kind,
                     file_id=file_id, line=line, is_definition=True, resolved=True,
+                    decl_path=decl_path,
                 )
             )
 
@@ -175,6 +179,21 @@ class _Fixture:
         self.sym_service_class = sym(
             "u7", "SqliteStorageService", "cidx::SqliteStorageService", "class",
             self.file_service, 1,
+        )
+        # [moduleCallGraphCheck false-positive fixture] an implicit
+        # instantiation of an external-library template the way the real
+        # extraction engine has been observed to misattribute one: `file_id`
+        # points at a REGISTERED PROJECT file (here, the "extraction" module's
+        # own `pass.cpp` -- standing in for the real bug's `src/ast/
+        # indexing_plan.hpp`), but `decl_path` still names the symbol's true,
+        # external declaration site (a path that can never resolve under
+        # `self.root`). Any caller reaching this symbol must never be treated
+        # as calling INTO a project module merely because of the
+        # mis-attributed `file_id` -- see `_external_decl_path` in
+        # scripts/self_host_architecture_report.py.
+        self.sym_std_operator_plus = sym(
+            "u8", "operator+", "std::operator+", "function",
+            self.file_pass, 9, decl_path="/usr/include/c++/v1/string",
         )
         db._conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES ('graph_resolved_at', ?)",
@@ -283,7 +302,7 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         report = fixture.run()
         self.assertFalse(report["index"]["coverage"]["enumerationTruncated"])
         self.assertEqual(len(report["findings"]["moduleBoundaryViolations"]), 1)
-        self.assertEqual(report["index"]["symbolCount"], 1107)
+        self.assertEqual(report["index"]["symbolCount"], 1108)
 
     def test_violation_past_enumerate_budget_is_not_silently_dropped(self) -> None:
         # [Review round 3, blocker 1] a single Executor.run() call's own
@@ -393,6 +412,22 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         ]
         fixture.manifest_path.write_text(json.dumps(fixture.manifest), encoding="utf-8")
         fixture.add_call(fixture.sym_run, fixture.sym_render)
+        report = fixture.run()
+        self.assertEqual(report["findings"]["moduleBoundaryViolations"], [])
+
+    def test_callee_with_external_decl_path_is_never_a_module_boundary_violation(
+        self,
+    ) -> None:
+        # [moduleCallGraphCheck false-positive fix] `sym_std_operator_plus`'s
+        # `file_id` (mis-attributed, exactly like the real `std::operator+`
+        # implicit-instantiation bug) resolves to `src/extraction/pass.cpp`
+        # ("extraction" module), so a naive file-based classification would
+        # report this `cli -> extraction` call as a boundary violation ("cli"
+        # only allows "cli" per the fixture manifest). Its `decl_path`
+        # resolves outside the fixture root, which must override `file_id`
+        # and exclude the callee from module attribution entirely.
+        fixture = _Fixture()
+        fixture.add_call(fixture.sym_render, fixture.sym_std_operator_plus, line=42, col=7)
         report = fixture.run()
         self.assertEqual(report["findings"]["moduleBoundaryViolations"], [])
 
@@ -1663,6 +1698,84 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         self.assertIn("analysis.graph", module_ids)
         facades = {facade["id"]: facade for facade in real_policy["legacyFacades"]}
         self.assertIn("analysis.graph", facades["storage-facade"]["exemptModules"])
+
+    def test_real_policy_baseline_suppresses_the_fact_providers_index_identity_reads(
+        self,
+    ) -> None:
+        # [P1-3 round-2 fix] A census against a real self-index found 2 live,
+        # unbaselined `storage-facade` violations that the previous
+        # `exemptModules` widening (the two tests above) did NOT cover:
+        # src/analysis/facts.cpp:541:36 and src/analysis/runner.cpp:1063:38,
+        # both `storage.index_identity()` -- a member call through the
+        # `cidx::Storage` reference the line directly above already
+        # constructs (and already baselines as a direct construction). This
+        # is exactly the member-call-through-an-already-held-reference case
+        # docs/self-host-architecture.md's manual/textual-audit fallback
+        # names as uncoverable by grep; a real resolved call edge is the
+        # only way to enumerate it, which is why the fix is two new baseline
+        # entries (not another exemptModules widening -- analysis.
+        # fact-provider is NOT, and must not become, exempt: exemption would
+        # also silence any real, NEW future coupling from that module into
+        # the facade, whereas a baseline entry suppresses only the ONE
+        # pinned call site).
+        #
+        # This runs `find_legacy_facade_violations` -- the exact function
+        # `generate_report` calls -- against the REAL committed policy file
+        # and a synthetic call graph shaped like the real one (construction
+        # already covered elsewhere; this reproduces only the two
+        # `index_identity()` reads), so it proves the two new baseline
+        # entries actually suppress a matching witness end to end, not
+        # merely that they are present in the JSON (the shape-only
+        # criticism of `test_real_policy_legacy_facade_baselines_are_
+        # populated_and_well_formed` above).
+        real_policy = json.loads((ROOT / "architecture/cidx-self-host-policy.json").read_text(encoding="utf-8"))
+        graph = ModuleGraph(
+            module_of_path={
+                "src/analysis/facts.cpp": "analysis.fact-provider",
+                "src/analysis/runner.cpp": "analysis.fact-provider",
+                "src/storage/storage.cpp": "persistence.sqlite",
+            },
+            allowed={"analysis.fact-provider": {"analysis.fact-provider"}},
+            file_exceptions=set(),
+            unclassified=[],
+        )
+        facts = SemanticFacts(
+            symbol_name={
+                1: "SqliteFactProvider::snapshot",
+                2: "cidx::SqliteStorageService::index_identity()",
+                3: "AnalysisRunner::publish",
+                4: "cidx::SqliteStorageService::index_identity()",
+            },
+            symbol_file={
+                1: "src/analysis/facts.cpp",
+                2: "src/storage/storage.cpp",
+                3: "src/analysis/runner.cpp",
+                4: "src/storage/storage.cpp",
+            },
+            symbol_line={1: 534, 2: 849, 3: 1044, 4: 849},
+            calls=[
+                (900, 1, 2, 541, 36, "calls"),
+                (901, 3, 4, 1063, 38, "calls"),
+            ],
+            truncated=False,
+        )
+        violations = find_legacy_facade_violations(facts, graph, real_policy)
+        self.assertEqual(violations, [])
+
+        # Negative control: a call at a DIFFERENT, unbaselined site through
+        # the SAME facade is still rejected -- this is not "the checker
+        # always passes analysis.fact-provider", it is specifically these
+        # two pinned call sites.
+        facts_new_site = SemanticFacts(
+            symbol_name=facts.symbol_name,
+            symbol_file=facts.symbol_file,
+            symbol_line=facts.symbol_line,
+            calls=[(902, 1, 2, 9999, 1, "calls")],
+            truncated=False,
+        )
+        still_flagged = find_legacy_facade_violations(facts_new_site, graph, real_policy)
+        self.assertEqual(len(still_flagged), 1)
+        self.assertEqual(still_flagged[0]["witness"]["call_site"], {"line": 9999, "col": 1})
 
     def test_storage_facade_exempts_a_configured_read_port_module_end_to_end(self) -> None:
         # Fixture-level companion to the two real-policy assertions above:

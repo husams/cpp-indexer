@@ -210,3 +210,42 @@ key, so a baseline entry that exactly names a real call site actually
 suppresses it. The `calleeQualNamePrefixes` **prefix** match is unaffected
 (a signature-bearing name still starts with its own bare class-scope
 prefix) and stays on the raw name.
+
+### External-library implicit instantiations misattributed to a project file (fixed)
+
+A real self-index of this repository surfaced 32 `moduleCallGraphCheck`
+findings that were all false positives from one root cause: an implicit
+instantiation of an external-library template (observed:
+`std::operator+<...>` for a `std::string` concatenation) can have its
+`symbol.file`/`file_id` -- the field module attribution is otherwise keyed
+on -- attributed to the REGISTERED project header that triggered the
+instantiation rather than to the library header the specialization is
+actually declared in. This is a real extraction-engine defect, not a
+report-layer one; a full audit and fix of that attribution is out of scope
+here. Instead, `_read_semantic_facts` now also reads each symbol's
+`decl_path` (the raw declaration path minted for a target in an
+unregistered/system file -- `Symbol.decl_path`) and, when it resolves
+outside the repository root, treats it as authoritative over `file`/
+`file_id`: such a symbol is excluded from module attribution entirely,
+exactly like any other symbol whose `file` itself already resolved outside
+root. This closes the specific false-positive class this report exists to
+avoid producing, without hiding it: it is recorded in `unresolvedLimitations`
+as a permanent, named limitation, and a symbol with neither a `decl_path`
+nor a correctly-attributed `file` remains unclassifiable and silently
+invisible to this pass, same as any other unresolved callee.
+
+### `analysis.fact-provider`'s `index_identity()` reads (P1-3, baselined)
+
+Two `storage-facade` call sites were found unbaselined by a real self-index
+that a manual/textual audit could not have found by construction:
+`src/analysis/facts.cpp:541:36` and `src/analysis/runner.cpp:1063:38`, both
+`storage.index_identity()` -- a member call through the `cidx::Storage`
+reference the line directly above already constructs (and already
+baselines as a direct construction). This is exactly the member-call-
+through-an-already-held-reference case the manual/textual-audit fallback
+above names as uncoverable by grep; only a real resolved call edge can
+enumerate it. The fix is two new baseline entries pinning these exact call
+sites (not a further `exemptModules` widening for `analysis.fact-provider`
+-- that module is not, and must not become, exempt: exemption would also
+silence any real, NEW future coupling from it into the facade, whereas a
+baseline entry only ever suppresses the ONE pinned site).

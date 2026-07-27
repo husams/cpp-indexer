@@ -1441,8 +1441,10 @@ TEST_CASE("query_plan: site view exposes stable src/dst endpoints") {
   const int64_t component = db.add_component("project", "/tmp/site-endpoints");
   const int64_t directory = db.add_directory(component, "src");
   const int64_t file = db.add_file(directory, "same.cpp");
-  const int64_t caller = db.add_symbol(make_sym("USR::endpoint-caller", "caller"));
-  const int64_t callee = db.add_symbol(make_sym("USR::endpoint-callee", "callee"));
+  const int64_t caller =
+      db.add_symbol(make_sym("USR::endpoint-caller", "caller"));
+  const int64_t callee =
+      db.add_symbol(make_sym("USR::endpoint-callee", "callee"));
   const int64_t edge = db.add_edge(make_edge(caller, callee, 1));
   cidx::EdgeSite site;
   site.edge_id = edge;
@@ -1462,6 +1464,47 @@ TEST_CASE("query_plan: site view exposes stable src/dst endpoints") {
   CHECK(std::get<int64_t>(result.rows[0][2]) == callee);
   CHECK(std::get<int64_t>(result.rows[0][3]) == 10);
   CHECK(std::get<int64_t>(result.rows[0][4]) == 2);
+}
+
+TEST_CASE("query_plan: symbol view exposes decl_path independent of file") {
+  // [HSE-71 moduleCallGraphCheck false-positive fix] `decl_path` is the raw
+  // declaration path minted for a target in an UNREGISTERED (system/stdlib)
+  // file (Symbol::decl_path, storage.hpp), independent of `file`/`file_id`.
+  // scripts/self_host_architecture_report.py reads it to detect a symbol
+  // whose `file_id` was (incorrectly, for some implicit template
+  // instantiations) attributed to a registered project file even though its
+  // true declaration lives elsewhere -- see `_external_decl_path`'s own
+  // docstring. Exercise both a symbol carrying a decl_path and one that
+  // doesn't, to prove the field round-trips and nulls correctly rather than
+  // aliasing `file`.
+  Storage db(":memory:");
+  const int64_t component = db.add_component("project", "/tmp/decl-path");
+  const int64_t directory = db.add_directory(component, "src");
+  const int64_t file = db.add_file(directory, "instantiator.cpp");
+  Symbol external = make_sym("USR::external-decl", "operator+");
+  external.file_id = file;
+  external.line = 9;
+  external.decl_path = "/usr/include/c++/v1/string";
+  const int64_t external_id = db.add_symbol(external);
+  const int64_t plain_id =
+      db.add_symbol(make_sym("USR::no-decl-path", "plain"));
+
+  QueryExecutor ex(db);
+  const Result result =
+      ex.run((start(codebase()) | nodes() |
+              select({"id", "file", "decl_path"}) | order_by({"id"}))
+                 .plan());
+  REQUIRE(result.rows.size() == 2);
+  const auto &external_row = std::get<int64_t>(result.rows[0][0]) == external_id
+                                 ? result.rows[0]
+                                 : result.rows[1];
+  const auto &plain_row = std::get<int64_t>(result.rows[0][0]) == plain_id
+                              ? result.rows[0]
+                              : result.rows[1];
+  CHECK(std::get<std::string>(external_row[1]) ==
+        "/tmp/decl-path/src/instantiator.cpp");
+  CHECK(std::get<std::string>(external_row[2]) == "/usr/include/c++/v1/string");
+  CHECK(std::holds_alternative<std::nullptr_t>(plain_row[2]));
 }
 
 TEST_CASE("query_plan: typed provenance preserves status through select") {

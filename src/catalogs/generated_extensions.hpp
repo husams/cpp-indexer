@@ -4,7 +4,7 @@
 #include <string_view>
 namespace cidx::catalog {
 struct ExtensionRelation { std::string_view qualified_name; std::string_view package; std::string_view id; std::string_view name; std::string_view layer; std::string_view source; std::string_view target; std::string_view inverse; std::string_view traversal; std::string_view evidence; std::string_view evidence_capabilities; std::string_view completeness; };
-inline constexpr std::string_view kExtensionCatalogHash = "21497a89add82fba96293f97b34f9a19c68912b6cc823a915889acf0709c216d";
+inline constexpr std::string_view kExtensionCatalogHash = "c4f426232c34739c83a3d15c3bd91b4d4f8934ec8853f8efaa7a27939e37e9f7";
 inline constexpr std::array<ExtensionRelation, 1> kExtensionRelations = {{
     {.qualified_name = "test.extension/relation/taints", .package = "test.extension", .id = "relation/taints", .name = "taints", .layer = "symbol", .source = "symbol.declaration", .target = "symbol.declaration", .inverse = "tainted_by", .traversal = "out|in", .evidence = "derived", .evidence_capabilities = "derived|proof", .completeness = "partial"},
 }};

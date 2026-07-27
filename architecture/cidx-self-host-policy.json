@@ -34,12 +34,32 @@
           "removalIssue": "HSE-62"
         },
         {
+          "callerFile": "src/analysis/facts.cpp",
+          "calleeQualName": "cidx::SqliteStorageService::index_identity",
+          "line": 541,
+          "col": 36,
+          "owner": "Platform M2 analysis maintainers",
+          "rationale": "The same read-only re-hydration pass immediately reads index_identity() off the cidx::Storage it just opened on the line above (already baselined as a direct construction); this is exactly the member-call-through-an-already-held-reference case docs/self-host-architecture.md's manual/textual-audit fallback names as uncoverable by grep -- migrate together with the construction above to a focused Storage-reading port owned by analysis.fact-provider.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
           "callerFile": "src/analysis/runner.cpp",
           "calleeQualName": "cidx::Storage::Storage",
           "line": 1062,
           "col": 7,
           "owner": "Platform M2 analysis maintainers",
           "rationale": "The unified analysis runner still opens cidx::Storage directly to publish results; migrate to a focused publication port owned by analysis.fact-provider.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/analysis/runner.cpp",
+          "calleeQualName": "cidx::SqliteStorageService::index_identity",
+          "line": 1063,
+          "col": 38,
+          "owner": "Platform M2 analysis maintainers",
+          "rationale": "The same publication path immediately reads index_identity() off the cidx::Storage it just opened on the line above (already baselined as a direct construction); this is exactly the member-call-through-an-already-held-reference case docs/self-host-architecture.md's manual/textual-audit fallback names as uncoverable by grep -- migrate together with the construction above to a focused publication port owned by analysis.fact-provider.",
           "expiresOn": "2026-12-31",
           "removalIssue": "HSE-62"
         },

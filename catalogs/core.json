@@ -128,6 +128,7 @@
     {"name": "file", "filterable": false, "is_string": true},
     {"name": "line", "filterable": false, "is_string": false},
     {"name": "col", "filterable": false, "is_string": false},
+    {"name": "decl_path", "filterable": false, "is_string": true},
     {"name": "semantic_universe", "filterable": true, "is_string": true},
     {"name": "identity_key", "filterable": true, "is_string": true},
     {"name": "owner_id", "filterable": true, "is_string": false},

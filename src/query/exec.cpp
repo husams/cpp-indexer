@@ -258,6 +258,18 @@ std::string col_expr(const std::string &field, const std::string &symbol_alias,
   if (field == "col") {
     return symbol_alias + ".col";
   }
+  if (field == "decl_path") {
+    // The raw declaration path minted for a target in an unregistered
+    // (system/stdlib) file -- see `Symbol::decl_path`'s own doc comment in
+    // storage.hpp. Deliberately independent of `file`/`file_id`: an
+    // implicit-instantiation symbol can carry BOTH a (buggy) `file_id` that
+    // resolves to a registered project file (the point where the engine
+    // attributed the specialization) and a `decl_path` that still names
+    // its true, external declaration site. A consumer that needs to know a
+    // symbol's real origin regardless of what `file_id` says should prefer
+    // this field when it is non-null.
+    return symbol_alias + ".decl_path";
+  }
   throw PlanError("E_FIELD: unknown field '" + field + "'");
 }
 
@@ -2866,7 +2878,7 @@ private:
                      f == "qual_name" || f == "semantic_universe" ||
                      f == "identity_key" || f == "callable_kind" ||
                      f == "template_origin" || f == "template_form" ||
-                     f == "owner") {
+                     f == "owner" || f == "decl_path") {
             cells.emplace_back(stq.col_text(col));
           } else {
             cells.emplace_back(stq.col_int64(col));

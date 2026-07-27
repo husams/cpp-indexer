@@ -522,6 +522,39 @@ def _run_all_site_pages(
         after_id = window_last_edge_id
 
 
+def _external_decl_path(decl_path: str, root_resolved: Path) -> bool:
+    """True when `decl_path` -- a symbol's raw, possibly-external declaration
+    path (`Symbol.decl_path`; storage.py/storage.hpp: populated for a target
+    whose declaration lives in an unregistered, e.g. system/stdlib, file) --
+    resolves to somewhere OUTSIDE `root_resolved`.
+
+    [moduleCallGraphCheck false-positive fix] An implicit instantiation of an
+    external-library template (observed: `std::operator+<...>` for a
+    `std::string` concatenation) can have its `symbol.file_id` -- the field
+    `_read_semantic_facts` otherwise uses for module attribution -- wrongly
+    attributed to the REGISTERED project header that triggered the
+    instantiation, rather than to the library header the specialization is
+    actually declared in (a real extraction-engine defect, not a report-layer
+    one; see `docs/self-host-architecture.md`'s moduleCallGraphCheck note).
+    `decl_path`, when this same symbol also went through a stub mint before
+    its (mis-attributed) definition was recorded, still names its true,
+    external declaration site and is never overwritten by that later,
+    incorrect `file_id`/`file` update (`add_symbol`'s own UPDATE clause never
+    touches `decl_path` -- see `src/ast/storage_symbol_sink.cpp`'s
+    `same_add_symbol_result_except_decl_site`). Treating a non-null,
+    resolves-outside-root `decl_path` as authoritative over `file` lets this
+    class of misattribution fail closed (excluded from module attribution
+    entirely, like any other out-of-repo symbol) instead of silently
+    fabricating a project-to-project coupling finding out of a callee that
+    was never really written in this repository.
+    """
+    try:
+        Path(decl_path).resolve().relative_to(root_resolved)
+    except ValueError:
+        return True
+    return False
+
+
 def _read_semantic_facts(db: Storage, root: Path) -> SemanticFacts:
     executor = Executor(db)
     truncated = False
@@ -538,7 +571,8 @@ def _read_semantic_facts(db: Storage, root: Path) -> SemanticFacts:
     # never merely because the underlying table has more than
     # ENUMERATE_BUDGET rows.
     symbol_plan = (
-        start(codebase()) | nodes() | select(["id", "name", "file", "line"])
+        start(codebase()) | nodes()
+        | select(["id", "name", "file", "line", "decl_path"])
         | limit(ENUMERATE_BUDGET)
     ).plan
     symbol_rows, symbol_truncated, symbol_partial, symbol_unknown = _run_all_pages(
@@ -551,8 +585,21 @@ def _read_semantic_facts(db: Storage, root: Path) -> SemanticFacts:
     symbol_file: dict[int, str] = {}
     symbol_line: dict[int, int] = {}
     root_resolved = root.resolve()
-    for sym_id, name, file_path, line in symbol_rows:
+    for sym_id, name, file_path, line, decl_path in symbol_rows:
         symbol_name[sym_id] = name
+        if line is not None:
+            symbol_line[sym_id] = line
+        # [moduleCallGraphCheck false-positive fix] `decl_path`, when it
+        # resolves outside the repo, is authoritative over `file`/`file_id`
+        # for module attribution -- see `_external_decl_path`'s own
+        # docstring for the exact misattribution this guards against. Fail
+        # CLOSED: such a symbol is left out of `symbol_file` entirely (same
+        # as a symbol whose `file` itself already resolved outside root
+        # below), so it can never be classified into a project module by
+        # either `find_module_boundary_violations` or
+        # `find_legacy_facade_violations`.
+        if decl_path is not None and _external_decl_path(decl_path, root_resolved):
+            continue
         if file_path is not None:
             # QueryPlan resolves "file" to an ABSOLUTE filesystem path
             # (Storage.file_abs_path); the manifest classifies sources by
@@ -564,8 +611,6 @@ def _read_semantic_facts(db: Storage, root: Path) -> SemanticFacts:
                 symbol_file[sym_id] = Path(file_path).resolve().relative_to(root_resolved).as_posix()
             except ValueError:
                 pass
-        if line is not None:
-            symbol_line[sym_id] = line
 
     # The "site" view exposes the owning edge's own stable src_id/dst_id
     # directly (a correlated subquery against edge.id -- see
@@ -1851,6 +1896,15 @@ def generate_report(
         "an expression outside that grammar fails closed when the expression cannot be "
         "evaluated. A duplicate hidden behind a different user-defined container or generated "
         "indirection still requires AST-level/generated-contract comparison to detect.",
+        "A callee symbol whose `decl_path` resolves outside the repository root is excluded "
+        "from module attribution even when its (possibly misattributed) `file`/`file_id` "
+        "resolves inside the repository -- observed for implicit instantiations of external "
+        "library templates (e.g. `std::operator+`) that the extraction engine can attribute to "
+        "the project header that triggered the instantiation rather than to the library header "
+        "the specialization is actually declared in. This closes that specific false-positive "
+        "class but is not a fix for the underlying extraction-engine attribution; a symbol with "
+        "neither a `decl_path` nor a correctly-attributed `file` remains unclassifiable and "
+        "silently invisible to this pass, exactly like any other unresolved callee.",
     ]
     if not facts.calls:
         unresolved_limitations.append(
