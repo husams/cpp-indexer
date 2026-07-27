@@ -1346,6 +1346,43 @@ def test_path_reports_no_witness_within_a_narrow_window(seeded):
     assert result.truncated
 
 
+def test_path_reports_partial_when_a_fully_exhausted_search_proves_no_witness_exists_over_a_catalogued_partial_relation(  # noqa: E501
+        seeded):
+    # "calls" is catalogued partial (call-site evidence can miss dispatch
+    # targets). A->B->C fully exhausts ("calls" has no further out-edges
+    # from C) well before max_depth, and D is never reached by any "calls"
+    # edge -- a genuine, fully-explored dead end, not a depth/budget cutoff
+    # (truncated stays false). Even so, the relation's own catalogued
+    # incompleteness means "no witness found" is never a proven negative:
+    # AC4, empty-plus-partial must not surface as complete.
+    db, ids = seeded
+    ex = Executor(db)
+    result = ex.run(
+        (start(symbol("USR::A"))
+         | path(start(symbol("USR::D")), "calls", 1, 8)).plan)
+    assert result.paths == []
+    assert not result.truncated
+    assert result.partial
+
+
+def test_path_does_not_report_partial_for_an_empty_result_over_a_catalogued_complete_relation(  # noqa: E501
+        seeded):
+    # Control for the fix above: "inherits" is catalogued complete, so a
+    # fully-exhausted, witness-free result over it must stay non-partial --
+    # proving the fix folds the relation's OWN completeness rather than
+    # unconditionally forcing every empty path() result to partial. E's
+    # only inherits edges reach D and C, neither of which has a further
+    # inherits edge to A: a genuine dead end at depth 2.
+    db, ids = seeded
+    ex = Executor(db)
+    result = ex.run(
+        (start(symbol("USR::E"))
+         | path(start(symbol("USR::A")), "inherits", 1, 8)).plan)
+    assert result.paths == []
+    assert not result.truncated
+    assert not result.partial
+
+
 def test_path_ties_are_broken_by_ascending_node_id_order():
     db = Storage(":memory:")
     start_id = db.add_symbol(_make_sym("USR::S", "s"))
@@ -2282,3 +2319,27 @@ def test_reverse_type_use_does_not_report_truncation_when_the_only_frontier_pare
     assert deep.paths == []
     assert not deep.truncated  # unaffected by depth: confirms this is a
     # real dead end, not merely one this depth happens not to trip
+
+
+def test_reverse_type_use_reports_partial_when_a_fully_exhausted_search_proves_no_owner_exists():  # noqa: E501
+    # type.has_type_edge (reverse_type_use()'s structural type_edge climb)
+    # is catalogued partial: the climb itself can miss evidence. A lone
+    # type_node with no owners and no type_edge parents is a genuine,
+    # fully-explored dead end -- not a depth/budget cutoff (truncated stays
+    # false, as the cycle test above proves for this same shape of search)
+    # -- yet the search's own catalogued incompleteness means "no owner
+    # found" is never a proven negative: AC4, empty-plus-partial must not
+    # surface as complete.
+    db = Storage(":memory:")
+    db._conn.execute(
+        "INSERT INTO type_node(type_key,spelling,kind,extent) VALUES "
+        "('b:lonely','Lonely',1,NULL)")
+    db._conn.commit()
+
+    ex = Executor(db)
+    result = ex.run(
+        (start(codebase()) | view("type") | nodes()
+         | where(eq("type_key", "b:lonely")) | reverse_type_use(4)).plan)
+    assert result.paths == []
+    assert not result.truncated
+    assert result.partial

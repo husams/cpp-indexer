@@ -1862,6 +1862,43 @@ TEST_CASE("query_plan: path() reports no witness within a narrow window") {
   CHECK(result.truncated);
 }
 
+TEST_CASE("query_plan: path() reports partial when a fully exhausted search "
+          "proves no witness exists over a catalogued-partial relation") {
+  // "calls" is catalogued partial (call-site evidence can miss dispatch
+  // targets -- generated_catalog.hpp). A->B->C fully exhausts ("calls" has
+  // no further out-edges from C) well before max_depth, and D is never
+  // reached by any "calls" edge -- a genuine, fully-explored dead end, not a
+  // depth/budget cutoff (truncated stays false). Even so, the relation's own
+  // catalogued incompleteness means "no witness found" is never a proven
+  // negative: AC4, empty-plus-partial must not surface as complete.
+  Seeded s;
+  QueryExecutor ex(s.db);
+  const auto result = ex.run(
+      (start(symbol("USR::A")) | path(start(symbol("USR::D")), "calls", 1, 8))
+          .plan());
+  CHECK(result.paths.empty());
+  CHECK_FALSE(result.truncated);
+  CHECK(result.partial);
+}
+
+TEST_CASE("query_plan: path() does not report partial for an empty result "
+          "over a catalogued-complete relation") {
+  // Control for the fix above: "inherits" is catalogued complete
+  // (generated_catalog.hpp), so a fully-exhausted, witness-free result over
+  // it must stay non-partial -- proving the fix folds the relation's OWN
+  // completeness rather than unconditionally forcing every empty path()
+  // result to partial. E's only inherits edges reach D and C, neither of
+  // which has a further inherits edge to A: a genuine dead end at depth 2.
+  Seeded s;
+  QueryExecutor ex(s.db);
+  const auto result = ex.run((start(symbol("USR::E")) |
+                              path(start(symbol("USR::A")), "inherits", 1, 8))
+                                 .plan());
+  CHECK(result.paths.empty());
+  CHECK_FALSE(result.truncated);
+  CHECK_FALSE(result.partial);
+}
+
 TEST_CASE("query_plan: path() ties are broken by ascending node-id order") {
   Storage db(":memory:");
   const int64_t start_id = db.add_symbol(make_sym("USR::S", "s"));
@@ -2943,4 +2980,28 @@ TEST_CASE("query_plan: reverse_type_use() does not report truncation when "
   CHECK_FALSE(deep.truncated); // unaffected by depth: confirms this is a
                                // real dead end, not merely one this depth
                                // happens not to trip
+}
+
+TEST_CASE("query_plan: reverse_type_use() reports partial when a fully "
+          "exhausted search proves no owner exists") {
+  // type.has_type_edge (reverse_type_use()'s structural type_edge climb --
+  // reverse_type_use_input_relations()) is catalogued partial: the climb
+  // itself can miss evidence. A lone type_node with no owners and no
+  // type_edge parents is a genuine, fully-explored dead end -- not a
+  // depth/budget cutoff (truncated stays false, as the cycle test above
+  // proves for this same shape of search) -- yet the search's own
+  // catalogued incompleteness means "no owner found" is never a proven
+  // negative: AC4, empty-plus-partial must not surface as complete.
+  Storage db(":memory:");
+  db.raw_db().exec("INSERT INTO type_node(type_key,spelling,kind,extent) "
+                   "VALUES ('b:lonely','Lonely',1,NULL)");
+
+  QueryExecutor ex(db);
+  const auto result =
+      ex.run((start(codebase()) | view(View::Type) | nodes() |
+              where(eq("type_key", "b:lonely")) | reverse_type_use(4))
+                 .plan());
+  CHECK(result.paths.empty());
+  CHECK_FALSE(result.truncated);
+  CHECK(result.partial);
 }

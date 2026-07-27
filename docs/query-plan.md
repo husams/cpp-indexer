@@ -253,7 +253,12 @@ Step    := { "id": <int>, "domain": "symbol" | "entity" | "type" |
   true` — this does not abort the search for other starts. A witness
   reconstruction cut short by the chain/witness cap is dropped entirely
   rather than serialized as a shorter, incomplete chain that does not start
-  at the real source.
+  at the real source. The Result's own `partial` field folds the traversed
+  relation's catalogued completeness independently of whether any witness
+  was found: a fully-exhausted, zero-witness `path()` over a `partial`-
+  catalogued relation still reports `partial: true` — an empty result is
+  never presented as a proven-complete negative when the relation itself
+  could have hidden a witness behind incomplete evidence.
 - **`reverse_type_use(max_depth=8)`** requires a `type`/`type_layer` node
   stream. From each seed type (or nested type-layer), it climbs `type_edge`
   (structural nesting: `pointee`/`element_type`/`return_type`/`param_type`/
@@ -271,6 +276,10 @@ Step    := { "id": <int>, "domain": "symbol" | "entity" | "type" |
   hops) were still non-empty is a finite-depth exhaustion, exactly as for
   `path()`: "no owner beyond here" is unknown, not proven, and sets
   `truncated: true` without aborting the climb for other frames or seeds.
+  `reverse_type_use()`'s fixed input set always includes a catalogued-partial
+  relation (the structural `type_edge` climb itself), so its Result always
+  reports `partial: true` — including a fully-exhausted search that finds no
+  owner at all.
 - Determinism: witnesses are ordered `length` ascending, ties broken
   lexicographically over each step's full logical typed-step identity —
   `(id, domain, through, inbound, position, pack_index)`, in that order — a
