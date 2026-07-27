@@ -9,6 +9,7 @@ the executor mirrors the C++ SQL shapes so results match by construction.
 
 from __future__ import annotations
 
+import heapq
 import json
 import os
 from dataclasses import dataclass, field, replace
@@ -24,6 +25,7 @@ from .generated_catalog import (
     FIELD_CATALOG as _GENERATED_FIELD_CATALOG,
     RELATION_CATALOG as _GENERATED_RELATION_CATALOG,
     RELATION_METADATA as _GENERATED_RELATION_METADATA,
+    TYPE_EDGE_KIND_NAMES as _GENERATED_TYPE_EDGE_KIND_NAMES,
 )
 from .generated_extensions import EXTENSION_RELATIONS as _GENERATED_EXTENSION_RELATIONS
 from .query import GraphQuery
@@ -38,8 +40,9 @@ __all__ = [
     "has_template_arg", "is_specialization_of", "is_instantiation_of", "calls", "called_by", "uses", "used_by",
     "is_abstract", "is_interface", "is_pure", "is_static", "is_template", "is_instance",
     "nodes", "view", "where", "out", "in_", "sites", "union_", "intersect", "except_",
-    "select", "count", "distinct", "order_by", "limit",
+    "select", "count", "distinct", "order_by", "limit", "path", "rank", "reverse_type_use",
     "validate", "canonical_json", "relation_catalog", "relation_metadata", "resolve_relation",
+    "resolve_qualified_relation",
     "extension_relation_catalog", "extension_relation_metadata",
 ]
 
@@ -91,6 +94,7 @@ RELATION_CATALOG = tuple(_GENERATED_RELATION_CATALOG)
 RELATION_METADATA = dict(_GENERATED_RELATION_METADATA)
 EXTENSION_RELATIONS = dict(_GENERATED_EXTENSION_RELATIONS)
 ENTITY_KIND_NAMES = tuple(_GENERATED_ENTITY_KIND_NAMES)
+TYPE_EDGE_KIND_NAMES = dict(_GENERATED_TYPE_EDGE_KIND_NAMES)
 
 
 def relation_catalog() -> tuple[tuple[str, str, int], ...]:
@@ -135,6 +139,22 @@ def resolve_relation(name: str, active: str, inbound: bool = False) -> Optional[
             matches = target == active if inbound else source == active
         if row[0] == bare and matches:
             return row
+    return None
+
+
+def resolve_qualified_relation(qualified: str) -> Optional[tuple[str, str, int]]:
+    """Resolve an already view-qualified relation name (e.g. "symbol.calls",
+    as produced by canonical_json()/plan_to_dict()) without an active-view
+    context. Used by explain() to report every relation a normalized plan
+    touches."""
+    for candidate in LOGICAL_VIEWS:
+        prefix = candidate + "."
+        if not qualified.startswith(prefix):
+            continue
+        bare = qualified[len(prefix):]
+        for row in RELATION_CATALOG:
+            if row[0] == bare and row[1] == candidate:
+                return row
     return None
 
 
@@ -386,16 +406,18 @@ def is_instance() -> Pred:
 class Stage:
     op: str  # nodes | view | where | out | in | union | intersect | except
     #        # | select | count | distinct | order_by | limit
+    #        # | path | rank | reverse_type_use
     pred: Optional[Pred] = None
     level: str = SYMBOL_VIEW
-    relation: str = ""
+    relation: str = ""  # out / in / path (normalized: qualified)
     mode: str = TraversalMode.STATIC.value
     min_depth: int = 1
-    max_depth: int = 1
-    operand: Optional["Plan"] = None
+    max_depth: int = 1  # out / in / path / reverse_type_use
+    operand: Optional["Plan"] = None  # union / intersect / except / path ("to")
     fields: tuple[str, ...] = ()
-    n: int = 0
+    n: int = 0  # limit / path ("shortest" cap) / rank ("top_n" cap)
     unknown: UnknownPolicy = UnknownPolicy.EXCLUDE
+    inbound: bool = False  # path traversal direction
 
 
 @dataclass(frozen=True)
@@ -504,6 +526,35 @@ def order_by(fields: Sequence[str]) -> Stage:
 
 def limit(n: int) -> Stage:
     return Stage(op="limit", n=n)
+
+
+def path(to: Query, relation: str, min_depth: int = 1, max_depth: int = 8,
+         shortest: int = 0, inbound: bool = False) -> Stage:
+    """Bounded deterministic shortest witness path(s) from the current node
+    stream to `to`'s node stream, over one symbol/entity-view relation
+    (docs/query-plan.md "Path result shape"). `shortest` caps the number of
+    witnesses kept after ranking (0 = keep every minimal-depth witness up to
+    the default result cap). Terminal for row-shaping stages: only
+    rank()/count()/distinct()/limit() may follow."""
+    return Stage(op="path", relation=relation, min_depth=min_depth,
+                 max_depth=max_depth, n=shortest, inbound=inbound,
+                 operand=to.plan)
+
+
+def rank(top_n: int = 0) -> Stage:
+    """Deterministic re-rank of a Path stream: shortest-first, ties broken by
+    the lexicographic ascending node-id sequence. `top_n` (0 = unbounded
+    within the default result cap) keeps only the first `top_n` witnesses."""
+    return Stage(op="rank", n=top_n)
+
+
+def reverse_type_use(max_depth: int = 8) -> Stage:
+    """First-class reverse type-use: from a `type`/`type_layer` node stream,
+    returns one witness per owner (symbol/parameter/template_parameter/
+    template_argument) that uses this type, directly or nested inside
+    pointer/reference/array/function/member-pointer/alias layers, retaining
+    every intermediate typed layer as a `through` step."""
+    return Stage(op="reverse_type_use", min_depth=1, max_depth=max_depth)
 
 
 # ---- Textual CXQ -------------------------------------------------------------
@@ -1000,6 +1051,9 @@ def _validate_walk(plan: Plan, st: _WalkState) -> Plan:
             consume()
         elif stage.op == "order_by":
             consume()
+            if st.shape == "path":
+                _fail("E_STAGE",
+                      "order_by() does not apply to a path stream; use rank()")
             if not stage.fields:
                 _fail("E_FIELD", "order_by() requires at least one field")
             for f in stage.fields:
@@ -1011,6 +1065,50 @@ def _validate_walk(plan: Plan, st: _WalkState) -> Plan:
             consume()
             if stage.n < 1:
                 _fail("E_LIMIT", "limit must be >= 1")
+        elif stage.op == "path":
+            consume()
+            if st.shape != "nodes":
+                _fail("E_STAGE", "path() applies to a node stream")
+            if st.active not in (SYMBOL_VIEW, ENTITY_VIEW):
+                _fail("E_VIEW", "path() requires a symbol or entity node stream")
+            rel = resolve_relation(stage.relation, st.active, stage.inbound)
+            if rel is None:
+                _fail("E_RELATION",
+                      f"unknown relation '{stage.relation}' in {st.active} view")
+            metadata = RELATION_METADATA.get(rel, {})
+            target_view = _relation_view(metadata.get("target", rel[1]))
+            if metadata.get("virtual") or target_view not in (SYMBOL_VIEW, ENTITY_VIEW):
+                _fail("E_RELATION", "path() requires a non-typed symbol/entity relation")
+            if not 1 <= stage.min_depth <= stage.max_depth <= 32:
+                _fail("E_DEPTH", "depth bounds must satisfy 1 <= min <= max <= 32")
+            if stage.n < 0:
+                _fail("E_LIMIT", "path() shortest cap must be >= 0")
+            if stage.operand is None:
+                _fail("E_SETOP", "path() requires a to= operand plan")
+            sub = _WalkState()
+            nop = _validate_walk(stage.operand, sub)
+            if sub.shape != "nodes":
+                _fail("E_SETOP", "path() operand must yield a node stream")
+            if sub.active != st.active:
+                _fail("E_SETOP", "path() operand view mismatch")
+            ns = replace(stage, relation=f"{rel[1]}.{rel[0]}", operand=nop)
+            st.shape = "path"
+        elif stage.op == "rank":
+            consume()
+            if st.shape != "path":
+                _fail("E_STAGE", "rank() applies to a path stream")
+            if stage.n < 0:
+                _fail("E_LIMIT", "rank() top_n must be >= 0")
+        elif stage.op == "reverse_type_use":
+            consume()
+            if st.shape != "nodes":
+                _fail("E_STAGE", "reverse_type_use() applies to a node stream")
+            if st.active not in ("type", "type_layer"):
+                _fail("E_VIEW",
+                      "reverse_type_use() requires a type or type_layer node stream")
+            if not 1 <= stage.max_depth <= 32:
+                _fail("E_DEPTH", "max_depth must satisfy 1 <= max_depth <= 32")
+            st.shape = "path"
         else:
             _fail("E_STAGE", f"unknown stage '{stage.op}'")
         out_stages.append(ns)
@@ -1021,6 +1119,59 @@ def _validate_walk(plan: Plan, st: _WalkState) -> Plan:
 
 def validate(plan: Plan) -> Plan:
     return _validate_walk(plan, _WalkState())
+
+
+def final_shape(plan: Plan) -> str:
+    """The stream shape ("nodes"/"rows"/"scalar"/"path") after all stages
+    (validated plans only); mirrors the C++ query::final_shape()."""
+    st = _WalkState()
+    _validate_walk(plan, st)
+    return st.shape
+
+
+def _collect_relation_names(p: Pred, names: set[str]) -> None:
+    if p.op in ("all_of", "any_of"):
+        for kid in p.kids:
+            _collect_relation_names(kid, names)
+    elif p.op == "not":
+        _collect_relation_names(p.kids[0], names)
+    elif p.op in ("exists", "none", "all", "at_least", "exactly"):
+        names.add(p.relation)
+        if p.target is not None:
+            _collect_relation_names(p.target, names)
+
+
+# reverse_type_use() does not walk a single catalogued relation -- it climbs
+# type_edge and type_node.canonical_id, then reads four owner-fact tables --
+# but every one of those inputs is either a catalogued relation already or,
+# for the canonical_id (cv/sugar desugaring) climb, a name with no catalog
+# entry to resolve against. This is that fixed input set, with the
+# completeness the synthetic (non-catalogued) entry cannot look up itself.
+_REVERSE_TYPE_USE_INPUT_RELATIONS = (
+    "type.has_type_edge", "type.canonical_id", "symbol.of_type",
+    "parameter.of_type", "template_parameter.of_type",
+    "template_argument.of_type",
+)
+
+# type_node.canonical_id desugaring has no RelationDesc catalog entry; treat
+# it as partial, matching type.has_type_edge's own completeness.
+_SYNTHETIC_RELATION_COMPLETENESS = {"type.canonical_id": "partial"}
+
+
+def _collect_stage_relations(stage: Stage, names: set[str]) -> None:
+    """Every relation a normalized plan touches (traversals and quantifier
+    predicates; path()'s relation is catalogued, reverse_type_use()'s fixed
+    input set above is not), including one level into
+    union()/intersect()/except()/path() "to" operand plans."""
+    if stage.op in ("out", "in", "path"):
+        names.add(stage.relation)
+    elif stage.op == "reverse_type_use":
+        names.update(_REVERSE_TYPE_USE_INPUT_RELATIONS)
+    if stage.pred is not None:
+        _collect_relation_names(stage.pred, names)
+    if stage.operand is not None:
+        for sub in stage.operand.stages:
+            _collect_stage_relations(sub, names)
 
 
 # ---- Canonical JSON -------------------------------------------------------------------
@@ -1078,6 +1229,20 @@ def _plan_to_dict(plan: Plan) -> dict[str, Any]:
             o["fields"] = list(s.fields)
         elif s.op == "limit":
             o["n"] = s.n
+        elif s.op == "path":
+            o["relation"] = s.relation
+            if s.inbound:
+                o["direction"] = "in"
+            o["min_depth"] = s.min_depth
+            o["max_depth"] = s.max_depth
+            if s.n != 0:
+                o["shortest"] = s.n
+            o["to"] = _plan_to_dict(s.operand)  # type: ignore[arg-type]
+        elif s.op == "rank":
+            if s.n != 0:
+                o["top_n"] = s.n
+        elif s.op == "reverse_type_use":
+            o["max_depth"] = s.max_depth
         stages.append(o)
     return {"cxq": 1, "source": src, "stages": stages}
 
@@ -1092,17 +1257,154 @@ def canonical_json(plan: Plan) -> str:
 
 # ---- Executor -----------------------------------------------------------------------
 
+# Budget for the bounded witness-path search (path()/reverse_type_use()):
+# total node/type expansions across the whole stage.
+PATH_NODE_BUDGET = 10000
+
+# Separate execution budget for path()'s witness-chain reconstruction (the
+# DFS that inverts the predecessor DAG back into simple witnesses): total
+# DFS descents across the whole stage. Kept independent from
+# PATH_NODE_BUDGET (rather than sharing the same counter) because a single
+# BFS level can legitimately hold up to PATH_NODE_BUDGET rows/successors --
+# reconstructing that one level alone costs O(PATH_NODE_BUDGET) DFS visits,
+# which would immediately exhaust a shared counter the row read already
+# spent up to its own cap on. Kept well above PATH_NODE_BUDGET so
+# legitimate single- or few-level reconstructions (bounded by rows actually
+# read) are never mistaken for the combinatorial blowup this budget exists
+# to catch: a DAG shaped as fully-connected layers has few edges (linear
+# in PATH_NODE_BUDGET) but exponentially many root-to-target walks through
+# it, so DFS visits can explode long before the row budget notices
+# anything is wrong (docs/query-plan.md).
+PATH_RECONSTRUCTION_BUDGET = 200000
+
+
+@dataclass
+class PathStep:
+    """One hop of a witness path: the node reached and the typed label of the
+    relation/type-edge that reached it. `through` is empty for the start
+    node. `position`/`pack_index` carry the typed view's own natural-key
+    slot (parameter/template_parameter/template_argument owners; -1 = not
+    applicable, e.g. a plain symbol/entity/type node) so distinct slots on
+    the same owner never collapse to an indistinguishable step, and so
+    ranking has a total order."""
+
+    node_id: int
+    domain: str  # "symbol" | "entity" | "type" | owner-domain name
+    through: str = ""  # relation/type_edge_kind label into this node, or the
+    # symbol_type role ("returns"/"of_type"/"underlying_type") for a
+    # symbol-domain owner
+    inbound: bool = False
+    status: str = "complete"  # per-hop completeness
+    sites: list[dict[str, Any]] = field(default_factory=list)
+    position: int = -1     # natural-key position; -1 = not applicable
+    pack_index: int = -1   # pack element index; -1 = not a pack slot
+
+
+@dataclass
+class PathWitness:
+    """One bounded ordered witness path (docs/query-plan.md "Path result
+    shape")."""
+
+    steps: list[PathStep]
+    length: int = 0
+    status: str = "complete"  # aggregated: partial if any hop is
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "length": self.length,
+            "status": self.status,
+            "steps": [
+                {
+                    "id": s.node_id,
+                    "domain": s.domain,
+                    "through": s.through,
+                    **({"direction": "in"} if s.inbound else {}),
+                    "status": s.status,
+                    **({"position": s.position} if s.position >= 0 else {}),
+                    **({"pack_index": s.pack_index}
+                       if s.pack_index >= 0 else {}),
+                    "sites": s.sites,
+                }
+                for s in self.steps
+            ],
+        }
+
+
+def _path_witness_rank(witness: PathWitness) -> tuple[Any, ...]:
+    return (
+        witness.length,
+        tuple(
+            (
+                step.node_id,
+                step.domain,
+                step.through,
+                step.inbound,
+                step.position,
+                step.pack_index,
+            )
+            for step in witness.steps
+        ),
+    )
+
+
+@dataclass
+class _WorstPathWitness:
+    """Heap entry whose smallest value is the worst retained witness."""
+
+    rank: tuple[Any, ...]
+    sequence: int
+    witness: PathWitness
+
+    def __lt__(self, other: _WorstPathWitness) -> bool:
+        return (self.rank, self.sequence) > (other.rank, other.sequence)
+
+
+@dataclass(frozen=True)
+class _HopSites:
+    """Evidence for one witness hop, capped at the default result cap; see
+    PathStep."""
+
+    sites: list[dict[str, Any]]
+    truncated: bool
+
+
+@dataclass(frozen=True)
+class _TypeOwner:
+    """One owner (declaration whose signature/template facts reach a type
+    directly, with no further nesting) across every owner-fact domain,
+    carrying that view's own natural-key identity and declaration site so
+    distinct slots on the same owner symbol are never collapsed together."""
+
+    domain: str  # "symbol" | "parameter" | "template_parameter" |
+    # "template_argument"
+    role: str    # symbol_type role ("returns"/"of_type"/"underlying_type"),
+    # else same as domain
+    node_id: int  # owning declaration's symbol id
+    position: int = -1     # natural-key position; -1 = not applicable
+    pack_index: int = -1   # pack element index; -1 = not a pack slot
+    file_id: Optional[int] = None
+    line: Optional[int] = None
+    col: Optional[int] = None
+
 
 @dataclass
 class Result:
-    shape: str  # nodes | rows | scalar
+    shape: str  # nodes | rows | scalar | path
     view: str
     truncated: bool = False
     partial: bool = False
     unknown: bool = False
+    # Non-serialized execution metric used to verify that the path row budget
+    # stops SQLite iteration at the first over-budget row.
+    path_rows_examined: int = 0
+    # Non-serialized execution metric: cumulative DFS descents charged
+    # against PATH_RECONSTRUCTION_BUDGET, used to verify path() witness-chain
+    # reconstruction is bounded by its own budget rather than by wall clock.
+    path_reconstruction_descents_examined: int = 0
     scalar: int = 0
     fields: tuple[str, ...] = ()
     rows: list[tuple[Any, ...]] = field(default_factory=list)
+    paths: list[PathWitness] = field(default_factory=list)
     index: IndexIdentity | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -1110,6 +1412,15 @@ class Result:
             return {"shape": "scalar", "view": self.view, "count": self.scalar,
                     "truncated": self.truncated,
                     "index": self.index.to_dict() if self.index else None}
+        if self.shape == "path":
+            return {
+                "shape": "path",
+                "view": self.view,
+                "count": len(self.paths),
+                "truncated": self.truncated,
+                "index": self.index.to_dict() if self.index else None,
+                "paths": [w.to_dict() for w in self.paths],
+            }
         return {
             "shape": self.shape,
             "view": self.view,
@@ -1379,9 +1690,22 @@ class _Stream:
         self.rows: list[tuple[Any, ...]] = []
         self.row_ids: list[int] = []
         self.row_status: list[tuple[bool, bool]] = []
+        self.paths: list[PathWitness] = []
         self.truncated = False
         self.partial = False
         self.unknown = False
+        # Completeness inherited from relations inspected by a
+        # witness-producing stage, independent of whether that stage emitted
+        # a witness. This must survive an empty stream and terminal count().
+        self.source_partial = False
+        # Set once by _path_stage()/_reverse_type_use_stage() and never
+        # cleared: a count() terminal stage uses this (not shape or
+        # emptiness -- an empty node/row stream is also empty) to tell a
+        # witness-aggregating scalar apart from every other count(), which
+        # must still fold per-row/per-key status via _recompute_status().
+        self.path_stream = False
+        self.path_rows_examined = 0
+        self.path_reconstruction_descents_examined = 0
         # True only while a limit() is in effect with NO cardinality-expanding
         # stage (nodes/out/in/union) after it -- otherwise _finish()
         # re-applies the default result cap (PR #20 review).
@@ -1422,11 +1746,43 @@ class Executor:
         return result
 
     def explain(self, plan: Plan) -> dict[str, Any]:
-        """Return the normalized plan and the current index identity."""
+        """Return the normalized plan, the current index identity, the final
+        execution shape, the execution budgets, and every relation the plan
+        touches with its catalogued completeness (surfacing partial/
+        unknown-capable inputs before any query runs)."""
         normalized = validate(plan)
+        relation_names: set[str] = set()
+        for stage in normalized.stages:
+            _collect_stage_relations(stage, relation_names)
+        relations = []
+        partial_inputs = False
+        unknown_capable_inputs = False
+        for name in sorted(relation_names):
+            rel = resolve_qualified_relation(name)
+            if rel is not None:
+                completeness = RELATION_METADATA.get(rel, {}).get(
+                    "completeness", "unknown")
+            else:
+                completeness = _SYNTHETIC_RELATION_COMPLETENESS.get(
+                    name, "unknown")
+            partial_inputs = partial_inputs or completeness == "partial"
+            unknown_capable_inputs = (unknown_capable_inputs
+                                      or completeness != "complete")
+            relations.append({"relation": name, "completeness": completeness})
         return {
             "plan": plan_to_dict(normalized),
             "index": self._db.index_identity().to_dict(),
+            "execution_shape": final_shape(normalized),
+            "budgets": {
+                "traverse_node_budget": TRAVERSE_NODE_BUDGET,
+                "enumerate_budget": ENUMERATE_BUDGET,
+                "path_node_budget": PATH_NODE_BUDGET,
+                "path_reconstruction_budget": PATH_RECONSTRUCTION_BUDGET,
+                "default_result_cap": DEFAULT_RESULT_CAP,
+            },
+            "input_relations": relations,
+            "partial_inputs": partial_inputs,
+            "unknown_capable_inputs": unknown_capable_inputs,
         }
 
     # -- plan walk ------------------------------------------------------------
@@ -1476,6 +1832,12 @@ class Executor:
                 self._apply_order(st, stage.fields)
             elif stage.op == "limit":
                 self._apply_limit(st, stage.n)
+            elif stage.op == "path":
+                self._path_stage(st, stage)
+            elif stage.op == "rank":
+                self._rank_stage(st, stage)
+            elif stage.op == "reverse_type_use":
+                self._reverse_type_use_stage(st, stage)
             if st.shape == "scalar":
                 break  # count() is terminal
         self._reject_ambiguous_ungrouped(st)
@@ -1750,6 +2112,571 @@ class Executor:
             depth += 1
         st.ids = sorted(emitted)
         st.view = target_view
+
+    def _hop_sites(self, entity_layer: bool, kind_id: int, inbound: bool,
+                   parent_id: int, child_id: int) -> _HopSites:
+        """Evidence for one witness hop over a non-typed symbol/entity
+        relation. Entity-layer relations are derived (no site rows). `sites`
+        never silently drops rows past the cap without saying so:
+        `truncated` is set whenever the underlying edge has more sites than
+        the cap, so the caller can mark that hop/witness partial instead of
+        presenting incomplete evidence as complete (docs/query-plan.md)."""
+        if entity_layer:
+            return _HopSites([], False)
+        src = child_id if inbound else parent_id
+        dst = parent_id if inbound else child_id
+        row = self._conn.execute(
+            "SELECT id FROM edge WHERE src_id=? AND dst_id=? AND kind=?",
+            (src, dst, kind_id)).fetchone()
+        if row is None:
+            return _HopSites([], False)
+        sites = []
+        # Fetch one row past the cap to detect an over-cap hop without a
+        # separate COUNT query.
+        for r in self._conn.execute(
+                "SELECT file_id, line, col, conditional FROM edge_site "
+                "WHERE edge_id=? ORDER BY file_id,line,col LIMIT ?",
+                (row[0], DEFAULT_RESULT_CAP + 1)):
+            sites.append({"file_id": r[0], "line": r[1], "col": r[2],
+                          "conditional": bool(r[3])})
+        truncated = len(sites) > DEFAULT_RESULT_CAP
+        if truncated:
+            del sites[DEFAULT_RESULT_CAP:]
+        return _HopSites(sites, truncated)
+
+    @staticmethod
+    def _sort_and_cap_witnesses(results: list[PathWitness], cap: int,
+                                truncated: bool) -> bool:
+        """Deterministic default/rerank order for a Path stream:
+        shortest-first, ties broken lexicographically over each step's full
+        logical typed-step identity -- (node_id, domain, through, inbound,
+        position, pack_index) -- a total order even when two witnesses
+        share the same node-id sequence but differ only by which
+        relation/type_edge hop reached a node (e.g. `member_owner` vs
+        `member_component`, both landing on the same node at the same
+        position) or which typed-view slot (e.g. parameter position) the
+        final owner step names (docs/query-plan.md). `inbound` is included
+        so this key matches _apply_distinct()'s step identity -- it is a
+        no-op today (`step.inbound` is constant per stage call, and
+        reverse_type_use() never sets it), but the two must not silently
+        diverge if that ever changes."""
+        results.sort(key=_path_witness_rank)
+        if cap > 0 and len(results) > cap:
+            del results[cap:]
+        if len(results) > DEFAULT_RESULT_CAP:
+            del results[DEFAULT_RESULT_CAP:]
+            truncated = True
+        return truncated
+
+    def _path_stage(self, st: _Stream, stage: Stage) -> None:
+        """Bounded deterministic shortest witness path(s): a multi-source BFS
+        that also records, per reached node, every predecessor reaching it at
+        that depth (the shortest-path DAG), so every minimal-depth witness --
+        not only one -- can be reconstructed once the target set is first
+        reached."""
+        inbound = stage.inbound
+        rel = resolve_relation(stage.relation, st.view, inbound)
+        assert rel is not None  # validated
+        entity_layer = rel[1] == ENTITY_VIEW
+        table = "entity_edge" if entity_layer else "edge"
+        from_col = "dst_id" if inbound else "src_id"
+        to_col = "src_id" if inbound else "dst_id"
+        rel_completeness = RELATION_METADATA.get(rel, {}).get(
+            "completeness", "partial")
+        # Every witness this stage could ever emit is stamped with the
+        # relation's own catalogued completeness (see the PathStep/
+        # PathWitness `status` assignment below) -- set the stream-level
+        # flag unconditionally, independent of whether the search actually
+        # confirms a witness, so a fully-exhausted, witness-free search over
+        # a partial relation is never presented as a proven-complete
+        # negative (empty is not evidence of completeness when the relation
+        # itself is only partially captured).
+        st.source_partial = st.source_partial or rel_completeness != "complete"
+
+        target_stream = self._run_plan(stage.operand)  # type: ignore[arg-type]
+        targets = set(target_stream.ids)
+        st.truncated = st.truncated or target_stream.truncated
+        st.source_partial = (st.source_partial or target_stream.source_partial
+                             or target_stream.partial)
+        st.partial = st.partial or target_stream.partial
+        st.unknown = st.unknown or target_stream.unknown
+
+        starts = sorted(set(st.ids))
+        results: list[PathWitness] = []
+        budget_used = 0
+        # Independent of budget_used (which bounds raw BFS row reads): see
+        # PATH_RECONSTRUCTION_BUDGET for why chain reconstruction needs its
+        # own budget rather than sharing that counter. Cumulative across
+        # every start's search in this stage call, like budget_used.
+        reconstruction_budget_used = 0
+        truncated = False
+        result_truncated = False
+        evidence_truncated = False  # capped per-hop sites: partial, but the
+        # search itself continues
+        depth_limited = False  # a start's search was cut off by max_depth
+        # while its frontier was still expandable; does not abort the
+        # search for other starts
+        domain = "entity" if entity_layer else "symbol"
+
+        def frontier_expandable(candidate_frontier: list[int]) -> bool:
+            for at in range(0, len(candidate_frontier), ID_CHUNK):
+                chunk = candidate_frontier[at:at + ID_CHUNK]
+                sql = (
+                    f"SELECT 1 FROM {table} WHERE kind = ? AND "
+                    f"{from_col} IN ("
+                    + ",".join("?" * len(chunk)) + ") LIMIT 1")
+                if self._conn.execute(sql, [rel[2], *chunk]).fetchone() \
+                        is not None:
+                    return True
+            return False
+
+        for start in starts:
+            if truncated:
+                break
+            frontier = [start]
+            # preds[d-1]: child -> sorted parent ids reaching it at depth d.
+            # No cross-level visited set: a node can legitimately be reached
+            # again at a later depth via a different route (path-length-
+            # window semantics, matching out()/in()'s "some path of length d
+            # in [min,max]" rule -- docs/query-plan.md), so pruning a child
+            # once it is first seen would silently discard an in-window
+            # witness reached only through it later.
+            preds: list[dict[int, list[int]]] = []
+            # successors[d]: parent -> sorted children at hop d+1 -- the
+            # inverted predecessor DAG, extended incrementally as the BFS
+            # advances so a reconstruction attempt at any depth reuses
+            # everything already built.
+            successors: list[dict[int, list[int]]] = []
+            chains: list[list[int]] = []
+            found_depth = -1
+            # Whether the BFS ran out of graph to expand (a true dead end)
+            # before hitting max_depth. If still False after the loop, the
+            # search stopped only because the depth window closed while the
+            # frontier was still expandable -- absence of a witness here
+            # does not prove no path exists, so it must not be reported as
+            # a complete "not found" (docs/query-plan.md).
+            frontier_exhausted = False
+            # Set by enumerate_chains (below) once total reconstruction
+            # work -- DFS descents, charged against
+            # PATH_RECONSTRUCTION_BUDGET (independent of budget_used's
+            # PATH_NODE_BUDGET -- see that constant's comment) -- exceeds
+            # the budget. A depth whose reconstruction was cut off this
+            # way can neither be reported as a witness (it may be
+            # incomplete) nor as a proven "no witness at this depth" (the
+            # negative was never actually established), so it is treated
+            # like the row-budget-exceeded case: stop the whole search and
+            # report truncated.
+            reconstruction_budget_exceeded = False
+
+            def reconstruct(depth: int) -> None:
+                # Invert the predecessor DAG up through `depth` (extending,
+                # never rebuilding, the shared `successors` levels) and
+                # enumerate every *simple* complete witness of exactly that
+                # length. Sorted children make this lexicographic in the
+                # documented rank key's node-id sequence. Keeping cap+1
+                # complete chains proves truncation without ever stopping a
+                # reconstruction halfway back to its real source. A node
+                # may repeat only when it is the start closing a cycle back
+                # to itself on the final hop (self-recursion: `path(to=
+                # start, ...)`) -- any other repeat makes a walk non-simple
+                # and it is discarded, not reported.
+                while len(successors) < depth:
+                    d = len(successors)
+                    level_successors: dict[int, list[int]] = {}
+                    for child, parents in preds[d].items():
+                        for parent in parents:
+                            level_successors.setdefault(
+                                parent, []).append(child)
+                    for children in level_successors.values():
+                        children[:] = sorted(set(children))
+                    successors.append(level_successors)
+
+                chains.clear()
+                nonlocal reconstruction_budget_used
+                nonlocal reconstruction_budget_exceeded
+                reconstruction_budget_exceeded = False
+                chain = [start]
+
+                def enumerate_chains(at_depth: int) -> None:
+                    nonlocal reconstruction_budget_used
+                    nonlocal reconstruction_budget_exceeded
+                    if (len(chains) > DEFAULT_RESULT_CAP
+                            or reconstruction_budget_exceeded):
+                        return
+                    # Every DFS descent is charged against
+                    # PATH_RECONSTRUCTION_BUDGET (independent of
+                    # budget_used's PATH_NODE_BUDGET -- see that
+                    # constant's comment): without this, a graph shaped so
+                    # every walk of a given depth is non-simple (so
+                    # `chains` stays empty and enumeration never gets to
+                    # early-exit on the result cap) forces full exploration
+                    # of every simple prefix -- a search space that grows
+                    # combinatorially with depth and branching factor and
+                    # can run unbounded while budget_used's SQL-row count
+                    # stays tiny (round-6 finding: 242s wall-clock / 336
+                    # rows examined at max_depth=16 on a 72-symbol
+                    # fixture). Charging here makes a dedicated budget
+                    # bound total reconstruction work, not just rows read.
+                    reconstruction_budget_used += 1
+                    st.path_reconstruction_descents_examined += 1
+                    if reconstruction_budget_used > PATH_RECONSTRUCTION_BUDGET:
+                        reconstruction_budget_exceeded = True
+                        return
+                    if at_depth == depth:
+                        if chain[-1] in targets:
+                            chains.append(list(chain))
+                        return
+                    for child in successors[at_depth].get(chain[-1], []):
+                        closes_cycle = (at_depth + 1 == depth
+                                        and child == chain[0]
+                                        and child in targets)
+                        if not closes_cycle and child in chain:
+                            continue
+                        chain.append(child)
+                        enumerate_chains(at_depth + 1)
+                        chain.pop()
+                        if (len(chains) > DEFAULT_RESULT_CAP
+                                or reconstruction_budget_exceeded):
+                            break
+
+                enumerate_chains(0)
+
+            depth = 1
+            while depth <= stage.max_depth and frontier:
+                parent_of: dict[int, list[int]] = {}
+                budget_exceeded = False
+                for at in range(0, len(frontier), ID_CHUNK):
+                    if budget_exceeded:
+                        break
+                    chunk = frontier[at:at + ID_CHUNK]
+                    sql = (
+                        f"SELECT {from_col},{to_col} FROM {table} WHERE "
+                        f"kind = ? AND {from_col} IN ("
+                        + ",".join("?" * len(chunk)) + ") ORDER BY 1,2")
+                    # Check the budget on every row: a single level's
+                    # frontier can be far larger than the budget, and this
+                    # must bound the rows read (and stored in parent_of),
+                    # not just notice the overflow after the whole level has
+                    # already been materialized.
+                    for parent, child in self._conn.execute(
+                            sql, [rel[2], *chunk]):
+                        st.path_rows_examined += 1
+                        budget_used += 1
+                        if budget_used > PATH_NODE_BUDGET:
+                            budget_exceeded = True
+                            break
+                        parent_of.setdefault(child, []).append(parent)
+                if budget_exceeded:
+                    truncated = True
+                    break
+                if not parent_of:
+                    frontier_exhausted = True
+                    break
+                for parents in parent_of.values():
+                    parents.sort()
+                preds.append(parent_of)
+                level = sorted(parent_of.keys())
+                if depth >= stage.min_depth and any(
+                        i in targets for i in level):
+                    # A target appears in this level's walk, but a walk is
+                    # only a witness once it survives the simple-path
+                    # filter: if every walk of this depth repeats a node,
+                    # this depth contributes no witness, and the search
+                    # must keep expanding rather than commit to a proven
+                    # negative on the strength of a non-simple walk alone
+                    # (round-5 regression: a longer, still in-window,
+                    # simple path can exist even though a shorter
+                    # non-simple walk reached the target first).
+                    reconstruct(depth)
+                    if chains:
+                        # Any chain already collected is a genuine,
+                        # fully-reconstructed simple witness (chains is
+                        # only ever appended to at the exact target leaf,
+                        # never partially) -- keep it even if the budget
+                        # ran out partway through exploring the rest of
+                        # this depth's search space, but mark the result
+                        # truncated since other witnesses at this depth
+                        # may have gone unexplored.
+                        found_depth = depth
+                        if reconstruction_budget_exceeded:
+                            truncated = True
+                        break
+                    if reconstruction_budget_exceeded:
+                        # The reconstruction at this depth was cut off
+                        # before it could prove either a witness or its
+                        # absence -- treat it like the raw-row budget
+                        # being exceeded (above): abandon the search
+                        # entirely rather than present "no witness" as a
+                        # proven negative.
+                        truncated = True
+                        break
+                frontier = level
+                depth += 1
+            if found_depth < 0:
+                # No witness was confirmed for this start: either the
+                # raw-row budget fired, or reconstruction was cut off
+                # before proving a witness or its absence (see the
+                # `reconstruction_budget_exceeded` branch above). Neither
+                # case has anything to emit, so stop the whole
+                # multi-start search here exactly like the pre-existing
+                # raw-row-budget behavior -- do NOT keep searching other
+                # starts once the cumulative budget is spent.
+                if truncated:
+                    break
+                if not frontier_exhausted and frontier_expandable(frontier):
+                    # Finite-depth exhaustion: the depth window (not a dead
+                    # end in the graph) is what stopped this start's
+                    # search, so its "no witness" result is unknown, not a
+                    # proven negative. This does not abort the search for
+                    # other starts.
+                    depth_limited = True
+                continue
+            # A witness WAS confirmed for this start (chains is non-empty)
+            # -- emit it even if `truncated` is also true, i.e. the
+            # reconstruction budget ran out partway through exploring the
+            # rest of this depth's search space. Discarding an
+            # already-proven simple witness here would be strictly worse
+            # than reporting it alongside `truncated: True`
+            # (docs/query-plan.md's budget section). The overall
+            # multi-start search still stops after this start once
+            # `truncated` is set, matching the raw-row-budget's "stop,
+            # don't silently keep going" contract -- see the `break`
+            # below.
+            if len(chains) > DEFAULT_RESULT_CAP:
+                result_truncated = True
+                del chains[DEFAULT_RESULT_CAP:]
+
+            for complete_chain in chains:
+                steps: list[PathStep] = []
+                witness_evidence_truncated = False
+                for i, node_id in enumerate(complete_chain):
+                    step = PathStep(node_id=node_id, domain=domain,
+                                    inbound=inbound,
+                                    status=rel_completeness)
+                    if i > 0:
+                        step.through = rel[0]
+                        hop = self._hop_sites(
+                            entity_layer, rel[2], inbound,
+                            complete_chain[i - 1], complete_chain[i])
+                        step.sites = hop.sites
+                        if hop.truncated:
+                            step.status = "partial"
+                            witness_evidence_truncated = True
+                    steps.append(step)
+                status = ("complete" if rel_completeness == "complete"
+                          else "partial")
+                if witness_evidence_truncated:
+                    status = "partial"
+                    evidence_truncated = True
+                results.append(PathWitness(
+                    steps=steps, length=found_depth, status=status))
+            if truncated:
+                break
+
+        truncated = truncated or result_truncated
+        truncated = self._sort_and_cap_witnesses(results, stage.n, truncated)
+        st.paths = results
+        st.truncated = (st.truncated or truncated or evidence_truncated
+                        or depth_limited)
+        st.ids = []
+        st.keys = []
+        st.shape = "path"
+        st.path_stream = True
+
+    def _rank_stage(self, st: _Stream, stage: Stage) -> None:
+        st.truncated = self._sort_and_cap_witnesses(
+            st.paths, stage.n, st.truncated)
+
+    def _owners_of_type(self, type_id: int) -> list[_TypeOwner]:
+        """One owner (declaration whose signature/template facts reach
+        `type_id` directly, with no further nesting) across every
+        owner-fact domain, carrying that view's own natural-key identity
+        (position/pack_index) and declaration site so distinct slots on the
+        same owner symbol are never collapsed together (e.g. two `int`
+        parameters at positions 0 and 1)."""
+        out: list[_TypeOwner] = []
+        # Join the owning symbol's own declaration/definition site (symbol.
+        # file_id/line/col) so a direct symbol-domain owner carries the same
+        # provenance every other owner domain (parameter/template_parameter/
+        # template_argument) already reports -- a bare symbol_id with no
+        # site is not enough evidence to present as a witness step.
+        for symbol_id, kind, file_id, line, col in self._conn.execute(
+                "SELECT st.symbol_id, st.kind, s.file_id, s.line, s.col "
+                "FROM symbol_type st LEFT JOIN symbol s ON s.id = "
+                "st.symbol_id WHERE st.type_id=? ORDER BY st.symbol_id, "
+                "st.kind", (type_id,)):
+            role = {1: "returns", 2: "of_type"}.get(kind, "underlying_type")
+            out.append(_TypeOwner(domain="symbol", role=role,
+                                  node_id=symbol_id, file_id=file_id,
+                                  line=line, col=col))
+        for owner_id, position, pack_index, file_id, line, col in \
+                self._conn.execute(
+                    "SELECT owner_id, position, pack_index, file_id, line, "
+                    "col FROM parameter WHERE type_id=? OR "
+                    "declared_type_id=? OR adjusted_type_id=? "
+                    "ORDER BY owner_id, position, pack_index",
+                    (type_id, type_id, type_id)):
+            out.append(_TypeOwner(
+                domain="parameter", role="parameter", node_id=owner_id,
+                position=position, pack_index=pack_index, file_id=file_id,
+                line=line, col=col))
+        for owner_id, position in self._conn.execute(
+                "SELECT owner_id, position FROM template_param WHERE "
+                "type_id=? ORDER BY owner_id, position", (type_id,)):
+            out.append(_TypeOwner(domain="template_parameter",
+                                  role="template_parameter",
+                                  node_id=owner_id, position=position))
+        for owner_id, position, pack_index in self._conn.execute(
+                "SELECT owner_id, position, pack_index FROM template_arg "
+                "WHERE type_id=? ORDER BY owner_id, position, pack_index",
+                (type_id,)):
+            out.append(_TypeOwner(
+                domain="template_argument", role="template_argument",
+                node_id=owner_id, position=position, pack_index=pack_index))
+        return out
+
+    def _reverse_type_use_stage(self, st: _Stream, stage: Stage) -> None:
+        """Typed reverse type-use: from a seed `type`/`type_layer` id, climb
+        type_edge (structural nesting) and type_node.canonical_id (cv/sugar
+        desugaring) backward, emitting one witness per owner found at every
+        depth -- direct use at depth 0 and every nested layer up to
+        max_depth. Mirrors GraphQuery.type_users()'s recursive closure
+        (type_edge + canonical_id, both backward) but keeps the per-branch
+        ordered `through` chain that a flat closure set cannot carry."""
+        # reverse_type_use()'s fixed input set always includes at least one
+        # catalogued-partial relation (type.has_type_edge, the structural
+        # type_edge climb -- see _REVERSE_TYPE_USE_INPUT_RELATIONS and
+        # explain()'s partial_inputs computation), so every witness this
+        # stage could ever emit is already stamped partial below regardless
+        # of which owner table matched. Set the stream-level flag
+        # unconditionally, independent of whether any owner is actually
+        # found, so an empty result here is never presented as a
+        # proven-complete negative.
+        st.source_partial = True
+        seeds: list[int] = []
+        if st.view == "type":
+            seeds = [key[0] for key in st.keys]
+        else:
+            graph = GraphQuery.from_connection(self._conn)
+            for key in st.keys:
+                layers = graph.type_layers(key[0])
+                if 0 <= key[1] < len(layers):
+                    seeds.append(layers[key[1]]["id"])
+        seeds = sorted(set(seeds))
+
+        best_results: list[_WorstPathWitness] = []
+        result_sequence = 0
+        budget_used = 0
+        truncated = False
+        result_truncated = False
+        # A frame's climb cut off by `max_depth` while its own parents (the
+        # type_edge + canonical_id climb) were still non-empty means "no
+        # owner beyond this point" is unknown, not a proven negative --
+        # mirrors _path_stage's frontier_exhausted/depth_limited pattern
+        # (docs/query-plan.md). Does not abort the climb for other
+        # frames/seeds.
+        depth_limited = False
+
+        # A chain link is (type_id, through label, type_edge.position or -1).
+        # The position is the natural-key column distinguishing e.g. a
+        # function type's several `param_type` edges to the same pointee
+        # type from one another -- without it, two such climbs would be
+        # indistinguishable in the resulting witness.
+        for seed in seeds:
+            if truncated:
+                break
+            stack: list[tuple[int, int, list[tuple[int, str, int]]]] = [
+                (seed, 0, [(seed, "", -1)])]
+            while stack and not truncated:
+                type_id, depth, chain = stack.pop()
+                budget_used += 1
+                if budget_used > PATH_NODE_BUDGET:
+                    truncated = True
+                    break
+                for owner in self._owners_of_type(type_id):
+                    steps = [
+                        PathStep(node_id=layer_id, domain="type",
+                                through=through, status="complete",
+                                position=position)
+                        for layer_id, through, position in chain
+                    ]
+                    final_step = PathStep(
+                        node_id=owner.node_id, domain=owner.domain,
+                        through=owner.role, status="partial",
+                        position=owner.position,
+                        pack_index=owner.pack_index)
+                    if owner.file_id is not None or owner.line is not None \
+                            or owner.col is not None:
+                        final_step.sites = [{
+                            "file_id": owner.file_id, "line": owner.line,
+                            "col": owner.col, "conditional": False,
+                        }]
+                    steps.append(final_step)
+                    witness = PathWitness(
+                        steps=steps, length=depth + 1, status="partial")
+                    entry = _WorstPathWitness(
+                        _path_witness_rank(witness), result_sequence, witness)
+                    result_sequence += 1
+                    if len(best_results) < DEFAULT_RESULT_CAP:
+                        heapq.heappush(best_results, entry)
+                    else:
+                        result_truncated = True
+                        if (entry.rank, entry.sequence) < (
+                                best_results[0].rank,
+                                best_results[0].sequence):
+                            heapq.heapreplace(best_results, entry)
+                # (parent_id, through label, type_edge.position or -1).
+                # Queried unconditionally, even once `depth` has already
+                # reached `max_depth`, so a depth-cut-off frame can be told
+                # apart from a true dead end (see depth_limited below).
+                parents: list[tuple[int, str, int]] = []
+                for row in self._conn.execute(
+                        "SELECT src_id, kind, position FROM type_edge "
+                        "WHERE dst_id=? ORDER BY src_id, position",
+                        (type_id,)):
+                    parents.append(
+                        (row[0], TYPE_EDGE_KIND_NAMES.get(row[1], "unknown"),
+                         row[2]))
+                for row in self._conn.execute(
+                        "SELECT id FROM type_node WHERE canonical_id=? "
+                        "ORDER BY id", (type_id,)):
+                    parents.append((row[0], "sugared_by", -1))
+                # Parents already present in the climb chain are proven dead
+                # ends (acyclic in practice; guard anyway so a data anomaly
+                # cannot loop forever) -- filter them out once, before the
+                # frontier check, so the same set is used both to decide
+                # depth_limited and to expand.
+                chain_ids = {layer_id for layer_id, _, _ in chain}
+                climbable_parents = [
+                    (parent_id, through, position)
+                    for parent_id, through, position in parents
+                    if parent_id not in chain_ids
+                ]
+                if depth >= stage.max_depth:
+                    if climbable_parents:
+                        # The climb still had parents to explore, but
+                        # max_depth cut it off first: "no owner beyond here"
+                        # is unknown, not a proven negative.
+                        depth_limited = True
+                    continue
+                for parent_id, through, position in climbable_parents:
+                    stack.append(
+                        (parent_id, depth + 1,
+                         [*chain, (parent_id, through, position)]))
+
+        results = [
+            entry.witness
+            for entry in sorted(
+                best_results, key=lambda entry: (entry.rank, entry.sequence))
+        ]
+        truncated = truncated or result_truncated
+        truncated = self._sort_and_cap_witnesses(results, 0, truncated)
+        st.paths = results
+        st.truncated = st.truncated or truncated or depth_limited
+        st.ids = []
+        st.keys = []
+        st.shape = "path"
+        st.path_stream = True
 
     def _portable_symbol(self, symbol_id: int) -> str:
         row = self._conn.execute(
@@ -2589,6 +3516,23 @@ class Executor:
 
     @staticmethod
     def _apply_distinct(st: _Stream) -> None:
+        if st.shape == "path":
+            # Full logical step identity: two typed-view slots on the same
+            # owner (e.g. parameter positions 0 and 1) share node_id/
+            # through/inbound but are still distinct witnesses.
+            def step_key(step: PathStep) -> tuple[Any, ...]:
+                return (step.node_id, step.through, step.inbound,
+                       step.domain, step.position, step.pack_index)
+
+            out: list[PathWitness] = []
+            seen: set[tuple[tuple[Any, ...], ...]] = set()
+            for witness in st.paths:
+                key = tuple(step_key(s) for s in witness.steps)
+                if key not in seen:
+                    seen.add(key)
+                    out.append(witness)
+            st.paths = out
+            return
         if st.shape == "nodes":
             if st.keys:
                 st.keys = sorted(set(st.keys))
@@ -2632,7 +3576,9 @@ class Executor:
     @staticmethod
     def _apply_limit(st: _Stream, n: int) -> None:
         st.limit_in_effect = True
-        if st.shape == "nodes":
+        if st.shape == "path":
+            del st.paths[n:]
+        elif st.shape == "nodes":
             if st.keys:
                 del st.keys[n:]
             else:
@@ -2657,11 +3603,55 @@ class Executor:
     def _finish(self, st: _Stream) -> Result:
         self._reject_ambiguous_ungrouped(st)
         if st.shape == "scalar":
-            self._recompute_status(st)
+            # count() after path()/reverse_type_use() counts witnesses and
+            # aggregates their status; every other count() (nodes, rows, or
+            # a typed view -- including one whose stream happens to be
+            # empty) must still fold per-row/per-key status via
+            # _recompute_status(). Gate on provenance (`path_stream`), not
+            # on emptiness: an empty node-stream count() also has
+            # `not st.paths and not st.rows` and must not be routed into the
+            # witness-status branch.
+            if st.path_stream:
+                # `st.source_partial` carries the stage's own
+                # catalogued-relation baseline (set unconditionally by
+                # _path_stage()/
+                # _reverse_type_use_stage(), independent of whether any
+                # witness was found) -- OR it with the per-witness fold so
+                # an empty witness set over a partial relation still
+                # reports partial rather than a proven-complete negative.
+                partial = st.source_partial or st.partial or any(
+                    w.status == "partial" for w in st.paths)
+                unknown = st.unknown
+            else:
+                self._recompute_status(st)
+                partial = st.partial
+                unknown = st.unknown
+            scalar = (len(st.paths) if st.paths else
+                     len(st.rows) if st.rows else
+                     (len(st.keys) if st.keys else len(st.ids)))
             return Result(
                 shape="scalar", view=st.view, truncated=st.truncated,
-                partial=st.partial, unknown=st.unknown,
-                scalar=len(st.rows) if st.rows else (len(st.keys) if st.keys else len(st.ids)))
+                partial=partial, unknown=unknown,
+                path_rows_examined=st.path_rows_examined,
+                path_reconstruction_descents_examined=(
+                    st.path_reconstruction_descents_examined),
+                scalar=scalar)
+        if st.shape == "path":
+            if not st.limit_in_effect and len(st.paths) > DEFAULT_RESULT_CAP:
+                del st.paths[DEFAULT_RESULT_CAP:]
+                st.truncated = True
+            # See the scalar/path_stream branch above: `st.source_partial` is the
+            # stage's own catalogued-relation baseline and must be folded
+            # in even when `st.paths` is empty.
+            return Result(
+                shape="path", view=st.view, truncated=st.truncated,
+                partial=st.source_partial or st.partial or any(
+                    w.status == "partial" for w in st.paths),
+                unknown=st.unknown,
+                path_rows_examined=st.path_rows_examined,
+                path_reconstruction_descents_examined=(
+                    st.path_reconstruction_descents_examined),
+                paths=st.paths)
         if st.shape == "nodes":
             if st.view not in (SYMBOL_VIEW, ENTITY_VIEW):
                 self._materialize(st, ("id", "identity_key"))
@@ -2679,4 +3669,7 @@ class Executor:
         return Result(
             shape=st.shape, view=st.view, truncated=st.truncated,
             partial=st.partial, unknown=st.unknown,
+            path_rows_examined=st.path_rows_examined,
+            path_reconstruction_descents_examined=(
+                st.path_reconstruction_descents_examined),
             fields=st.fields, rows=st.rows)

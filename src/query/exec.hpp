@@ -63,6 +63,11 @@ public:
   std::map<int64_t, std::vector<EdgeSiteRow>>
   edge_sites_for(const std::vector<int64_t> &edge_ids) override;
   std::vector<EdgeSiteRow> edge_sites_one(int64_t edge_id, int limit) override;
+  std::vector<EdgeSiteRow> edge_sites_page(int64_t edge_id, int offset,
+                                           int limit) override;
+  bool edge_has_conditional_site(int64_t edge_id) override;
+  std::optional<int64_t> edge_id_for(int64_t src_id, int64_t dst_id,
+                                     int64_t kind) override;
   std::vector<Symbol> redefined_symbols(int limit) override;
   std::vector<DefinitionRow> definitions_of(int64_t symbol_id) override;
   std::vector<DefinitionRow> possible_callees_of(int64_t symbol_id) override;
@@ -90,15 +95,71 @@ constexpr size_t kIdChunk = 400;
 // One result cell: null, integer, or text.
 using Cell = std::variant<std::nullptr_t, int64_t, std::string>;
 
+// Execution budget for the bounded witness-path search (path()/
+// reverse_type_use()): total node/type expansions across the whole stage.
+constexpr int64_t kPathNodeBudget = 10000;
+
+// Separate execution budget for path()'s witness-chain reconstruction (the
+// DFS that inverts the predecessor DAG back into simple witnesses): total
+// DFS descents across the whole stage. Kept independent from
+// kPathNodeBudget (rather than sharing the same counter) because a single
+// BFS level can legitimately hold up to kPathNodeBudget rows/successors
+// -- reconstructing that one level alone costs O(kPathNodeBudget) DFS
+// visits, which would immediately exhaust a shared counter that the row
+// read already spent up to its own cap on. Kept well above kPathNodeBudget
+// so that legitimate single- or few-level reconstructions (bounded by rows
+// actually read) are never mistaken for the combinatorial blowup this
+// budget exists to catch: a DAG shaped as fully-connected layers has few
+// edges (linear in kPathNodeBudget) but exponentially many root-to-target
+// walks through it, so DFS visits can explode long before the row budget
+// notices anything is wrong (docs/query-plan.md).
+constexpr int64_t kPathReconstructionBudget = 200000;
+
+// One hop of a witness path: the node reached and the typed label of the
+// relation/type-edge that reached it. `through` is empty for the start node.
+// `position`/`pack_index` carry the typed view's own natural-key slot
+// (parameter/template_parameter/template_argument owners; -1 = not
+// applicable, e.g. a plain symbol/entity/type node) so distinct slots on the
+// same owner never collapse to an indistinguishable step, and so ranking
+// has a total order.
+struct PathStep {
+  int64_t node_id = 0;
+  std::string domain;  // "symbol" | "entity" | "type" | owner-domain name
+  std::string through; // relation/type_edge_kind label into this node, or the
+                       // symbol_type role ("returns"/"of_type"/
+                       // "underlying_type") for a symbol-domain owner ("" at
+                       // the start)
+  bool inbound = false;
+  std::string status = "complete"; // per-hop completeness
+  std::vector<EdgeSiteRow> sites;  // evidence for the hop into this node
+  int64_t position = -1;           // natural-key position; -1 = not applicable
+  int64_t pack_index = -1;         // pack element index; -1 = not a pack slot
+};
+
+// One bounded ordered witness path (docs/query-plan.md "Path result shape").
+struct PathWitness {
+  std::vector<PathStep> steps;     // ordered start..target, inclusive
+  int64_t length = 0;              // number of hops (steps.size() - 1)
+  std::string status = "complete"; // aggregated: partial if any hop is
+};
+
 struct Result {
   Shape shape = Shape::Nodes;
   View view = View::Symbol;
   bool truncated = false;
   bool partial = false;
   bool unknown = false;
+  // Non-serialized execution metric used to verify that the path row budget
+  // stops SQLite iteration at the first over-budget row.
+  int64_t path_rows_examined = 0;
+  // Non-serialized execution metric: cumulative DFS descents charged
+  // against kPathReconstructionBudget, used to verify path() witness-chain
+  // reconstruction is bounded by its own budget rather than by wall clock.
+  int64_t path_reconstruction_descents_examined = 0;
   int64_t scalar = 0;                  // Shape::Scalar only
   std::vector<std::string> fields;     // row column names, select order
   std::vector<std::vector<Cell>> rows; // Shape::Nodes/Rows
+  std::vector<PathWitness> paths;      // Shape::Path only
   IndexIdentity index;
 
   // {"shape","view","count","truncated","index","rows"} -- see
@@ -123,8 +184,11 @@ public:
   Result run(const Plan &plan, std::optional<int64_t> after_id = std::nullopt);
 
   // Explain a plan without executing its row-producing stages. The returned
-  // object contains the normalized plan and the same index identity reported
-  // by Result::to_json().
+  // object contains the normalized plan, the same index identity reported by
+  // Result::to_json(), the final execution shape ("nodes"/"rows"/"scalar"/
+  // "path"), the execution budgets, and every relation the plan touches with
+  // its catalogued completeness (surfacing partial/unknown-capable inputs
+  // before any query runs).
   [[nodiscard]] json_out::Value explain(const Plan &plan);
 
 private:

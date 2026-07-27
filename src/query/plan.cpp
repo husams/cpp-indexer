@@ -161,6 +161,25 @@ const RelationDesc *resolve_relation(const std::string &name, View active,
   return nullptr;
 }
 
+const RelationDesc *resolve_qualified_relation(const std::string &qualified) {
+  for (const auto view :
+       {View::Symbol, View::Entity, View::Parameter, View::TemplateParameter,
+        View::TemplateArgument, View::SignatureSlot, View::CallArgument,
+        View::Edge, View::Site, View::Evidence, View::Type, View::TypeLayer}) {
+    const std::string prefix = std::string(view_name(view)) + ".";
+    if (!qualified.starts_with(prefix)) {
+      continue;
+    }
+    const std::string bare = qualified.substr(prefix.size());
+    for (const auto &r : relation_catalog()) {
+      if (r.layer == view && r.name == bare) {
+        return &r;
+      }
+    }
+  }
+  return nullptr;
+}
+
 // ---- entity_kind names (entity_kind seed)
 // ----------------------------------------
 
@@ -515,6 +534,12 @@ const char *stage_op_name(StageOp op) {
     return "order_by";
   case StageOp::Limit:
     return "limit";
+  case StageOp::Path:
+    return "path";
+  case StageOp::Rank:
+    return "rank";
+  case StageOp::ReverseTypeUse:
+    return "reverse_type_use";
   }
   return "?";
 }
@@ -647,6 +672,34 @@ Stage limit(int64_t n) {
   return s;
 }
 
+Stage path(const Query &to, const std::string &relation, int64_t min_depth,
+           int64_t max_depth, int64_t shortest, bool inbound) {
+  Stage s;
+  s.op = StageOp::Path;
+  s.relation = relation;
+  s.min_depth = min_depth;
+  s.max_depth = max_depth;
+  s.n = shortest;
+  s.inbound = inbound;
+  s.operand = std::make_shared<Plan>(to.plan());
+  return s;
+}
+
+Stage rank(int64_t top_n) {
+  Stage s;
+  s.op = StageOp::Rank;
+  s.n = top_n;
+  return s;
+}
+
+Stage reverse_type_use(int64_t max_depth) {
+  Stage s;
+  s.op = StageOp::ReverseTypeUse;
+  s.min_depth = 1;
+  s.max_depth = max_depth;
+  return s;
+}
+
 // ---- Predicate validation + normalization
 // -----------------------------------------
 
@@ -694,20 +747,23 @@ bool field_available(View view, const std::string &name) {
     // python/indexer/queryplan.py's `_TYPED_FIELDS["edge"]`.
     return has(std::array{"edge_id", "src_id", "dst_id", "kind", "count",
                           "base_access", "is_virtual", "vtable_slot",
-                          "relation", "source", "target", "evidence", "status",
-                          "partial", "unknown"});
+                          "relation", "source", "target", "evidence",
+                          "status", "partial", "unknown"});
   case View::Site:
-    return has(std::array{"edge_id", "src_id", "dst_id", "file_id", "file",
-                          "line", "col", "relation", "source", "target",
+    return has(std::array{"edge_id", "file_id", "file", "line", "col",
+                          "src_id", "dst_id", "relation", "source", "target",
                           "evidence", "status", "partial", "unknown"});
   case View::Evidence:
-    return has(std::array{"owner_id", "position", "default_txt",
-                          "default_type_id", "default_ref_id", "edge_id",
-                          "file_id", "line", "col", "conditional", "args_sig",
-                          "recv_src_kind", "recv_type_usr", "recv_decl_usr",
-                          "recv_type_id", "recv_decl_id", "recv_param_pos",
-                          "recv_type_is_value", "relation", "source", "target",
-                          "evidence", "status", "partial", "unknown"});
+    return has(
+        std::array{"owner_id",        "position",       "default_txt",
+                   "default_type_id", "default_ref_id", "edge_id",
+                   "file_id",         "line",           "col",
+                   "conditional",     "args_sig",       "recv_src_kind",
+                   "recv_type_usr",   "recv_decl_usr",  "recv_type_id",
+                   "recv_decl_id",    "recv_param_pos", "recv_type_is_value",
+                   "relation",        "source",         "target",
+                   "evidence",        "status",         "partial",
+                   "unknown"});
   case View::Type:
     return has(std::array{"type_key", "spelling", "kind", "is_const",
                           "is_volatile", "is_restrict", "cv_qualifiers",
@@ -748,10 +804,13 @@ void check_cmp(const Pred &p, View active) {
                                  "type_usr",      "decl_usr",
                                  "callee_usr",    "args_sig",
                                  "recv_src_kind", "recv_type_usr",
-                                 "recv_decl_usr", "slot_kind", "path",
-                                 "relation",      "source", "target",
-                                 "evidence",      "status", "extent", "kind",
-                                 "mode", "value_kind", "named_decl"};
+                                 "recv_decl_usr", "slot_kind",
+                                 "path",          "relation",
+                                 "source",        "target",
+                                 "evidence",      "status",
+                                 "extent",        "kind",
+                                 "mode",          "value_kind",
+                                 "named_decl"};
     const auto is_string = [&p, &strings] {
       return std::ranges::find(strings, p.field) != strings.end();
     };
@@ -908,8 +967,9 @@ bool is_known_view(View view) {
   return view == View::Symbol || view == View::Entity ||
          view == View::Parameter || view == View::TemplateParameter ||
          view == View::TemplateArgument || view == View::SignatureSlot ||
-         view == View::CallArgument || view == View::Edge || view == View::Site ||
-         view == View::Evidence || view == View::Type || view == View::TypeLayer;
+         view == View::CallArgument || view == View::Edge ||
+         view == View::Site || view == View::Evidence || view == View::Type ||
+         view == View::TypeLayer;
 }
 
 Plan validate_walk(const Plan &plan, WalkState &st) {
@@ -1077,6 +1137,10 @@ Plan validate_walk(const Plan &plan, WalkState &st) {
       break;
     case StageOp::OrderBy: {
       consume();
+      if (st.shape == Shape::Path) {
+        fail("E_STAGE", "order_by() does not apply to a path stream; use "
+                        "rank()");
+      }
       if (stage.fields.empty()) {
         fail("E_FIELD", "order_by() requires at least one field");
       }
@@ -1098,6 +1162,71 @@ Plan validate_walk(const Plan &plan, WalkState &st) {
         fail("E_LIMIT", "limit must be >= 1");
       }
       break;
+    case StageOp::Path: {
+      consume();
+      if (st.shape != Shape::Nodes) {
+        fail("E_STAGE", "path() applies to a node stream");
+      }
+      if (st.active != View::Symbol && st.active != View::Entity) {
+        fail("E_VIEW", "path() requires a symbol or entity node stream");
+      }
+      const RelationDesc *r =
+          resolve_relation(stage.relation, st.active, stage.inbound);
+      if (r == nullptr) {
+        fail("E_RELATION", "unknown relation '" + stage.relation + "' in " +
+                               view_name(st.active) + " view");
+      }
+      if (r->virtual_relation ||
+          (r->target_view != View::Symbol && r->target_view != View::Entity)) {
+        fail("E_RELATION",
+             "path() requires a non-typed symbol/entity relation");
+      }
+      if (stage.min_depth < 1 || stage.min_depth > stage.max_depth ||
+          stage.max_depth > 32) {
+        fail("E_DEPTH", "depth bounds must satisfy 1 <= min <= max <= 32");
+      }
+      if (stage.n < 0) {
+        fail("E_LIMIT", "path() shortest cap must be >= 0");
+      }
+      if (!stage.operand) {
+        fail("E_SETOP", "path() requires a to= operand plan");
+      }
+      WalkState sub;
+      Plan nop = validate_walk(*stage.operand, sub);
+      if (sub.shape != Shape::Nodes) {
+        fail("E_SETOP", "path() operand must yield a node stream");
+      }
+      if (sub.active != st.active) {
+        fail("E_SETOP", "path() operand view mismatch");
+      }
+      ns.relation = std::string(view_name(r->layer)) + "." + r->name;
+      ns.operand = std::make_shared<Plan>(std::move(nop));
+      st.shape = Shape::Path;
+      break;
+    }
+    case StageOp::Rank:
+      consume();
+      if (st.shape != Shape::Path) {
+        fail("E_STAGE", "rank() applies to a path stream");
+      }
+      if (stage.n < 0) {
+        fail("E_LIMIT", "rank() top_n must be >= 0");
+      }
+      break;
+    case StageOp::ReverseTypeUse:
+      consume();
+      if (st.shape != Shape::Nodes) {
+        fail("E_STAGE", "reverse_type_use() applies to a node stream");
+      }
+      if (st.active != View::Type && st.active != View::TypeLayer) {
+        fail("E_VIEW",
+             "reverse_type_use() requires a type or type_layer node stream");
+      }
+      if (stage.max_depth < 1 || stage.max_depth > 32) {
+        fail("E_DEPTH", "max_depth must satisfy 1 <= max_depth <= 32");
+      }
+      st.shape = Shape::Path;
+      break;
     }
     out.stages.push_back(std::move(ns));
   }
@@ -1118,6 +1247,12 @@ View final_view(const Plan &plan) {
   WalkState st;
   (void)validate_walk(plan, st);
   return st.active;
+}
+
+Shape final_shape(const Plan &plan) {
+  WalkState st;
+  (void)validate_walk(plan, st);
+  return st.shape;
 }
 
 // ---- canonical JSON
@@ -1275,6 +1410,26 @@ json_out::Value plan_to_json_normalized(const Plan &plan) {
       break;
     case StageOp::Limit:
       o.emplace_back("n", Value::of(s.n));
+      break;
+    case StageOp::Path:
+      o.emplace_back("relation", Value::of(s.relation));
+      if (s.inbound) {
+        o.emplace_back("direction", Value::of(std::string("in")));
+      }
+      o.emplace_back("min_depth", Value::of(s.min_depth));
+      o.emplace_back("max_depth", Value::of(s.max_depth));
+      if (s.n != 0) {
+        o.emplace_back("shortest", Value::of(s.n));
+      }
+      o.emplace_back("to", plan_to_json_normalized(*s.operand));
+      break;
+    case StageOp::Rank:
+      if (s.n != 0) {
+        o.emplace_back("top_n", Value::of(s.n));
+      }
+      break;
+    case StageOp::ReverseTypeUse:
+      o.emplace_back("max_depth", Value::of(s.max_depth));
       break;
     }
     stages.push_back(Value::obj(std::move(o)));

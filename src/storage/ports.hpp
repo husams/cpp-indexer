@@ -54,6 +54,20 @@ public:
   edge_sites_for(const std::vector<int64_t> &edge_ids) = 0;
   virtual std::vector<EdgeSiteRow> edge_sites_one(int64_t edge_id,
                                                   int limit) = 0;
+  // Bounded, delivery-order-correct (path, line, col) page over one edge's
+  // sites -- see SqliteStorageService::edge_sites_page().
+  virtual std::vector<EdgeSiteRow> edge_sites_page(int64_t edge_id, int offset,
+                                                   int limit) = 0;
+  // Whether ANY of an edge's sites is config-conditional -- an indexed
+  // EXISTS aggregate over the edge's own (primary-key-bounded) site rows,
+  // never materializing the site list, so this stays exact and cheap
+  // regardless of how many sites the edge has.
+  virtual bool edge_has_conditional_site(int64_t edge_id) = 0;
+  // Exact edge lookup by (src_id, dst_id, kind) -- an indexed point lookup
+  // against `edge`'s own UNIQUE(src_id, dst_id, kind) constraint, never a
+  // bounded adjacency scan that can miss a real edge past its own limit.
+  virtual std::optional<int64_t> edge_id_for(int64_t src_id, int64_t dst_id,
+                                             int64_t kind) = 0;
   virtual std::vector<Symbol> redefined_symbols(int limit) = 0;
   virtual std::vector<DefinitionRow> definitions_of(int64_t symbol_id) = 0;
   virtual std::vector<DefinitionRow> possible_callees_of(int64_t symbol_id) = 0;

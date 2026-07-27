@@ -33,33 +33,33 @@ struct ParsedArgs {
   // --version at the top level: print "cidx <kVersion>" to stdout, exit 0.
   bool version = false;
 
-  std::string path;                       // add-source --path (required)
-  std::optional<std::string> name;        // add-source/import --name
-  std::string db;                         // import --db (required)
-  std::vector<std::string> files;         // index FILE...
-  std::optional<std::string> source;      // index --source COMPONENT
-  std::optional<std::string> pattern;     // search (required) / list (opt.)
-  std::optional<std::string> kind;        // --kind (add-source default repo)
-  int limit = 0;                          // search 25 / list symbols 50
-  std::string symbol;                     // show symbol (required)
-  std::string file;                       // show file (required)
-  std::optional<std::string> component;   // --component/-c
-  std::optional<std::string> dir;         // --dir/-d
-  std::optional<std::string> file_filter; // list symbols --file/-f
-  bool indexed = false;                   // list files --indexed
-  bool pending = false;                   // list files --pending
-  bool all = false;                       // verify --all (list OK files too)
-  bool force = false;                     // init --force
-  bool no_git = false;                    // add-source --no-git
-  std::optional<int64_t> del_id;          // delete --id
-  std::optional<std::string> del_path;    // delete --path
-  std::optional<std::string> usr;         // delete symbol --usr
-  bool dry_run = false;                   // delete --dry-run
-  bool no_graph = false;                  // index --no-graph
-  bool index_status = false;              // index status
-  bool index_explain = false;             // index explain
+  std::string path;                          // add-source --path (required)
+  std::optional<std::string> name;           // add-source/import --name
+  std::string db;                            // import --db (required)
+  std::vector<std::string> files;            // index FILE...
+  std::optional<std::string> source;         // index --source COMPONENT
+  std::optional<std::string> pattern;        // search (required) / list (opt.)
+  std::optional<std::string> kind;           // --kind (add-source default repo)
+  int limit = 0;                             // search 25 / list symbols 50
+  std::string symbol;                        // show symbol (required)
+  std::string file;                          // show file (required)
+  std::optional<std::string> component;      // --component/-c
+  std::optional<std::string> dir;            // --dir/-d
+  std::optional<std::string> file_filter;    // list symbols --file/-f
+  bool indexed = false;                      // list files --indexed
+  bool pending = false;                      // list files --pending
+  bool all = false;                          // verify --all (list OK files too)
+  bool force = false;                        // init --force
+  bool no_git = false;                       // add-source --no-git
+  std::optional<int64_t> del_id;             // delete --id
+  std::optional<std::string> del_path;       // delete --path
+  std::optional<std::string> usr;            // delete symbol --usr
+  bool dry_run = false;                      // delete --dry-run
+  bool no_graph = false;                     // index --no-graph
+  bool index_status = false;                 // index status
+  bool index_explain = false;                // index explain
   std::optional<std::string> index_fact_set; // index status/explain --fact-set
-  std::vector<std::string> assignment;    // set FIELD=VALUE [FIELD=VALUE ...]
+  std::vector<std::string> assignment; // set FIELD=VALUE [FIELD=VALUE ...]
   std::optional<std::string> index_db; // set/file/dump-cc --db (index override)
   std::string query_text;              // query CXQ expression (required)
   bool query_json = false;             // query --json (machine-readable result)
@@ -138,6 +138,17 @@ struct ParsedArgs {
   int ui_byte_budget = 4 * 1024 * 1024;
   int ui_port = 0;
   bool ui_no_browser = false;
+  // HSE-92 live-explorer filters (comma-separated lists where noted); shared
+  // by `ui open`/`ui export` so offline exports keep the same filter surface
+  // as the live explorer.
+  std::optional<std::string> ui_node_kind;  // symbol/entity/type kind list
+  std::optional<std::string> ui_file;       // redacted file path list
+  std::optional<std::string> ui_component;  // component name list
+  std::optional<std::string> ui_repository; // repository name list
+  std::optional<std::string> ui_namespace;  // qualified namespace list
+  std::optional<std::string>
+      ui_status; // resolved|unresolved|external|internal|stub
+  std::optional<std::string> ui_applicability; // universal|conditional
 
   // -- analyze (Souffle) fields
   // ------------------------------------------------

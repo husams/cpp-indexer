@@ -59,6 +59,9 @@ Stage  := nodes(pred?) | view(level) | where(pred)
         | sites()
         | union(plan) | intersect(plan) | except(plan)
         | select(fields) | count() | distinct() | order_by(fields) | limit(n)
+        | path(to=plan, relation, depth=a..b, shortest=n, direction=out|in)
+        | rank(top_n=n)
+        | reverse_type_use(max_depth=n)
 Pred   := all_of([p...]) | any_of([p...]) | not(p)
         | cmp(field, op, value)  op ∈ {eq, ne, glob, in}
         | exists(relation, pred?) | none(relation, pred?)
@@ -111,9 +114,11 @@ Normalization: relation names become layer-qualified; nested `all_of` within
 - `E_LIMIT` limit < 1
 - `E_SETOP` operand plan does not yield a node stream in the same view
 - `E_STAGE` stage illegal for the current stream shape (nodes → rows → scalar;
-  e.g. `out` after `select`, anything after `count`, `nodes` on a non-codebase
-  source, or any consuming stage — including plan end — on a `codebase()`
-  stream not yet enumerated by `nodes()`)
+  nodes → path via `path()`/`reverse_type_use()`; e.g. `out` after `select`,
+  anything after `count`, `nodes` on a non-codebase source, `rank()`/
+  `order_by()` outside their required shape, or any consuming stage —
+  including plan end — on a `codebase()` stream not yet enumerated by
+  `nodes()`)
 
 Semantic helpers are builder-only macros. Trait helpers lower to field
 comparisons; ancestry, member, template, call, and use helpers lower to the
@@ -170,10 +175,10 @@ expanded quantifier tree.
 ## Result shape
 
 ```
-{ "shape": "nodes" | "rows" | "scalar",
+{ "shape": "nodes" | "rows" | "scalar" | "path",
   "view": "symbol" | "entity" | "parameter" | "template_parameter" |
            "template_argument" | "call_argument" | "edge" | "site" | "evidence" | "type",
-  "count": <int>,          // scalar value for shape=scalar
+  "count": <int>,          // scalar value for shape=scalar; witness count for shape=path
   "truncated": <bool>,
   "index": {
     "schema_version": <int>,
@@ -181,10 +186,136 @@ expanded quantifier tree.
     "source_fingerprint": <string|null>,
     "index_config": <string|null>,
     "index_config_fingerprint": <string|null>,
-    "freshness": "current" | "stale" | "unverifiable"
+    "freshness": "current" | "stale" | "unverifiable",
+    // The three "expected_*" fields below are populated unconditionally on
+    // every Result (not only from explain()) so any consumer can compare
+    // the indexed side against the side the query expected without a
+    // second call.
+    "expected_source_revision": <string|null>,
+    "expected_source_fingerprint": <string|null>,
+    "expected_index_config_fingerprint": <string|null>
   },
-  "rows": [ {field: value, ...} ... ] }   // absent for shape=scalar
+  "rows": [ {field: value, ...} ... ],    // absent for shape=scalar/path
+  "paths": [ Witness... ] }               // present only for shape=path
 ```
+
+## Path result shape (`path()` / `reverse_type_use()`)
+
+Both stages are terminal for row-shaping: only `rank()`, `count()`,
+`distinct()`, and `limit()` may follow; `select()`/`order_by()`/further
+traversal fail `E_STAGE`. Each result witness:
+
+```
+Witness := { "length": <int>, "status": "complete" | "partial",
+             "steps": [ Step... ] }
+Step    := { "id": <int>, "domain": "symbol" | "entity" | "type" |
+                       "parameter" | "template_parameter" |
+                       "template_argument",
+             "through": <string>,   // relation/type_edge_kind label into this
+                                    // node; "" for the start step
+             "direction"?: "in",    // present only for an inbound hop
+             "position"?: <int>,    // present only on a typed owner step
+                                    // (parameter/template-argument slot)
+             "pack_index"?: <int>,  // present only alongside `position` on a
+                                    // pack-bearing owner step
+             "status": "complete" | "partial",
+             "sites": [ {file_id, line, col, conditional}... ] }
+```
+
+- **Simple-path rule.** A witness is always a *simple path*: no node repeats
+  in its `steps`, with one deliberate exception -- the start node may recur
+  as the final step when it is itself a target (`path(to=start, ...)`),
+  reporting a length-`d` cycle back to the origin. Any other repeat makes a
+  walk non-simple, and it is discarded rather than reported. This is
+  stricter than `out()`/`in()`'s window semantics (a node reached again
+  through a cycle of length ≥ 1 *is* emitted there — see "Execution
+  semantics" above): `path()` and `reverse_type_use()` witnesses are
+  concrete node/hop sequences that must be walkable start-to-target without
+  doubling back, while `out()`/`in()` only ever emit a *node*, never a walk.
+- **`path(to, relation, min_depth=1, max_depth=8, shortest=0, inbound=false)`**
+  requires a `symbol`/`entity` node stream and a non-typed same-view
+  `relation`; `to` is a subquery yielding the target node set (`E_SETOP` on
+  view mismatch, same rule as `union`/`intersect`/`except`). It runs a
+  multi-source BFS that tracks every predecessor reaching each node at each
+  depth (a shortest-path DAG), so every minimal-depth *simple* witness — not
+  only one — is reconstructed once the target set is first reached, at a
+  depth in `[min_depth, max_depth]`, by at least one walk that survives the
+  simple-path rule above. A start node with no reachable target in that
+  window contributes no witness (not an error). "Shortest" is per-start, not
+  per-(start, target): the search stops at the first depth in the window
+  that yields at least one simple witness from that start (skipping over any
+  earlier depth whose only walks to a target repeat a node), even when a
+  different (start, target) pair would have a shorter path at another depth
+  — this is an intentional, documented contract, not a bug. `shortest` caps
+  the number of witnesses kept after the default ranking (`0` = keep every
+  minimal-depth witness up to the result cap). Each hop's `status` is the
+  relation's catalogued completeness; `sites()`-equivalent per-hop evidence
+  is included directly on `through`-bearing steps. A start's search stopping
+  at `max_depth` without ever finding a simple witness is a proven negative
+  only when its frontier is also exhausted there (no further outgoing edges
+  to expand); when the frontier at the depth limit is still expandable, "no
+  witness from this start" is unknown, not proven, and sets `truncated:
+  true` — this does not abort the search for other starts. A witness
+  reconstruction cut short by the chain/witness cap is dropped entirely
+  rather than serialized as a shorter, incomplete chain that does not start
+  at the real source. The Result's own `partial` field folds the traversed
+  relation's catalogued completeness independently of whether any witness
+  was found: a fully-exhausted, zero-witness `path()` over a `partial`-
+  catalogued relation still reports `partial: true` — an empty result is
+  never presented as a proven-complete negative when the relation itself
+  could have hidden a witness behind incomplete evidence.
+- **`reverse_type_use(max_depth=8)`** requires a `type`/`type_layer` node
+  stream. From each seed type (or nested type-layer), it climbs `type_edge`
+  (structural nesting: `pointee`/`element_type`/`return_type`/`param_type`/
+  `template_argument_type`/`member_owner`/`member_component`) and
+  `type_node.canonical_id` (cv/sugar desugaring) backward, up to
+  `max_depth`, emitting one witness per owner found at every depth — direct
+  use at depth 0 and every nested layer above it. Owners span the `symbol`
+  (`symbol_type` returns/of_type/underlying_type), `parameter`,
+  `template_parameter`, and `template_argument` domains; the final step's
+  `domain`/`through` name that owner-fact table. This is a first-class typed
+  relation executed directly (no manual per-symbol enumeration): every
+  intermediate `type` step and its `through` label is retained, unlike the
+  legacy flat `GraphQuery.type_users()` closure. A climb cut off at
+  `max_depth` while its own parents (further `type_edge`/`canonical_id`
+  hops) were still non-empty is a finite-depth exhaustion, exactly as for
+  `path()`: "no owner beyond here" is unknown, not proven, and sets
+  `truncated: true` without aborting the climb for other frames or seeds.
+  `reverse_type_use()`'s fixed input set always includes a catalogued-partial
+  relation (the structural `type_edge` climb itself), so its Result always
+  reports `partial: true` — including a fully-exhausted search that finds no
+  owner at all.
+- Determinism: witnesses are ordered `length` ascending, ties broken
+  lexicographically over each step's full logical typed-step identity —
+  `(id, domain, through, inbound, position, pack_index)`, in that order — a
+  total order even when two witnesses share the same node-id sequence but
+  differ only by which relation/`type_edge` hop reached a node (e.g.
+  `member_owner` vs `member_component` landing on the same node at the same
+  position) or by which typed-view slot (e.g. parameter position) the final
+  owner step names. `rank(top_n=0)` re-applies this order (a no-op unless
+  the stream was mutated) and, when `top_n > 0`, keeps only the first
+  `top_n` witnesses — the single documented stable tie-break for `rank()`/
+  `shortest`.
+- Budgets: the raw BFS/climb itself shares the `path_node_budget` (10 000
+  cumulative node/type expansions) independent of the traversal/enumerate
+  budgets. `path()`'s witness-chain *reconstruction* (inverting the
+  predecessor DAG at a candidate depth back into simple witnesses) is
+  bounded separately by `path_reconstruction_budget` (200 000 cumulative
+  DFS descents across the whole stage call): a single BFS level can
+  legitimately hold up to `path_node_budget` rows, and reconstructing that
+  one level alone already costs on that order, so reconstruction cannot
+  share `path_node_budget`'s counter without falsely truncating a
+  legitimate wide-but-shallow witness search. The separate, larger budget
+  exists because a DAG shaped as fully-connected consecutive layers has
+  few edges (bounded by `path_node_budget`) but exponentially many
+  root-to-target walks through it — proving no *simple* witness exists at
+  a given depth can require enumerating all of them even though the raw
+  row-read budget never comes close to firing. The witness count itself is
+  capped by the default result cap. Any of these three budgets sets
+  `truncated: true`, never a silently complete result; a reconstruction cut
+  off mid-depth keeps any witnesses already confirmed before the budget
+  ran out rather than discarding proven results, but the search does not
+  continue past that point.
 
 `source_fingerprint` is a SHA-1 digest of a deterministic, ordered manifest of
 indexed file identities, current content MD5s, and indexed flags. The
@@ -194,8 +325,30 @@ After a successful `index` pass the C++ and Python CLIs stamp these metadata
 rows. Legacy databases, missing files, or unreadable files remain queryable but
 report `unverifiable`; a changed source/configuration reports `stale`.
 
-`Executor.explain(plan)` (C++ and Python) returns the normalized plan together
-with the same `index` object without changing the database.
+`Executor.explain(plan)` (C++ and Python) returns, without executing any
+row-producing stage:
+
+```
+{ "plan": <canonical plan JSON>,
+  "index": <same "index" object as Result::to_json()>,
+  "execution_shape": "nodes" | "rows" | "scalar" | "path",
+  "budgets": {
+    "traverse_node_budget": 10000, "enumerate_budget": 10000,
+    "path_node_budget": 10000, "path_reconstruction_budget": 200000,
+    "default_result_cap": 1000
+  },
+  "input_relations": [ {"relation": <qualified name>,
+                        "completeness": "complete" | "partial"} ... ],
+  "partial_inputs": <bool>,          // any input_relations entry is partial
+  "unknown_capable_inputs": <bool> } // any input_relations entry isn't complete
+```
+
+`input_relations` collects every relation the normalized plan touches:
+`out`/`in`/`path` stages, and every relationship quantifier
+(`exists`/`none`/`all`/`at_least`/`exactly`) inside `where`/`nodes`
+predicates, including one level into `union`/`intersect`/`except`/`path`
+`to=` operand plans. This surfaces partial or unknown-capable evidence
+sources declaratively, before any query runs.
 
 Node streams without `select` emit the default fields `id`, `usr`,
 `semantic_universe`, `identity_key`, `name`, `kind`. The scope fields keep a
@@ -208,5 +361,12 @@ This is a read/query-layer addition: no schema bump. Existing `GraphQuery` /
 `EntityQuery` surfaces remain compatibility adapters over the same physical
 tables, while CXQ exposes canonical logical slot and evidence identities.
 Evidence and site expansion are explicit and budgeted; truncated results remain
-marked `truncated: true`. Deferred to later slices: `path()`, `rank()`, and the
-`cidx query` agent tool surface.
+marked `truncated: true`. `path()`, `rank()`, `reverse_type_use()`, and the
+`explain()` budgets/execution-shape/input-relations extension (CXQ-004) ship in
+this slice; `reverse_type_use()`'s owner domains are `symbol`/`parameter`/
+`template_parameter`/`template_argument` (call-site `call_argument` reverse-use
+is not covered — a disclosed scope trim, since it is evidence/site-scoped
+rather than declaration-level type use). Deferred to a later slice: the
+`cidx query` agent tool / textual-CXQ front-end for `path()`/`rank()`/
+`reverse_type_use()` (the hand-written `parse_cxq()` parser used by existing
+tests is not yet extended for these three stages).

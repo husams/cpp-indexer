@@ -15,6 +15,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 #include "compiledb/compiledb.hpp"
 #include "storage/storage_detail.hpp"
@@ -182,6 +183,16 @@ IndexIdentity SqliteStorageService::index_identity() {
   identity.source_fingerprint = stored_source;
   identity.index_config = stored_config;
   identity.index_config_fingerprint = stored_config_fingerprint;
+  // Expected/current-checkout identity: computed live regardless of whether
+  // a persisted identity exists, so explain() can always report both sides
+  // of the freshness comparison. The config fingerprint never depends on
+  // file-content readability; the source fingerprint/revision are null
+  // (unverifiable) when the current checkout is incomplete.
+  identity.expected_index_config_fingerprint = config_fingerprint;
+  if (complete) {
+    identity.expected_source_fingerprint = source_fingerprint;
+    identity.expected_source_revision = "content-sha1:" + source_fingerprint;
+  }
   if (!identity_version || *identity_version != "1" || !stored_source ||
       !stored_revision || !stored_config || !stored_config_fingerprint) {
     return identity;
@@ -511,7 +522,12 @@ SqliteStorageService::graph_edges(int64_t mine_id, const std::string &direction,
       args.emplace_back(kid);
     }
   }
-  sql += " ORDER BY ecount DESC, e.kind LIMIT ?";
+  // e.id tiebreaker (HSE-92 review P2-2): `ecount DESC, e.kind` alone is not
+  // a total order, so two identically-limited reads of the same adjacency
+  // are not guaranteed to return the same set of rows for ties -- which
+  // breaks the live explorer's positional edge continuation, which relies on
+  // repeat reads at a fixed LIMIT being byte-for-byte identical.
+  sql += " ORDER BY ecount DESC, e.kind, e.id LIMIT ?";
   args.emplace_back(static_cast<int64_t>(limit));
 
   auto st = db_.prepare(sql);
@@ -609,6 +625,108 @@ SqliteStorageService::edge_sites_one(int64_t edge_id, int limit) {
     out.push_back(std::move(row));
   }
   return out;
+}
+
+std::vector<SqliteStorageService::EdgeSiteRow>
+SqliteStorageService::edge_sites_page(int64_t edge_id, int offset, int limit) {
+  struct FileGroup {
+    std::string path;
+    int64_t file_id = 0;
+  };
+  std::vector<FileGroup> groups;
+  int64_t last_file_id = -1;
+  while (true) {
+    auto file_st = db_.prepare(
+        "SELECT file_id FROM edge_site WHERE edge_id = ? AND file_id > ? "
+        "ORDER BY file_id LIMIT 1");
+    file_st.bind(1, edge_id);
+    file_st.bind(2, last_file_id);
+    if (!file_st.step()) {
+      break;
+    }
+    last_file_id = file_st.col_int64(0);
+    groups.push_back(FileGroup{
+        .path = file_abs_path(last_file_id).value_or(std::string()),
+        .file_id = last_file_id,
+    });
+  }
+  std::ranges::sort(groups, [](const FileGroup &left, const FileGroup &right) {
+    return std::tie(left.path, left.file_id) <
+           std::tie(right.path, right.file_id);
+  });
+
+  constexpr std::string_view kRows =
+      "SELECT file_id, line, col, conditional, args_sig, "
+      "       recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos, "
+      "       recv_type_is_value "
+      "FROM edge_site_read WHERE edge_id = ? AND file_id = ? "
+      "ORDER BY line, col LIMIT ? OFFSET ?";
+  std::vector<EdgeSiteRow> out;
+  int64_t remaining_offset = offset;
+  for (const FileGroup &group : groups) {
+    if (remaining_offset > 0) {
+      auto count_st = db_.prepare(
+          "SELECT COUNT(*) FROM edge_site WHERE edge_id = ? AND file_id = ?");
+      count_st.bind(1, edge_id);
+      count_st.bind(2, group.file_id);
+      count_st.step();
+      const int64_t group_count = count_st.col_int64(0);
+      if (remaining_offset >= group_count) {
+        remaining_offset -= group_count;
+        continue;
+      }
+    }
+    auto st = db_.prepare(kRows);
+    st.bind(1, edge_id);
+    st.bind(2, group.file_id);
+    st.bind(3, static_cast<int64_t>(limit) - static_cast<int64_t>(out.size()));
+    st.bind(4, remaining_offset);
+    while (st.step()) {
+      EdgeSiteRow row;
+      row.edge_id = edge_id;
+      row.file_id = opt_int64(st, 0);
+      row.line = opt_int64(st, 1);
+      row.col = opt_int64(st, 2);
+      row.conditional = st.col_int64(3) != 0;
+      row.args_sig = opt_text(st, 4);
+      row.recv_src_kind = opt_text(st, 5);
+      row.recv_type_usr = opt_text(st, 6);
+      row.recv_decl_usr = opt_text(st, 7);
+      row.recv_param_pos = opt_int64(st, 8);
+      row.recv_type_is_value = opt_int64(st, 9);
+      out.push_back(std::move(row));
+    }
+    remaining_offset = 0;
+    if (std::cmp_greater_equal(out.size(), limit)) {
+      break;
+    }
+  }
+  return out;
+}
+
+bool SqliteStorageService::edge_has_conditional_site(int64_t edge_id) {
+  auto st =
+      db_.prepare("SELECT EXISTS(SELECT 1 FROM edge_site WHERE edge_id = ? AND "
+                  "conditional != 0)");
+  st.bind(1, edge_id);
+  if (!st.step()) {
+    return false;
+  }
+  return st.col_int64(0) != 0;
+}
+
+std::optional<int64_t> SqliteStorageService::edge_id_for(int64_t src_id,
+                                                         int64_t dst_id,
+                                                         int64_t kind) {
+  auto st = db_.prepare(
+      "SELECT id FROM edge WHERE src_id = ? AND dst_id = ? AND kind = ?");
+  st.bind(1, src_id);
+  st.bind(2, dst_id);
+  st.bind(3, kind);
+  if (!st.step()) {
+    return std::nullopt;
+  }
+  return st.col_int64(0);
 }
 
 // -- labels (v14) ------------------------------------------------------------

@@ -1441,7 +1441,11 @@ class GraphQuery:
         if kids:
             sql += f" AND e.kind IN ({','.join('?' * len(kids))})"
             args.extend(kids)
-        sql += " ORDER BY ecount DESC, e.kind LIMIT ?"
+        # e.id tiebreaker (HSE-92 review P2-2, mirrors storage_query.cpp):
+        # `ecount DESC, e.kind` alone is not a total order, so two
+        # identically-limited reads of the same adjacency are not
+        # guaranteed to return the same set of rows for ties.
+        sql += " ORDER BY ecount DESC, e.kind, e.id LIMIT ?"
         args.append(limit)
         out = []
         for r in self._c.execute(sql, args):

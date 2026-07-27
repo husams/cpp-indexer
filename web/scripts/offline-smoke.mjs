@@ -45,6 +45,7 @@ await context.route('**/*', (route) => {
 const tab = await context.newPage();
 await tab.goto(`file://${file}`);
 await tab.waitForSelector('#accessible-nodes button', {state: 'attached'});
+if (await tab.locator('#stale-banner').isVisible()) throw new Error('fresh snapshot displayed the stale banner');
 if (!(await tab.locator('#canvas-status').innerText()).includes('partial')) throw new Error('snapshot status was not rendered');
 if (!(await tab.locator('#identity').innerText()).includes('query-smoke')) throw new Error('query identity was not rendered');
 await tab.locator('#accessible-nodes button').first().evaluate((button) => button.click());
