@@ -181,7 +181,14 @@ expanded quantifier tree.
     "source_fingerprint": <string|null>,
     "index_config": <string|null>,
     "index_config_fingerprint": <string|null>,
-    "freshness": "current" | "stale" | "unverifiable"
+    "freshness": "current" | "stale" | "unverifiable",
+    // The three "expected_*" fields below are populated unconditionally on
+    // every Result (not only from explain()) so any consumer can compare
+    // the indexed side against the side the query expected without a
+    // second call.
+    "expected_source_revision": <string|null>,
+    "expected_source_fingerprint": <string|null>,
+    "expected_index_config_fingerprint": <string|null>
   },
   "rows": [ {field: value, ...} ... ],    // absent for shape=scalar/path
   "paths": [ Witness... ] }               // present only for shape=path
@@ -202,35 +209,51 @@ Step    := { "id": <int>, "domain": "symbol" | "entity" | "type" |
              "through": <string>,   // relation/type_edge_kind label into this
                                     // node; "" for the start step
              "direction"?: "in",    // present only for an inbound hop
+             "position"?: <int>,    // present only on a typed owner step
+                                    // (parameter/template-argument slot)
+             "pack_index"?: <int>,  // present only alongside `position` on a
+                                    // pack-bearing owner step
              "status": "complete" | "partial",
              "sites": [ {file_id, line, col, conditional}... ] }
 ```
 
+- **Simple-path rule.** A witness is always a *simple path*: no node repeats
+  in its `steps`, with one deliberate exception -- the start node may recur
+  as the final step when it is itself a target (`path(to=start, ...)`),
+  reporting a length-`d` cycle back to the origin. Any other repeat makes a
+  walk non-simple, and it is discarded rather than reported. This is
+  stricter than `out()`/`in()`'s window semantics (a node reached again
+  through a cycle of length ≥ 1 *is* emitted there — see "Execution
+  semantics" above): `path()` and `reverse_type_use()` witnesses are
+  concrete node/hop sequences that must be walkable start-to-target without
+  doubling back, while `out()`/`in()` only ever emit a *node*, never a walk.
 - **`path(to, relation, min_depth=1, max_depth=8, shortest=0, inbound=false)`**
   requires a `symbol`/`entity` node stream and a non-typed same-view
   `relation`; `to` is a subquery yielding the target node set (`E_SETOP` on
   view mismatch, same rule as `union`/`intersect`/`except`). It runs a
   multi-source BFS that tracks every predecessor reaching each node at each
-  depth (a shortest-path DAG), so every minimal-depth witness — not only
-  one — is reconstructed once the target set is first reached at a depth in
-  `[min_depth, max_depth]`. A start node with no reachable target in that
+  depth (a shortest-path DAG), so every minimal-depth *simple* witness — not
+  only one — is reconstructed once the target set is first reached, at a
+  depth in `[min_depth, max_depth]`, by at least one walk that survives the
+  simple-path rule above. A start node with no reachable target in that
   window contributes no witness (not an error). "Shortest" is per-start, not
-  per-(start, target): the search stops at the first depth in the window at
-  which *any* target is reached and reconstructs every minimal-depth witness
-  from that one start at that depth, even when a different (start, target)
-  pair would have a shorter path at another depth — this is an intentional,
-  documented contract, not a bug. `shortest` caps the number of witnesses
-  kept after the default ranking (`0` = keep every minimal-depth witness up
-  to the result cap). Each hop's `status` is the relation's catalogued
-  completeness; `sites()`-equivalent per-hop evidence is included directly on
-  `through`-bearing steps. A start's search stopping at `max_depth` is a
-  proven negative only when its frontier is also exhausted there (no further
-  outgoing edges to expand); when the frontier at the depth limit is still
-  expandable, "no witness from this start" is unknown, not proven, and sets
-  `truncated: true` — this does not abort the search for other starts. A
-  witness reconstruction cut short by the chain/witness cap is dropped
-  entirely rather than serialized as a shorter, incomplete chain that does
-  not start at the real source.
+  per-(start, target): the search stops at the first depth in the window
+  that yields at least one simple witness from that start (skipping over any
+  earlier depth whose only walks to a target repeat a node), even when a
+  different (start, target) pair would have a shorter path at another depth
+  — this is an intentional, documented contract, not a bug. `shortest` caps
+  the number of witnesses kept after the default ranking (`0` = keep every
+  minimal-depth witness up to the result cap). Each hop's `status` is the
+  relation's catalogued completeness; `sites()`-equivalent per-hop evidence
+  is included directly on `through`-bearing steps. A start's search stopping
+  at `max_depth` without ever finding a simple witness is a proven negative
+  only when its frontier is also exhausted there (no further outgoing edges
+  to expand); when the frontier at the depth limit is still expandable, "no
+  witness from this start" is unknown, not proven, and sets `truncated:
+  true` — this does not abort the search for other starts. A witness
+  reconstruction cut short by the chain/witness cap is dropped entirely
+  rather than serialized as a shorter, incomplete chain that does not start
+  at the real source.
 - **`reverse_type_use(max_depth=8)`** requires a `type`/`type_layer` node
   stream. From each seed type (or nested type-layer), it climbs `type_edge`
   (structural nesting: `pointee`/`element_type`/`return_type`/`param_type`/

@@ -1653,6 +1653,12 @@ class _Stream:
         self.truncated = False
         self.partial = False
         self.unknown = False
+        # Set once by _path_stage()/_reverse_type_use_stage() and never
+        # cleared: a count() terminal stage uses this (not shape or
+        # emptiness -- an empty node/row stream is also empty) to tell a
+        # witness-aggregating scalar apart from every other count(), which
+        # must still fold per-row/per-key status via _recompute_status().
+        self.path_stream = False
         self.path_rows_examined = 0
         # True only while a limit() is in effect with NO cardinality-expanding
         # stage (nodes/out/in/union) after it -- otherwise _finish()
@@ -2118,6 +2124,12 @@ class Executor:
             # once it is first seen would silently discard an in-window
             # witness reached only through it later.
             preds: list[dict[int, list[int]]] = []
+            # successors[d]: parent -> sorted children at hop d+1 -- the
+            # inverted predecessor DAG, extended incrementally as the BFS
+            # advances so a reconstruction attempt at any depth reuses
+            # everything already built.
+            successors: list[dict[int, list[int]]] = []
+            chains: list[list[int]] = []
             found_depth = -1
             # Whether the BFS ran out of graph to expand (a true dead end)
             # before hitting max_depth. If still False after the loop, the
@@ -2126,6 +2138,54 @@ class Executor:
             # does not prove no path exists, so it must not be reported as
             # a complete "not found" (docs/query-plan.md).
             frontier_exhausted = False
+
+            def reconstruct(depth: int) -> None:
+                # Invert the predecessor DAG up through `depth` (extending,
+                # never rebuilding, the shared `successors` levels) and
+                # enumerate every *simple* complete witness of exactly that
+                # length. Sorted children make this lexicographic in the
+                # documented rank key's node-id sequence. Keeping cap+1
+                # complete chains proves truncation without ever stopping a
+                # reconstruction halfway back to its real source. A node
+                # may repeat only when it is the start closing a cycle back
+                # to itself on the final hop (self-recursion: `path(to=
+                # start, ...)`) -- any other repeat makes a walk non-simple
+                # and it is discarded, not reported.
+                while len(successors) < depth:
+                    d = len(successors)
+                    level_successors: dict[int, list[int]] = {}
+                    for child, parents in preds[d].items():
+                        for parent in parents:
+                            level_successors.setdefault(
+                                parent, []).append(child)
+                    for children in level_successors.values():
+                        children[:] = sorted(set(children))
+                    successors.append(level_successors)
+
+                chains.clear()
+                chain = [start]
+
+                def enumerate_chains(at_depth: int) -> None:
+                    if len(chains) > DEFAULT_RESULT_CAP:
+                        return
+                    if at_depth == depth:
+                        if chain[-1] in targets:
+                            chains.append(list(chain))
+                        return
+                    for child in successors[at_depth].get(chain[-1], []):
+                        closes_cycle = (at_depth + 1 == depth
+                                        and child == chain[0]
+                                        and child in targets)
+                        if not closes_cycle and child in chain:
+                            continue
+                        chain.append(child)
+                        enumerate_chains(at_depth + 1)
+                        chain.pop()
+                        if len(chains) > DEFAULT_RESULT_CAP:
+                            break
+
+                enumerate_chains(0)
+
             depth = 1
             while depth <= stage.max_depth and frontier:
                 parent_of: dict[int, list[int]] = {}
@@ -2163,8 +2223,19 @@ class Executor:
                 level = sorted(parent_of.keys())
                 if depth >= stage.min_depth and any(
                         i in targets for i in level):
-                    found_depth = depth
-                    break
+                    # A target appears in this level's walk, but a walk is
+                    # only a witness once it survives the simple-path
+                    # filter: if every walk of this depth repeats a node,
+                    # this depth contributes no witness, and the search
+                    # must keep expanding rather than commit to a proven
+                    # negative on the strength of a non-simple walk alone
+                    # (round-5 regression: a longer, still in-window,
+                    # simple path can exist even though a shorter
+                    # non-simple walk reached the target first).
+                    reconstruct(depth)
+                    if chains:
+                        found_depth = depth
+                        break
                 frontier = level
                 depth += 1
             if truncated:
@@ -2178,40 +2249,6 @@ class Executor:
                     # other starts.
                     depth_limited = True
                 continue
-            # Invert the predecessor DAG and enumerate complete witnesses
-            # forward from the source. Sorted children make this lexicographic
-            # in the documented rank key's node-id sequence. Keeping cap+1
-            # complete chains proves truncation without ever stopping a
-            # reconstruction halfway back to its real source.
-            successors: list[dict[int, list[int]]] = [
-                {} for _ in range(found_depth)]
-            for depth, parent_map in enumerate(preds):
-                for child, parents in parent_map.items():
-                    for parent in parents:
-                        successors[depth].setdefault(parent, []).append(child)
-                for children in successors[depth].values():
-                    children[:] = sorted(set(children))
-
-            chains: list[list[int]] = []
-            chain = [start]
-
-            def enumerate_chains(depth: int) -> None:
-                if len(chains) > DEFAULT_RESULT_CAP:
-                    return
-                if depth == found_depth:
-                    if chain[-1] in targets:
-                        chains.append(list(chain))
-                    return
-                for child in successors[depth].get(chain[-1], []):
-                    if child in chain:
-                        continue
-                    chain.append(child)
-                    enumerate_chains(depth + 1)
-                    chain.pop()
-                    if len(chains) > DEFAULT_RESULT_CAP:
-                        break
-
-            enumerate_chains(0)
             if len(chains) > DEFAULT_RESULT_CAP:
                 result_truncated = True
                 del chains[DEFAULT_RESULT_CAP:]
@@ -2249,6 +2286,7 @@ class Executor:
         st.ids = []
         st.keys = []
         st.shape = "path"
+        st.path_stream = True
 
     def _rank_stage(self, st: _Stream, stage: Stage) -> None:
         st.truncated = self._sort_and_cap_witnesses(
@@ -2433,6 +2471,7 @@ class Executor:
         st.ids = []
         st.keys = []
         st.shape = "path"
+        st.path_stream = True
 
     def _portable_symbol(self, symbol_id: int) -> str:
         row = self._conn.execute(
@@ -3352,9 +3391,15 @@ class Executor:
     def _finish(self, st: _Stream) -> Result:
         self._reject_ambiguous_ungrouped(st)
         if st.shape == "scalar":
-            # count() after path()/reverse_type_use() counts witnesses; after
-            # select() it counts rows; otherwise ids/keys hold the stream.
-            if st.paths or not st.rows:
+            # count() after path()/reverse_type_use() counts witnesses and
+            # aggregates their status; every other count() (nodes, rows, or
+            # a typed view -- including one whose stream happens to be
+            # empty) must still fold per-row/per-key status via
+            # _recompute_status(). Gate on provenance (`path_stream`), not
+            # on emptiness: an empty node-stream count() also has
+            # `not st.paths and not st.rows` and must not be routed into the
+            # witness-status branch.
+            if st.path_stream:
                 partial = any(w.status == "partial" for w in st.paths)
                 unknown = st.unknown
             else:

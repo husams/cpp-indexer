@@ -189,6 +189,26 @@
     }
   ]
 }
+== reverse_type_use_climb ==
+{
+  "cxq": 1,
+  "source": {
+    "kind": "codebase"
+  },
+  "stages": [
+    {
+      "op": "view",
+      "level": "type"
+    },
+    {
+      "op": "nodes"
+    },
+    {
+      "op": "reverse_type_use",
+      "max_depth": 4
+    }
+  ]
+}
 == symbol_callers ==
 {
   "cxq": 1,

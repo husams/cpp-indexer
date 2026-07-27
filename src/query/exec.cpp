@@ -621,6 +621,12 @@ struct Stream {
   bool truncated = false;
   bool partial = false;
   bool unknown = false;
+  // Set once by path_stage()/reverse_type_use_stage() and never cleared: a
+  // count() terminal stage uses this (not shape or emptiness -- an empty
+  // node/row stream is also empty) to tell a witness-aggregating scalar
+  // apart from every other count(), which must still fold per-row/per-key
+  // status via recompute_status().
+  bool path_stream = false;
   int64_t path_rows_examined = 0;
   // True only while a limit() is in effect with NO cardinality-expanding
   // stage (nodes/out/in/union) after it -- otherwise finish() re-applies the
@@ -2104,6 +2110,11 @@ private:
       // docs/query-plan.md), so pruning a child once it is first seen would
       // silently discard an in-window witness reached only through it later.
       std::vector<std::map<int64_t, std::vector<int64_t>>> preds;
+      // successors[d]: parent -> sorted children at hop d+1 -- the inverted
+      // predecessor DAG, extended incrementally as the BFS advances so a
+      // reconstruction attempt at any depth reuses everything already built.
+      std::vector<std::map<int64_t, std::vector<int64_t>>> successors;
+      std::vector<std::vector<int64_t>> chains;
       int64_t found_depth = -1;
       // Whether the BFS ran out of graph to expand (a true dead end,
       // reached via the `parent_of.empty()` break below) before hitting
@@ -2113,6 +2124,66 @@ private:
       // no path exists, so it must not be reported as a complete "not
       // found" (docs/query-plan.md).
       bool frontier_exhausted = false;
+      // Invert the predecessor DAG up through `depth` (extending, never
+      // rebuilding, the shared `successors` levels) and enumerate every
+      // *simple* complete witness of exactly that length. Children are
+      // sorted at every depth, so enumeration is already lexicographic in
+      // the documented rank key's node-id sequence. Keeping the first cap+1
+      // complete chains proves truncation without ever stopping a
+      // reconstruction halfway back to its real source. A node may repeat
+      // only when it is the start closing a cycle back to itself on the
+      // final hop (self-recursion: `path(to=start, ...)`) -- any other
+      // repeat makes a walk non-simple and it is discarded, not reported.
+      const auto reconstruct = [&](int64_t depth) {
+        while (std::cmp_less(successors.size(), depth)) {
+          const size_t d = successors.size();
+          successors.emplace_back();
+          for (const auto &[child, parents] : preds[d]) {
+            for (const int64_t parent : parents) {
+              successors[d][parent].push_back(child);
+            }
+          }
+          for (auto &[parent, children] : successors[d]) {
+            std::ranges::sort(children);
+            children.erase(std::ranges::unique(children).begin(),
+                           children.end());
+          }
+        }
+        chains.clear();
+        std::vector<int64_t> chain{start};
+        const auto enumerate = [&](const auto &self, int64_t at_depth) -> void {
+          if (std::cmp_greater(chains.size(), kDefaultResultCap)) {
+            return;
+          }
+          if (std::cmp_equal(at_depth, depth)) {
+            if (targets.contains(chain.back())) {
+              chains.push_back(chain);
+            }
+            return;
+          }
+          const auto next =
+              successors[static_cast<size_t>(at_depth)].find(chain.back());
+          if (next == successors[static_cast<size_t>(at_depth)].end()) {
+            return;
+          }
+          for (const int64_t child : next->second) {
+            const bool closes_cycle = std::cmp_equal(at_depth + 1, depth) &&
+                                      child == chain.front() &&
+                                      targets.contains(child);
+            if (!closes_cycle &&
+                std::ranges::find(chain, child) != chain.end()) {
+              continue;
+            }
+            chain.push_back(child);
+            self(self, at_depth + 1);
+            chain.pop_back();
+            if (std::cmp_greater(chains.size(), kDefaultResultCap)) {
+              break;
+            }
+          }
+        };
+        enumerate(enumerate, 0);
+      };
       for (int64_t depth = 1; depth <= stage.max_depth && !frontier.empty();
            ++depth) {
         std::map<int64_t, std::vector<int64_t>> parent_of;
@@ -2176,8 +2247,19 @@ private:
         if (depth >= stage.min_depth &&
             std::ranges::any_of(
                 level, [&](int64_t id) { return targets.contains(id); })) {
-          found_depth = depth;
-          break;
+          // A target appears in this level's walk, but a walk is only a
+          // witness once it survives the simple-path filter: if every walk
+          // of this depth repeats a node, this depth contributes no
+          // witness, and the search must keep expanding rather than commit
+          // to a proven negative on the strength of a non-simple walk alone
+          // (round-5 regression: a longer, still in-window, simple path can
+          // exist even though a shorter non-simple walk reached the target
+          // first).
+          reconstruct(depth);
+          if (!chains.empty()) {
+            found_depth = depth;
+            break;
+          }
         }
         frontier = std::move(level);
       }
@@ -2194,55 +2276,6 @@ private:
         }
         continue;
       }
-      // Invert the predecessor DAG and enumerate complete witnesses forward
-      // from the source. Children are sorted at every depth, so enumeration is
-      // already lexicographic in the documented rank key's node-id sequence.
-      // Keeping the first cap+1 complete chains proves truncation without ever
-      // stopping a reconstruction halfway back to its real source.
-      std::vector<std::map<int64_t, std::vector<int64_t>>> successors(
-          static_cast<size_t>(found_depth));
-      for (int64_t depth = 0; depth < found_depth; ++depth) {
-        for (const auto &[child, parents] : preds[static_cast<size_t>(depth)]) {
-          for (const int64_t parent : parents) {
-            successors[static_cast<size_t>(depth)][parent].push_back(child);
-          }
-        }
-        for (auto &[parent, children] :
-             successors[static_cast<size_t>(depth)]) {
-          std::ranges::sort(children);
-          children.erase(std::ranges::unique(children).begin(), children.end());
-        }
-      }
-
-      std::vector<std::vector<int64_t>> chains;
-      std::vector<int64_t> chain{start};
-      const auto enumerate = [&](const auto &self, size_t depth) -> void {
-        if (std::cmp_greater(chains.size(), kDefaultResultCap)) {
-          return;
-        }
-        if (std::cmp_equal(depth, found_depth)) {
-          if (targets.contains(chain.back())) {
-            chains.push_back(chain);
-          }
-          return;
-        }
-        const auto next = successors[depth].find(chain.back());
-        if (next == successors[depth].end()) {
-          return;
-        }
-        for (const int64_t child : next->second) {
-          if (std::ranges::find(chain, child) != chain.end()) {
-            continue;
-          }
-          chain.push_back(child);
-          self(self, depth + 1);
-          chain.pop_back();
-          if (std::cmp_greater(chains.size(), kDefaultResultCap)) {
-            break;
-          }
-        }
-      };
-      enumerate(enumerate, 0);
       if (std::cmp_greater(chains.size(), kDefaultResultCap)) {
         result_truncated = true;
         chains.resize(kDefaultResultCap);
@@ -2290,6 +2323,7 @@ private:
     st.ids.clear();
     st.keys.clear();
     st.shape = Shape::Path;
+    st.path_stream = true;
   }
 
   static bool witness_less(const PathWitness &a, const PathWitness &b) {
@@ -2661,6 +2695,7 @@ private:
     st.ids.clear();
     st.keys.clear();
     st.shape = Shape::Path;
+    st.path_stream = true;
   }
 
   std::optional<std::string> file_path(int64_t file_id) {
@@ -3755,9 +3790,14 @@ public:
     res.path_rows_examined = st.path_rows_examined;
     reject_ambiguous_ungrouped(st);
     if (st.shape == Shape::Scalar) {
-      // count() after path()/reverse_type_use() counts witnesses; after
-      // select() it counts rows; otherwise ids/keys hold the stream.
-      if (!st.paths.empty() || st.rows.empty()) {
+      // count() after path()/reverse_type_use() counts witnesses and
+      // aggregates their status; every other count() (nodes, rows, or a
+      // typed view -- including one whose stream happens to be empty) must
+      // still fold per-row/per-key status via recompute_status(). Gate on
+      // provenance (`path_stream`), not on emptiness: an empty node-stream
+      // count() also has `paths.empty() && rows.empty()` and must not be
+      // routed into the witness-status branch.
+      if (st.path_stream) {
         res.truncated = st.truncated;
         res.partial = std::ranges::any_of(st.paths, [](const PathWitness &w) {
           return w.status == "partial";

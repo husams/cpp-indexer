@@ -80,6 +80,9 @@ def _golden_plans():
             | path(start(symbol("USR::C")), "calls", 1, 8, 1)
             | rank(5) | limit(1)
         ).plan,
+        "reverse_type_use_climb": (
+            start(codebase()) | view("type") | nodes() | reverse_type_use(4)
+        ).plan,
     }
 
 
@@ -1809,6 +1812,91 @@ def test_path_never_serializes_a_chain_reconstruction_cut_short_by_the_witness_c
     assert [step.node_id for step in ranked.paths[0].steps] == [
         source, source + 2, target]
     assert ranked.truncated
+
+
+def test_path_finds_a_longer_simple_witness_when_the_shortest_walk_is_non_simple():
+    # S -[calls]-> A, A -[calls]-> S, S -[calls]-> T, S -[calls]-> B,
+    # B -[calls]-> C, C -[calls]-> D, D -[calls]-> T. The only depth-3 walk
+    # that reaches T is the non-simple S->A->S->T (S repeats); the true
+    # simple witness is the depth-4 walk S->B->C->D->T. Before the fix, the
+    # BFS committed to found_depth=3 on the first (non-simple) hit, rejected
+    # every depth-3 chain, and returned zero witnesses with truncated=False
+    # -- a false proven negative even though an in-window simple path
+    # exists at a deeper level.
+    db = Storage(":memory:")
+    s = db.add_symbol(_make_sym("USR::Nonsimple_S", "s"))
+    a = db.add_symbol(_make_sym("USR::Nonsimple_A", "a"))
+    t = db.add_symbol(_make_sym("USR::Nonsimple_T", "t"))
+    b = db.add_symbol(_make_sym("USR::Nonsimple_B", "b"))
+    c = db.add_symbol(_make_sym("USR::Nonsimple_C", "c"))
+    d = db.add_symbol(_make_sym("USR::Nonsimple_D", "d"))
+    db.add_edge(s, a, 1)
+    db.add_edge(a, s, 1)
+    db.add_edge(s, t, 1)
+    db.add_edge(s, b, 1)
+    db.add_edge(b, c, 1)
+    db.add_edge(c, d, 1)
+    db.add_edge(d, t, 1)
+
+    ex = Executor(db)
+    result = ex.run(
+        (start(symbol("USR::Nonsimple_S"))
+         | path(start(symbol("USR::Nonsimple_T")), "calls", 3, 5)).plan)
+    assert len(result.paths) == 1
+    witness = result.paths[0]
+    assert witness.length == 4
+    assert [step.node_id for step in witness.steps] == [s, b, c, d, t]
+    assert not result.truncated
+
+
+def test_path_reports_a_self_recursive_witness_when_the_target_is_the_start():
+    # S -[calls]-> S: a self-loop. path(to=S, calls, 1, 3) must report the
+    # length-1 cycle S->S as a witness rather than rejecting it as a
+    # "repeated node" -- the start closing a cycle back to itself on the
+    # final hop is the only witness self-recursion can ever produce.
+    db = Storage(":memory:")
+    s = db.add_symbol(_make_sym("USR::SelfLoop_S", "s"))
+    db.add_edge(s, s, 1)
+
+    ex = Executor(db)
+    result = ex.run(
+        (start(symbol("USR::SelfLoop_S"))
+         | path(start(symbol("USR::SelfLoop_S")), "calls", 1, 3)).plan)
+    assert len(result.paths) == 1
+    witness = result.paths[0]
+    assert witness.length == 1
+    assert [step.node_id for step in witness.steps] == [s, s]
+    assert not result.truncated
+
+
+def test_count_over_a_typed_node_stream_still_aggregates_partial_and_unknown_status():
+    # Regression: _finish()'s scalar branch used to gate the witness-status
+    # path on `st.paths or not st.rows` -- true for ANY node-stream count()
+    # (paths and rows both empty), which skipped _recompute_status()
+    # entirely and hard-wired partial/unknown to False. A count() over a
+    # `partial`-catalogued relation must still report partial=True,
+    # matching what select("status") sees on the same stream.
+    db = Storage(":memory:")
+    component = db.add_component("project", "/tmp/count-status-py")
+    directory = db.add_directory(component, "src")
+    file_id = db.add_file(directory, "count_status.cpp")
+    caller = db.add_symbol(_make_sym("USR::CountStatus_Caller", "caller"))
+    callee = db.add_symbol(_make_sym("USR::CountStatus_Callee", "callee"))
+    edge = db.add_edge(caller, callee, 1)  # calls: partial
+    db.add_edge_site(edge, file_id, 1, 1)
+
+    ex = Executor(db)
+    selected = ex.run(
+        (start(codebase()) | view("edge") | nodes()
+         | select(["status"])).plan)
+    assert selected.rows == [("partial",)]
+    assert selected.partial
+
+    counted = ex.run(
+        (start(codebase()) | view("edge") | nodes() | count()).plan)
+    assert counted.shape == "scalar"
+    assert counted.scalar == 1
+    assert counted.partial
 
 
 def test_reverse_type_use_reports_a_direct_symbol_owners_declaration_site():

@@ -138,6 +138,9 @@ std::map<std::string, Plan> golden_plans() {
       (start(symbol("USR::A")) |
        path(start(symbol("USR::C")), "calls", 1, 8, 1) | rank(5) | limit(1))
           .plan();
+  plans["reverse_type_use_climb"] =
+      (start(codebase()) | view(View::Type) | nodes() | reverse_type_use(4))
+          .plan();
   return plans;
 }
 
@@ -2401,6 +2404,113 @@ TEST_CASE("query_plan: path() never serializes a chain reconstruction that was "
   CHECK(ranked.paths[0].steps[1].node_id == middle.front());
   CHECK(ranked.paths[0].steps[2].node_id == target);
   CHECK(ranked.truncated);
+}
+
+TEST_CASE("query_plan: path() finds a longer simple witness when the "
+          "shortest walk to a target is non-simple") {
+  // S -[calls]-> A, A -[calls]-> S, S -[calls]-> T, S -[calls]-> B,
+  // B -[calls]-> C, C -[calls]-> D, D -[calls]-> T. The only depth-3 walk
+  // that reaches T is the non-simple S->A->S->T (S repeats); the true
+  // simple witness is the depth-4 walk S->B->C->D->T. Before the fix, the
+  // BFS committed to found_depth=3 on the first (non-simple) hit, rejected
+  // every depth-3 chain, and returned zero witnesses with truncated=false
+  // -- a false proven negative even though an in-window simple path
+  // exists at a deeper level.
+  Storage db(":memory:");
+  const int64_t s = db.add_symbol(make_sym("USR::Nonsimple_S", "s"));
+  const int64_t a = db.add_symbol(make_sym("USR::Nonsimple_A", "a"));
+  const int64_t t = db.add_symbol(make_sym("USR::Nonsimple_T", "t"));
+  const int64_t b = db.add_symbol(make_sym("USR::Nonsimple_B", "b"));
+  const int64_t c = db.add_symbol(make_sym("USR::Nonsimple_C", "c"));
+  const int64_t d = db.add_symbol(make_sym("USR::Nonsimple_D", "d"));
+  db.add_edge(make_edge(s, a, 1));
+  db.add_edge(make_edge(a, s, 1));
+  db.add_edge(make_edge(s, t, 1));
+  db.add_edge(make_edge(s, b, 1));
+  db.add_edge(make_edge(b, c, 1));
+  db.add_edge(make_edge(c, d, 1));
+  db.add_edge(make_edge(d, t, 1));
+
+  QueryExecutor ex(db);
+  const auto result =
+      ex.run((start(symbol("USR::Nonsimple_S")) |
+              path(start(symbol("USR::Nonsimple_T")), "calls", 3, 5))
+                 .plan());
+  REQUIRE(result.paths.size() == 1);
+  const auto &witness = result.paths[0];
+  CHECK(witness.length == 4);
+  REQUIRE(witness.steps.size() == 5);
+  CHECK(witness.steps[0].node_id == s);
+  CHECK(witness.steps[1].node_id == b);
+  CHECK(witness.steps[2].node_id == c);
+  CHECK(witness.steps[3].node_id == d);
+  CHECK(witness.steps[4].node_id == t);
+  CHECK_FALSE(result.truncated);
+}
+
+TEST_CASE("query_plan: path() reports a self-recursive witness when the "
+          "target is the start") {
+  // S -[calls]-> S: a self-loop. path(to=S, calls, 1, 3) must report the
+  // length-1 cycle S->S as a witness rather than rejecting it as a
+  // "repeated node" -- the start closing a cycle back to itself on the
+  // final hop is the only witness self-recursion can ever produce.
+  Storage db(":memory:");
+  const int64_t s = db.add_symbol(make_sym("USR::SelfLoop_S", "s"));
+  db.add_edge(make_edge(s, s, 1));
+
+  QueryExecutor ex(db);
+  const auto result =
+      ex.run((start(symbol("USR::SelfLoop_S")) |
+              path(start(symbol("USR::SelfLoop_S")), "calls", 1, 3))
+                 .plan());
+  REQUIRE(result.paths.size() == 1);
+  const auto &witness = result.paths[0];
+  CHECK(witness.length == 1);
+  REQUIRE(witness.steps.size() == 2);
+  CHECK(witness.steps[0].node_id == s);
+  CHECK(witness.steps[1].node_id == s);
+  CHECK_FALSE(result.truncated);
+}
+
+TEST_CASE("query_plan: count() over a typed node stream still aggregates "
+          "partial/unknown status") {
+  // Regression: finish()'s Shape::Scalar branch used to gate the
+  // witness-status path on `!st.paths.empty() || st.rows.empty()` --
+  // true for ANY node-stream count() (paths and rows both empty), which
+  // skipped recompute_status() entirely and hard-wired partial/unknown to
+  // false. A count() over a `partial`-catalogued relation must still
+  // report partial=true, matching what select("status") sees on the same
+  // stream.
+  Storage db(":memory:");
+  const int64_t component = db.add_component("project", "/tmp/count-status");
+  const int64_t directory = db.add_directory(component, "src");
+  const int64_t file = db.add_file(directory, "count_status.cpp");
+  const int64_t caller =
+      db.add_symbol(make_sym("USR::CountStatus_Caller", "caller"));
+  const int64_t callee =
+      db.add_symbol(make_sym("USR::CountStatus_Callee", "callee"));
+  const int64_t edge = db.add_edge(make_edge(caller, callee, 1)); // calls:
+                                                                  // partial
+  cidx::EdgeSite site;
+  site.edge_id = edge;
+  site.file_id = file;
+  site.line = 1;
+  site.col = 1;
+  db.add_edge_site(site);
+
+  QueryExecutor ex(db);
+  const auto selected = ex.run(
+      (start(codebase()) | view(View::Edge) | nodes() | select({"status"}))
+          .plan());
+  REQUIRE(selected.rows.size() == 1);
+  CHECK(std::get<std::string>(selected.rows[0][0]) == "partial");
+  CHECK(selected.partial);
+
+  const auto counted =
+      ex.run((start(codebase()) | view(View::Edge) | nodes() | count()).plan());
+  CHECK(counted.shape == Shape::Scalar);
+  CHECK(counted.scalar == 1);
+  CHECK(counted.partial);
 }
 
 TEST_CASE("query_plan: reverse_type_use() reports a direct symbol owner's "
