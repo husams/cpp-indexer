@@ -350,6 +350,14 @@ for checker, expected_count in checkers.items():
         # compatibility tree containing the base-pinned checker and archived
         # PR spec inputs.
         execution_marker = 'run: "$RUNNER_TEMP/tla-compat/tools/check-regression.sh"'
+    elif checker == "check-conformance.sh":
+        # The base checker likewise predates CIDX_REPO_ROOT. The workflow runs
+        # it from a runner-temp compatibility tree containing the base-pinned
+        # checker and archived PR conformance inputs.
+        execution_marker = (
+            'run: "$RUNNER_TEMP/tla-conformance-compat/spec/tla/tools/'
+            'check-conformance.sh"'
+        )
     else:
         execution_marker = f'run: "$RUNNER_TEMP/{checker}"'
     if execution_marker not in workflow:
@@ -391,6 +399,15 @@ if (
     raise SystemExit(
         "TLA_VERIFICATION_TAMPER_REGRESSION_STATUS=FAIL "
         "reason=base-regression-compatibility-tree-missing"
+    )
+
+proof_regression_run = 'run: "$RUNNER_TEMP/check-proofs-vacuous-comment-regression.sh"'
+proof_regression_start = workflow.rindex(proof_regression_run)
+proof_regression_step = workflow[workflow.rindex("- name:", 0, proof_regression_start):proof_regression_start]
+if "CIDX_REPO_ROOT: ${{ github.workspace }}" not in proof_regression_step:
+    raise SystemExit(
+        "TLA_VERIFICATION_TAMPER_REGRESSION_STATUS=FAIL "
+        "reason=proof-regression-repo-root-not-explicit"
     )
 
 # check-proofs-vacuous-comment-regression.sh must likewise pass

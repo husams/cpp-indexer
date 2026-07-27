@@ -257,6 +257,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Trust the mounted checkout for containerized Git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Fetch base ref
         if: github.event_name == 'pull_request'
         run: git fetch origin "${{ github.event.pull_request.base.ref }}"
@@ -321,6 +323,9 @@ jobs:
         if: github.event_name == 'pull_request'
         env:
           CIDX_REPO_ROOT: ${{ github.workspace }}
+          TLA_MODULE_DIR: ${{ github.workspace }}/spec/tla/modules
+          TLA_PROOF_DIR: ${{ github.workspace }}/spec/tla/proofs
+          TLA_MANIFEST: ${{ github.workspace }}/spec/tla/manifest.json
         run: "$RUNNER_TEMP/check-proofs.sh"
       - name: Run TLAPS proof gate (push)
         if: github.event_name != 'pull_request'
@@ -328,6 +333,7 @@ jobs:
       - name: Run proof theorem/invariant binding regression (pull_request)
         if: github.event_name == 'pull_request'
         env:
+          CIDX_REPO_ROOT: ${{ github.workspace }}
           CIDX_CHECK_PROOFS_SH: ${{ runner.temp }}/check-proofs.sh
         run: "$RUNNER_TEMP/check-proofs-vacuous-comment-regression.sh"
       - name: Run proof theorem/invariant binding regression (push)
@@ -388,6 +394,23 @@ jobs:
             "${{ github.event.pull_request.base.sha }}" \
             spec/tla/tools/export-counterexample.sh \
             "$RUNNER_TEMP/export-counterexample.sh"
+      - name: Prepare compatibility tree for the base-pinned conformance checker
+        if: github.event_name == 'pull_request'
+        # check-conformance.sh at the current base predates CIDX_REPO_ROOT and
+        # derives its TLA root from its own location. Keep that checker
+        # base-pinned, but place it beside an archive of only the PR's
+        # conformance inputs in a runner-temp tree matching its historical
+        # layout. Executable enforcement remains the immutable extracted copy.
+        run: |
+          compatibility_root="$RUNNER_TEMP/tla-conformance-compat"
+          mkdir -p "$compatibility_root/spec/tla/tools"
+          git archive --format=tar "${{ github.event.pull_request.head.sha }}" \
+            spec/tla/manifest.json spec/tla/models spec/tla/modules \
+            spec/tla/protected spec/tla/conformance \
+            | tar -x -C "$compatibility_root"
+          cp "$RUNNER_TEMP/check-conformance.sh" \
+            "$compatibility_root/spec/tla/tools/check-conformance.sh"
+          chmod +x "$compatibility_root/spec/tla/tools/check-conformance.sh"
       - name: Set up pinned Java runtime
         uses: actions/setup-java@v4
         with:
@@ -395,9 +418,7 @@ jobs:
           java-version: '17'
       - name: Check conformance mappings and deterministic traces (pull_request)
         if: github.event_name == 'pull_request'
-        env:
-          CIDX_REPO_ROOT: ${{ github.workspace }}
-        run: "$RUNNER_TEMP/check-conformance.sh"
+        run: "$RUNNER_TEMP/tla-conformance-compat/spec/tla/tools/check-conformance.sh"
       - name: Check conformance mappings and deterministic traces (push)
         if: github.event_name != 'pull_request'
         run: spec/tla/tools/check-conformance.sh
@@ -406,6 +427,10 @@ jobs:
         env:
           CIDX_REPO_ROOT: ${{ github.workspace }}
           CIDX_CHECK_SH: ${{ runner.temp }}/check.sh
+          TLA_MODEL_DIR: ${{ github.workspace }}/spec/tla/models
+          TLA_MODULE_DIR: ${{ github.workspace }}/spec/tla/modules
+          TLA_PROTECTED_DIR: ${{ github.workspace }}/spec/tla/protected
+          TLA_MODEL_SOURCE_DIR: ${{ github.workspace }}/spec/tla/models
         run: |
           "$RUNNER_TEMP/export-counterexample.sh" --demo --out /tmp/trusted-outcome-violation.json
           diff /tmp/trusted-outcome-violation.json \

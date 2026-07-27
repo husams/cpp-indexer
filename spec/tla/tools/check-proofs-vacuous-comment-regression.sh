@@ -74,7 +74,7 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+REPO_ROOT="${CIDX_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
 CHECK_PROOFS_SH="${CIDX_CHECK_PROOFS_SH:-$REPO_ROOT/spec/tla/tools/check-proofs.sh}"
 TOOLS_VERSION="1.5.0"
 TLAPS_PREFIX="${TLA_PROOFS_PREFIX:-${TMPDIR:-/tmp}/tlaps-${TOOLS_VERSION}}"
