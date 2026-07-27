@@ -227,16 +227,17 @@ jobs:
     env:
       DEBIAN_FRONTEND: noninteractive
     steps:
+      - name: Install Git for the containerized checkout
+        run: |
+          apt-get update
+          apt-get install --no-install-recommends -y git
       - name: Check out repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - name: Fetch base ref
         if: github.event_name == 'pull_request'
-        run: |
-          apt-get update
-          apt-get install --no-install-recommends -y git
-          git fetch origin "${{ github.event.pull_request.base.ref }}"
+        run: git fetch origin "${{ github.event.pull_request.base.ref }}"
       - name: Extract the trusted (base-commit) TLAPS proof checker
         if: github.event_name == 'pull_request'
         # See the equivalent step in the tla-syntax-and-model job: a PR could
