@@ -31,10 +31,7 @@ jobs:
           fetch-depth: 0
       - name: Fetch base ref
         if: github.event_name == 'pull_request'
-        run: |
-          apt-get update
-          apt-get install --no-install-recommends -y git
-          git fetch origin "${{ github.event.pull_request.base.ref }}"
+        run: git fetch origin "${{ github.event.pull_request.base.ref }}"
       - name: Extract the trusted (base-commit) gate-selection regression test
         if: github.event_name == 'pull_request'
         # Same self-policing gap as check-protected-review.sh below: a PR
@@ -132,10 +129,7 @@ jobs:
           fetch-depth: 0
       - name: Fetch base ref
         if: github.event_name == 'pull_request'
-        run: |
-          apt-get update
-          apt-get install --no-install-recommends -y git
-          git fetch origin "${{ github.event.pull_request.base.ref }}"
+        run: git fetch origin "${{ github.event.pull_request.base.ref }}"
       - name: Extract the trusted (base-commit) normative TLA+ gate checker
         if: github.event_name == 'pull_request'
         # Internal-critic P1 (round 5): the scripts that actually RUN
@@ -331,10 +325,7 @@ jobs:
           fetch-depth: 0
       - name: Fetch base ref
         if: github.event_name == 'pull_request'
-        run: |
-          apt-get update
-          apt-get install --no-install-recommends -y git
-          git fetch origin "${{ github.event.pull_request.base.ref }}"
+        run: git fetch origin "${{ github.event.pull_request.base.ref }}"
       - name: Extract the trusted (base-commit) conformance checker
         if: github.event_name == 'pull_request'
         # See the equivalent step in the tla-syntax-and-model job: a PR could
@@ -417,10 +408,7 @@ jobs:
           fetch-depth: 0
       - name: Fetch base ref
         if: github.event_name == 'pull_request'
-        run: |
-          apt-get update
-          apt-get install --no-install-recommends -y git
-          git fetch origin "${{ github.event.pull_request.base.ref }}"
+        run: git fetch origin "${{ github.event.pull_request.base.ref }}"
       - name: Extract the trusted (base-commit) sidecar conformance checker
         if: github.event_name == 'pull_request'
         # See the equivalent step in the tla-syntax-and-model job: a PR could
@@ -473,8 +461,6 @@ jobs:
           fetch-depth: 0
       - name: Fetch base ref
         run: |
-          apt-get update
-          apt-get install --no-install-recommends -y git
           git fetch origin "${{ github.event.pull_request.base.ref }}"
       - name: Extract the trusted (base-commit) checker
         # The PR's own checkout must never be the code that polices the PR:
