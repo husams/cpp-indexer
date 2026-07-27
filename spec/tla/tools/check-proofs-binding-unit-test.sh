@@ -45,6 +45,10 @@ mkdir -p "$WORK/modules" "$WORK/proofs"
 
 write_manifest() {
   local extends="$1"
+  # $2, if given, is a JSON array literal (already quoted/escaped by the
+  # caller) for proofs[0].trustedAssumptions; defaults to empty since none
+  # of cases 1-6 below put any ASSUME in the proof module.
+  local trusted_assumptions="${2:-[]}"
   cat >"$WORK/manifest.json" <<JSON
 {
   "proofs": [
@@ -52,7 +56,8 @@ write_manifest() {
       "module": "proofs/FooProof.tla",
       "extends": "$extends",
       "theorem": "T",
-      "provesInvariants": ["Inv"]
+      "provesInvariants": ["Inv"],
+      "trustedAssumptions": $trusted_assumptions
     }
   ]
 }
@@ -207,5 +212,172 @@ result="$(theorem_invariant_binding "$WORK/manifest.json" FooProof "$WORK/proofs
 [[ "$result" == INVARIANT-NOT-FOUND:* ]] \
   || die "in-module-contradiction-decoy-accepted:$result"
 echo "TLA_PROOF_BINDING_UNIT_STATUS=PASS check=in-module-init-and-false-decoy-rejected-by-shape-check"
+
+# --- Case 7: the exact acceptance-review report -- `ASSUME FALSE` added to
+# the REAL, checked-in proof module -- must be rejected even though the
+# THEOREM itself keeps the correct `Spec => []Invariant` shape (a fixed
+# shape check alone, per cases 1-6, cannot see this: the vulnerability is
+# in the module's premises, not its theorem statement). Run against the
+# real spec/tla/manifest.json and spec/tla/modules/CidxResult.tla (not the
+# synthetic Foo fixture), proving the fix protects the actual shipped
+# proof, not just a toy analogue. ---
+cat >"$WORK/proofs/CidxResultProof.tla" <<'TLA'
+----------------------------- MODULE CidxResultProof -----------------------------
+EXTENDS CidxResult, TLAPS
+
+ASSUME FALSE
+
+THEOREM ResultInvarianceTheorem == Spec => []Invariant
+  BY DEF Spec, Invariant, IsResult, TrustedOutcomeInvariant
+
+THEOREM ResultTypeAlwaysHolds == Spec => []SharedResultTypeInvariant
+  BY ResultInvarianceTheorem, PTL DEF Invariant, SharedResultTypeInvariant
+
+THEOREM TrustedOutcomeAlwaysHolds == Spec => []TrustedOutcomeInvariant
+  BY ResultInvarianceTheorem, PTL DEF Invariant
+
+Invariant == IsResult(result) /\ TrustedOutcomeInvariant
+=============================================================================
+TLA
+result="$(theorem_invariant_binding "$REPO_ROOT/spec/tla/manifest.json" CidxResultProof "$WORK/proofs/CidxResultProof.tla" "$REPO_ROOT/spec/tla")"
+[[ "$result" == "ASSUMPTION-VACUOUS:FALSE" ]] \
+  || die "assume-false-on-real-proof-module-accepted:$result"
+echo "TLA_PROOF_BINDING_UNIT_STATUS=PASS check=assume-false-on-real-proof-module-rejected"
+
+# --- Case 8: `FALSE` need not stand alone -- a conjunct of a larger ASSUME
+# (`ASSUME SomethingElse /\ FALSE`) is exactly as vacuous and must be
+# rejected the same way; the check must look at conjuncts, not merely
+# whole-assumption text equality with the literal string "FALSE". ---
+mkdir -p "$WORK/modules" "$WORK/proofs"
+cat >"$WORK/modules/Foo.tla" <<'TLA'
+----------------------------- MODULE Foo -----------------------------
+VARIABLES x
+vars == <<x>>
+Init == x = 0
+Next == x' = x
+Fairness == WF_vars(Next)
+Spec == Init /\ [][Next]_vars /\ Fairness
+Inv == TRUE
+=============================================================================
+TLA
+cat >"$WORK/proofs/FooProof.tla" <<'TLA'
+----------------------------- MODULE FooProof -----------------------------
+EXTENDS Foo, TLAPS
+ASSUME Decoy == x = 0 /\ FALSE
+THEOREM T == Spec => []Inv
+  PROOF OBVIOUS
+=============================================================================
+TLA
+write_manifest "modules/Foo.tla" '["ASSUME Decoy == x = 0 /\\ FALSE"]'
+result="$(theorem_invariant_binding "$WORK/manifest.json" FooProof "$WORK/proofs/FooProof.tla" "$WORK")"
+[[ "$result" == "ASSUMPTION-VACUOUS:FALSE" ]] \
+  || die "false-conjunct-inside-larger-assumption-accepted:$result"
+echo "TLA_PROOF_BINDING_UNIT_STATUS=PASS check=false-conjunct-inside-larger-assumption-rejected"
+
+# --- Case 9: no single assumption is `FALSE`, but two assumptions are
+# direct negations of each other, so the set is jointly unsatisfiable --
+# must be rejected even though every individual assumption looks innocuous
+# and would pass an allowlist that (mistakenly) trusted both. ---
+cat >"$WORK/proofs/FooProof.tla" <<'TLA'
+----------------------------- MODULE FooProof -----------------------------
+EXTENDS Foo, TLAPS
+ASSUME PositiveCase == x = 0
+ASSUME NegativeCase == ~(x = 0)
+THEOREM T == Spec => []Inv
+  PROOF OBVIOUS
+=============================================================================
+TLA
+write_manifest "modules/Foo.tla" \
+  '["ASSUME PositiveCase == x = 0", "ASSUME NegativeCase == ~(x = 0)"]'
+result="$(theorem_invariant_binding "$WORK/manifest.json" FooProof "$WORK/proofs/FooProof.tla" "$WORK")"
+[[ "$result" == "ASSUMPTIONS-CONTRADICT:x=0" ]] \
+  || die "contradictory-assumption-pair-accepted:$result"
+echo "TLA_PROOF_BINDING_UNIT_STATUS=PASS check=contradictory-assumption-pair-rejected"
+
+# --- Case 10: every assumption is individually satisfiable (no FALSE, no
+# internal contradiction) but is not on manifest.json's declared
+# trustedAssumptions allowlist for this proof -- must be rejected. This is
+# the other half of the fix: even a plausible-looking, non-vacuous
+# assumption must be pre-declared and reviewed, not merely "not obviously
+# broken". ---
+cat >"$WORK/proofs/FooProof.tla" <<'TLA'
+----------------------------- MODULE FooProof -----------------------------
+EXTENDS Foo, TLAPS
+ASSUME Unreviewed == x \in {0, 1, 2}
+THEOREM T == Spec => []Inv
+  PROOF OBVIOUS
+=============================================================================
+TLA
+write_manifest "modules/Foo.tla"
+result="$(theorem_invariant_binding "$WORK/manifest.json" FooProof "$WORK/proofs/FooProof.tla" "$WORK")"
+[[ "$result" == "ASSUMPTION-NOT-TRUSTED:ASSUME Unreviewed == x \in {0, 1, 2}" ]] \
+  || die "untrusted-non-vacuous-assumption-accepted:$result"
+echo "TLA_PROOF_BINDING_UNIT_STATUS=PASS check=untrusted-non-vacuous-assumption-rejected"
+
+# --- Case 11: the identical assumption from case 10, but declared on the
+# manifest's trustedAssumptions allowlist, is accepted -- proving the fix
+# does not regress a legitimately reviewed, satisfiable well-formedness
+# assumption (exactly the shape of the three real ASSUMEs in
+# proofs/CidxResultProof.tla). ---
+write_manifest "modules/Foo.tla" '["ASSUME Unreviewed == x \\in {0, 1, 2}"]'
+result="$(theorem_invariant_binding "$WORK/manifest.json" FooProof "$WORK/proofs/FooProof.tla" "$WORK")"
+[[ "$result" == "OK:T:Inv" ]] \
+  || die "allowlisted-non-vacuous-assumption-rejected:$result"
+echo "TLA_PROOF_BINDING_UNIT_STATUS=PASS check=allowlisted-non-vacuous-assumption-accepted"
+
+# --- Case 12: `FALSE` wrapped in a single layer of parens (`ASSUME (FALSE)`)
+# must be caught exactly like the bare literal -- proves
+# top_level_conjuncts()'s one-layer paren unwrap actually fires, rather than
+# leaving a parenthesized conjunct as opaque text no check ever inspects. ---
+cat >"$WORK/proofs/FooProof.tla" <<'TLA'
+----------------------------- MODULE FooProof -----------------------------
+EXTENDS Foo, TLAPS
+ASSUME (FALSE)
+THEOREM T == Spec => []Inv
+  PROOF OBVIOUS
+=============================================================================
+TLA
+write_manifest "modules/Foo.tla"
+result="$(theorem_invariant_binding "$WORK/manifest.json" FooProof "$WORK/proofs/FooProof.tla" "$WORK")"
+[[ "$result" == "ASSUMPTION-VACUOUS:FALSE" ]] \
+  || die "parenthesized-false-accepted:$result"
+echo "TLA_PROOF_BINDING_UNIT_STATUS=PASS check=parenthesized-false-rejected"
+
+# --- Case 13: negation without any wrapping parens (`~Flag`, not `~(Flag)`)
+# must still be recognized as the negation of a plain conjunct with the same
+# text -- proves negated_form()'s bare-tilde branch (not just its `~(...)`
+# branch, already exercised by case 9) is load-bearing. A second, unrelated
+# bare negation with no matching positive counterpart in the same module
+# must NOT be flagged -- proves the check does not over-fire on every `~`
+# it sees. ---
+cat >"$WORK/proofs/FooProof.tla" <<'TLA'
+----------------------------- MODULE FooProof -----------------------------
+EXTENDS Foo, TLAPS
+ASSUME PosSimple == Flag
+ASSUME NegSimple == ~Flag
+THEOREM T == Spec => []Inv
+  PROOF OBVIOUS
+=============================================================================
+TLA
+write_manifest "modules/Foo.tla" \
+  '["ASSUME PosSimple == Flag", "ASSUME NegSimple == ~Flag"]'
+result="$(theorem_invariant_binding "$WORK/manifest.json" FooProof "$WORK/proofs/FooProof.tla" "$WORK")"
+[[ "$result" == "ASSUMPTIONS-CONTRADICT:Flag" ]] \
+  || die "bare-tilde-contradiction-accepted:$result"
+echo "TLA_PROOF_BINDING_UNIT_STATUS=PASS check=bare-tilde-contradiction-rejected"
+
+cat >"$WORK/proofs/FooProof.tla" <<'TLA'
+----------------------------- MODULE FooProof -----------------------------
+EXTENDS Foo, TLAPS
+ASSUME OnlyNegative == ~Flag
+THEOREM T == Spec => []Inv
+  PROOF OBVIOUS
+=============================================================================
+TLA
+write_manifest "modules/Foo.tla" '["ASSUME OnlyNegative == ~Flag"]'
+result="$(theorem_invariant_binding "$WORK/manifest.json" FooProof "$WORK/proofs/FooProof.tla" "$WORK")"
+[[ "$result" == "OK:T:Inv" ]] \
+  || die "lone-bare-negation-without-counterpart-falsely-flagged:$result"
+echo "TLA_PROOF_BINDING_UNIT_STATUS=PASS check=lone-bare-negation-without-counterpart-accepted"
 
 echo "TLA_PROOF_BINDING_UNIT_STATUS=PASS"

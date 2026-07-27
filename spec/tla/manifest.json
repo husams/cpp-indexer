@@ -19,6 +19,11 @@
       "extends": "modules/CidxResult.tla",
       "theorem": "ResultInvarianceTheorem",
       "provesInvariants": ["SharedResultTypeInvariant", "TrustedOutcomeInvariant"],
+      "trustedAssumptions": [
+        "ASSUME QueryIdWellFormed == QueryId \\in QueryIds",
+        "ASSUME ResultIdWellFormed == ResultId \\in ResultIds",
+        "ASSUME EvidenceIdWellFormed == EvidenceId \\in EvidenceIds"
+      ],
       "checker": "tools/check-proofs.sh"
     }
   ],

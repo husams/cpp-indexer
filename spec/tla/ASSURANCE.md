@@ -70,6 +70,51 @@ approach, documented here rather than left implicit:
   (`modules/CidxResult.tla:61` and siblings), so this is not a practical
   restriction today.
 
+## check-proofs.sh proof-module assumption binding (HSE-89 acceptance review)
+
+The binding check above constrains theorem *shape*; it says nothing about
+whether the theorem was proved from a sound premise. TLAPS treats every
+`ASSUME` in a proof module as a hypothesis available to every later proof in
+that module, so a structurally-correct `Spec => []Invariant` theorem can
+still be vacuous if the module also carries an unconstrained assumption such
+as `ASSUME FALSE` -- anything follows from a contradiction, and TLAPS reports
+"All N obligations proved." exactly as it would for a genuine proof.
+`check-proofs-binding.sh`'s `check_proof_assumptions()` closes this with two
+checks over the (untrusted, `proofs/`-tree) module's own `ASSUME`s, run
+before the theorem-shape check:
+
+1. **Allowlist.** Every `ASSUME` found in the module must match, verbatim
+   once whitespace is collapsed, an entry in `manifest.json`'s
+   `proofs[].trustedAssumptions` for that module -- itself a
+   CODEOWNER-protected path, so a new assumption needs the same review as
+   the proof module itself.
+2. **Vacuousness.** Independent of the allowlist: the assumption set is
+   rejected if any top-level conjunct (split on `/\ ` at parenthesis depth
+   zero) of any assumption is the literal boolean `FALSE`, or if two
+   assumptions' top-level conjuncts are syntactic negations of each other.
+
+This is a **syntactic** check, not a general decision procedure for
+first-order satisfiability -- documented here rather than left implicit:
+
+- It recognizes negation only one level deep (`~P` or `~(P)`), and only
+  between conjuncts that are otherwise textually identical once collapsed.
+  `ASSUME P` alongside `ASSUME ~(~(~P))` would not be caught by this check
+  (though it would still need to clear the allowlist, which a genuinely
+  unreviewed assumption cannot).
+- It cannot detect semantic (non-syntactic) contradictions, e.g. two
+  assumptions that are individually satisfiable but jointly impossible only
+  by arithmetic reasoning (`ASSUME x > 5` and `ASSUME x < 3`). The allowlist
+  is the primary defense for those; a human reviewer approving
+  `trustedAssumptions` is expected to notice a jointly-unsatisfiable pair
+  when they are added, exactly as they are expected to notice any other
+  proof-module change to a protected path.
+- Both checks apply only to the `ASSUME`s of the proof module itself
+  (`proofs/CidxResultProof.tla` and any future sibling), not to `ASSUME`s in
+  the trusted modules it extends -- those are separately scoped by the
+  Spec-provenance restriction to `modules/conformance/protected` described
+  above, and are reviewed at the same protection level as everything else in
+  `modules/`.
+
 ## Conformance recorder: tautological sidecar branches (round-3 acceptance
 review)
 

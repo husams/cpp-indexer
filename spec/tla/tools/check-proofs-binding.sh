@@ -76,6 +76,7 @@ if entry is None:
 theorem_name = entry["theorem"]
 invariants = entry["provesInvariants"]
 extends_entry = entry.get("extends")
+trusted_assumptions = set(entry.get("trustedAssumptions", []))
 
 
 def strip_comments(text):
@@ -85,6 +86,138 @@ def strip_comments(text):
 
 
 text = strip_comments(open(module_file, encoding="utf-8").read())
+
+# HSE-89 acceptance-review fix (this round): TLAPS treats every ASSUME in a
+# module as a premise available for the rest of that module's proofs. The
+# structural theorem/Spec-provenance checks below never looked at the proof
+# module's own ASSUMEs, so a proof module could add e.g. `ASSUME FALSE` --
+# anything follows from a contradiction -- and have TLAPS "prove" a
+# structurally-correct-looking `Spec => []Invariant` theorem vacuously,
+# passing every check below unchanged. The general invariant this closes:
+# an untrusted proof module's assumption set must itself be constrained, not
+# only the shape of what it claims to prove. Two independent checks, neither
+# keyed to the literal text "ASSUME FALSE":
+#
+#   1. allowlist -- every ASSUME found in this (untrusted, proofs/-tree)
+#      module must match, verbatim once whitespace is collapsed, one of
+#      manifest.json's proofs[].trustedAssumptions entries for this module.
+#      manifest.json is itself a protected, CODEOWNER-reviewed path, so
+#      adding a new assumption requires the same review as adding one to
+#      the proof module itself. Any assumption absent from that list is
+#      rejected regardless of whether it happens to be sound.
+#   2. vacuousness -- independent of the allowlist (defense in depth against
+#      the allowlist itself declaring something unsound): the assumption
+#      set is rejected if any top-level conjunct of any assumption is the
+#      literal boolean FALSE, or if two assumptions' top-level conjuncts are
+#      syntactic negations of each other. Both are general, decidable
+#      syntactic unsatisfiability witnesses -- not a full SAT/decision
+#      procedure, and not merely a string match on "FALSE" -- so
+#      `ASSUME FALSE`, `ASSUME P /\ FALSE`, and `ASSUME P` alongside
+#      `ASSUME ~P` (in the same or different ASSUME statements) are all
+#      rejected the same way. See ASSURANCE.md for the limits of this
+#      syntactic check (it is not a general theorem prover).
+ASSUME_BOUNDARY_RE = re.compile(
+    r"^(ASSUME\b|THEOREM\b|LEMMA\b|[A-Za-z_][A-Za-z0-9_]*\s*==|={4,})",
+    re.MULTILINE,
+)
+NAMED_ASSUME_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*==\s*(.*)$")
+
+
+def extract_assumptions(module_text):
+    found = []
+    for m in re.finditer(r"^ASSUME\s+", module_text, re.MULTILINE):
+        start = m.end()
+        end = len(module_text)
+        for boundary in ASSUME_BOUNDARY_RE.finditer(module_text, start):
+            end = boundary.start()
+            break
+        collapsed = " ".join(module_text[start:end].split())
+        named = NAMED_ASSUME_RE.match(collapsed)
+        expr = named.group(2) if named else collapsed
+        found.append({"full": f"ASSUME {collapsed}", "expr": expr})
+    return found
+
+
+def top_level_conjuncts(expr):
+    # Split a whitespace-collapsed boolean expression on top-level "/\"
+    # connectives (paren depth 0), then strip at most one layer of fully
+    # wrapping parens from each conjunct -- mirroring the "one layer of
+    # wrapping" convention structurally_proves() already uses below.
+    collapsed = re.sub(r"\s+", "", expr)
+    parts = []
+    depth = 0
+    current = []
+    i = 0
+    while i < len(collapsed):
+        ch = collapsed[i]
+        if ch == "(":
+            depth += 1
+            current.append(ch)
+            i += 1
+        elif ch == ")":
+            depth -= 1
+            current.append(ch)
+            i += 1
+        elif depth == 0 and collapsed[i : i + 2] == "/\\":
+            parts.append("".join(current))
+            current = []
+            i += 2
+        else:
+            current.append(ch)
+            i += 1
+    parts.append("".join(current))
+
+    def unwrap(part):
+        if part.startswith("(") and part.endswith(")"):
+            inner_depth = 0
+            for pos, ch in enumerate(part):
+                if ch == "(":
+                    inner_depth += 1
+                elif ch == ")":
+                    inner_depth -= 1
+                    if inner_depth == 0 and pos != len(part) - 1:
+                        return part
+            return part[1:-1]
+        return part
+
+    return [unwrap(part) for part in parts if part]
+
+
+def negated_form(conjunct):
+    if conjunct.startswith("~(") and conjunct.endswith(")"):
+        return conjunct[2:-1]
+    if conjunct.startswith("~"):
+        return conjunct[1:]
+    return None
+
+
+def check_proof_assumptions(module_text, allowlist):
+    assumptions = extract_assumptions(module_text)
+
+    all_conjuncts = []
+    for assumption in assumptions:
+        all_conjuncts.extend(top_level_conjuncts(assumption["expr"]))
+
+    if "FALSE" in all_conjuncts:
+        return "ASSUMPTION-VACUOUS:FALSE"
+
+    seen = set(all_conjuncts)
+    for conjunct in all_conjuncts:
+        negated = negated_form(conjunct)
+        if negated is not None and negated in seen:
+            return f"ASSUMPTIONS-CONTRADICT:{negated}"
+
+    for assumption in assumptions:
+        if assumption["full"] not in allowlist:
+            return f"ASSUMPTION-NOT-TRUSTED:{assumption['full']}"
+
+    return None
+
+
+assumption_violation = check_proof_assumptions(text, trusted_assumptions)
+if assumption_violation is not None:
+    print(assumption_violation)
+    sys.exit(0)
 
 theorem_re = re.compile(r"^THEOREM\s+([A-Za-z_][A-Za-z0-9_]*)\s*==(.*)$", re.MULTILINE)
 boundary_re = re.compile(r"^(THEOREM\b|LEMMA\b|={4,})", re.MULTILINE)

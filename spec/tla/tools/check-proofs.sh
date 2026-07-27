@@ -133,6 +133,16 @@ cp "$PROOF_DIR"/*.tla "$WORK"/
 # check-proofs-binding.sh so it can also be exercised directly, without a
 # real tlapm run, by check-proofs-binding-unit-test.sh. See that file's
 # header for the full vulnerability history and the fix rationale.
+#
+# HSE-89 acceptance-review fix (this round): a proof module's THEOREM can
+# have the correct `Spec => []Invariant` shape and still be vacuous if the
+# module also carries an unconstrained ASSUME (e.g. `ASSUME FALSE`) -- TLAPS
+# treats ASSUMEs as premises available to every later proof in the module.
+# check-proofs-binding.sh now also rejects any proof module whose ASSUMEs
+# are not on manifest.json's declared per-module trustedAssumptions
+# allowlist, or whose assumption set is syntactically vacuous/contradictory
+# (a literal FALSE conjunct, or two assumptions that are negations of each
+# other), before this function ever looks at theorem shape.
 # shellcheck source=check-proofs-binding.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/check-proofs-binding.sh"
 
@@ -164,6 +174,18 @@ run_proof() {
   case "$binding" in
     MANIFEST-ENTRY-MISSING)
       echo "TLA_PROOF_STATUS=FAIL module=$module reason=manifest-entry-missing" >&2
+      exit 30
+      ;;
+    ASSUMPTION-VACUOUS:*)
+      echo "TLA_PROOF_STATUS=FAIL module=$module reason=vacuous-proof-assumption:${binding#ASSUMPTION-VACUOUS:}" >&2
+      exit 30
+      ;;
+    ASSUMPTIONS-CONTRADICT:*)
+      echo "TLA_PROOF_STATUS=FAIL module=$module reason=contradictory-proof-assumptions:${binding#ASSUMPTIONS-CONTRADICT:}" >&2
+      exit 30
+      ;;
+    ASSUMPTION-NOT-TRUSTED:*)
+      echo "TLA_PROOF_STATUS=FAIL module=$module reason=untrusted-proof-assumption:${binding#ASSUMPTION-NOT-TRUSTED:}" >&2
       exit 30
       ;;
     THEOREM-NOT-FOUND:*)

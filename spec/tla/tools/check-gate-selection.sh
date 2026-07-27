@@ -362,6 +362,10 @@ run_manifest_schema_failure_case \
   "proofs.0.module" \
   "proofs[0].module-is-required"
 run_manifest_schema_failure_case \
+  missing-proof-trusted-assumptions \
+  "proofs.0.trustedAssumptions" \
+  "proofs[0].trustedAssumptions-is-required"
+run_manifest_schema_failure_case \
   missing-model-config \
   "models.0.config" \
   "models[0].config-is-required"
