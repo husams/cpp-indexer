@@ -286,6 +286,24 @@ Stats SqliteStorageService::stats() {
   return s;
 }
 
+auto SqliteStorageService::indexing_cardinality()
+    -> std::pair<std::int64_t, std::int64_t> {
+  const auto count = [this](std::string_view sql) {
+    auto statement = db_.prepare(sql);
+    return statement.step() ? statement.col_int64(0) : std::int64_t{0};
+  };
+  const auto database =
+      count("SELECT (SELECT COUNT(*) FROM file) + "
+            "(SELECT COUNT(*) FROM symbol) + (SELECT COUNT(*) FROM edge) + "
+            "(SELECT COUNT(*) FROM definition) + "
+            "(SELECT COUNT(*) FROM include_edge)");
+  const auto facts = count("SELECT (SELECT COUNT(*) FROM edge) + "
+                           "(SELECT COUNT(*) FROM definition) + "
+                           "(SELECT COUNT(*) FROM include_edge) + "
+                           "(SELECT COUNT(*) FROM fact_applicability)");
+  return {database, facts};
+}
+
 auto SqliteStorageService::integrity_ok() -> bool {
   auto st = db_.prepare("PRAGMA integrity_check");
   return st.step() && st.col_text(0) == "ok";

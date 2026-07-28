@@ -77,12 +77,6 @@ auto peak_rss_bytes() -> std::uint64_t {
 #endif
 }
 
-auto scalar_count(cidx::Storage &database, std::string_view sql)
-    -> std::int64_t {
-  auto statement = database.raw_db().prepare(sql);
-  return statement.step() ? statement.col_int64(0) : 0;
-}
-
 std::optional<double> file_mtime(const std::string &path) {
   struct stat st{};
   if (::stat(path.c_str(), &st) != 0) {
@@ -1017,20 +1011,10 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
     profile::add_timing("source_validation_hashing",
                         elapsed_seconds(source_started));
   }
-  std::int64_t database_cardinality_before = 0;
-  std::int64_t fact_cardinality_before = 0;
+  std::pair<std::int64_t, std::int64_t> cardinality_before{};
   if (profiling) {
     const auto metrics_started = ProfileClock::now();
-    database_cardinality_before = scalar_count(
-        db, "SELECT (SELECT COUNT(*) FROM file) + "
-            "(SELECT COUNT(*) FROM symbol) + (SELECT COUNT(*) FROM edge) + "
-            "(SELECT COUNT(*) FROM definition) + "
-            "(SELECT COUNT(*) FROM include_edge)");
-    fact_cardinality_before =
-        scalar_count(db, "SELECT (SELECT COUNT(*) FROM edge) + "
-                         "(SELECT COUNT(*) FROM definition) + "
-                         "(SELECT COUNT(*) FROM include_edge) + "
-                         "(SELECT COUNT(*) FROM fact_applicability)");
+    cardinality_before = db.indexing_cardinality();
     profile::add_timing("metrics_only_sql", elapsed_seconds(metrics_started));
   }
   const auto workspace_started =
@@ -1145,8 +1129,8 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
     profile::record_translation_unit(
         {.path = path,
          .start_position = start_position,
-         .database_cardinality_before = database_cardinality_before,
-         .fact_cardinality_before = fact_cardinality_before,
+         .database_cardinality_before = cardinality_before.first,
+         .fact_cardinality_before = cardinality_before.second,
          .source_bytes = file_bytes(path),
          .preprocessed_bytes = preprocessed_bytes,
          .include_count = state.includes.includes.size(),
