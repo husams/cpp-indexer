@@ -179,7 +179,9 @@ public:
   explicit Executor(QueryReadPort &read) : read_(read) {}
 
   // Validate + normalize + run. Throws PlanError on an invalid plan.
-  Result run(const Plan &plan);
+  // `after_id` pages the first nodes() enumeration from ids strictly greater
+  // than the cursor. It is execution state, not part of the immutable Plan IR.
+  Result run(const Plan &plan, std::optional<int64_t> after_id = std::nullopt);
 
   // Explain a plan without executing its row-producing stages. The returned
   // object contains the normalized plan, the same index identity reported by

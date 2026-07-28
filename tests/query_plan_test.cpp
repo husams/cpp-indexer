@@ -61,7 +61,9 @@ class QueryExecutor {
 public:
   explicit QueryExecutor(Storage &db) : read_(db), executor_(read_) {}
 
-  Result run(const Plan &plan) { return executor_.run(plan); }
+  Result run(const Plan &plan, std::optional<int64_t> after_id = std::nullopt) {
+    return executor_.run(plan, after_id);
+  }
   cidx::json_out::Value explain(const Plan &plan) {
     return executor_.explain(plan);
   }
@@ -550,6 +552,97 @@ TEST_CASE("query_plan: default result cap reports truncation") {
   auto lim = ex.run((start(codebase()) | nodes() | limit(1100)).plan());
   CHECK(lim.rows.size() == 1100);
   CHECK(!lim.truncated);
+}
+
+TEST_CASE("query_plan: execution cursor pages symbol and edge enumeration") {
+  Storage db(":memory:");
+  std::vector<int64_t> edge_ids;
+  edge_ids.reserve(static_cast<std::size_t>(kEnumerateBudget + 1));
+  {
+    auto txn = db.transaction();
+    const int64_t caller =
+        db.add_symbol(make_sym("USR::cursor-caller", "cursor-caller"));
+    for (int64_t i = 0; i <= kEnumerateBudget; ++i) {
+      const int64_t callee =
+          db.add_symbol(make_sym("USR::cursor-target-" + std::to_string(i),
+                                 "cursor-target-" + std::to_string(i)));
+      edge_ids.push_back(db.add_edge(make_edge(caller, callee, 1)));
+    }
+    txn.commit();
+  }
+
+  QueryExecutor ex(db);
+  const Plan symbol_plan =
+      (start(codebase()) | nodes() | select({"id"}) | limit(kEnumerateBudget))
+          .plan();
+  const Result first_symbols = ex.run(symbol_plan);
+  REQUIRE(first_symbols.rows.size() ==
+          static_cast<std::size_t>(kEnumerateBudget));
+  REQUIRE(first_symbols.truncated);
+  const int64_t symbol_cursor =
+      std::get<int64_t>(first_symbols.rows.back().front());
+  const Result remaining_symbols = ex.run(symbol_plan, symbol_cursor);
+  CHECK(remaining_symbols.rows.size() == 2);
+  CHECK_FALSE(remaining_symbols.truncated);
+
+  const Plan edge_plan = (start(codebase()) | view(View::Edge) | nodes() |
+                          select({"id"}) | limit(kEnumerateBudget))
+                             .plan();
+  const Result first_edges = ex.run(edge_plan);
+  REQUIRE(first_edges.rows.size() ==
+          static_cast<std::size_t>(kEnumerateBudget));
+  REQUIRE(first_edges.truncated);
+  const int64_t edge_cursor =
+      edge_ids[static_cast<std::size_t>(kEnumerateBudget - 1)];
+  const Result remaining_edges = ex.run(edge_plan, edge_cursor);
+  CHECK(remaining_edges.rows.size() == 1);
+  CHECK_FALSE(remaining_edges.truncated);
+}
+
+TEST_CASE("query_plan: edge view edge_id field exposes the raw cursor id, "
+          "not the hashed id field") {
+  // [P1-4 fix] Mirror of python/tests/test_queryplan.py's
+  // test_edge_view_edge_id_field_exposes_the_raw_cursor_id_unlike_the_hashed_id_field.
+  // The "edge" view's own "id" field is QueryPlan's portable logical
+  // identity (a hash of the edge's natural key); it is not something the
+  // `after_id` cursor -- wired against the raw `edge.id` column for this
+  // view -- can page on. "edge_id" is the field that returns that raw
+  // value (added to `field_available`'s View::Edge case alongside this fix;
+  // `typed_column` already mapped it to `edge.id`, just unreachably).
+  Storage db(":memory:");
+  int64_t e1 = 0;
+  int64_t e2 = 0;
+  {
+    auto txn = db.transaction();
+    const int64_t a = db.add_symbol(make_sym("USR::edge-id-cursor-a", "a"));
+    const int64_t b = db.add_symbol(make_sym("USR::edge-id-cursor-b", "b"));
+    const int64_t c = db.add_symbol(make_sym("USR::edge-id-cursor-c", "c"));
+    e1 = db.add_edge(make_edge(a, b, 1));
+    e2 = db.add_edge(make_edge(b, c, 1));
+    txn.commit();
+  }
+
+  QueryExecutor ex(db);
+  const Plan plan = (start(codebase()) | view(View::Edge) | nodes() |
+                     select({"edge_id", "id"}) | limit(100))
+                        .plan();
+  const Result result = ex.run(plan);
+  REQUIRE(result.rows.size() == 2);
+  CHECK(std::get<int64_t>(result.rows[0][0]) == e1);
+  CHECK(std::get<int64_t>(result.rows[1][0]) == e2);
+  const int64_t hashed0 = std::get<int64_t>(result.rows[0][1]);
+  const int64_t hashed1 = std::get<int64_t>(result.rows[1][1]);
+  CHECK(hashed0 != e1);
+  CHECK(hashed1 != e2);
+
+  const Plan edge_id_plan = (start(codebase()) | view(View::Edge) | nodes() |
+                             select({"edge_id"}) | limit(100))
+                                .plan();
+  const Result resumed = ex.run(edge_id_plan, e1);
+  REQUIRE(resumed.rows.size() == 1);
+  CHECK(std::get<int64_t>(resumed.rows[0][0]) == e2);
+  const Result dead_end = ex.run(edge_id_plan, hashed0);
+  CHECK(dead_end.rows.empty());
 }
 
 TEST_CASE(
@@ -1342,6 +1435,85 @@ TEST_CASE("query_plan: sites expand edge provenance deterministically") {
   CHECK(std::get<int64_t>(result.rows[0][7]) == 1);
   CHECK(std::get<int64_t>(result.rows[1][0]) == reverse_edge);
   CHECK(std::get<int64_t>(result.rows[1][2]) == 5);
+}
+
+TEST_CASE("query_plan: site view exposes stable src/dst endpoints") {
+  // [P2-2 fix] a "site" row's src_id/dst_id are the owning edge's own
+  // stable endpoints (a correlated subquery against edge.id), not the
+  // "edge" view's separate portable/logical row identity -- mirrors
+  // python/indexer/queryplan.py's `test_site_view_exposes_stable_src_dst_
+  // endpoints`. C++ previously rejected this select() field entirely
+  // (View::Site's field_available() list omitted "src_id"/"dst_id"), so a
+  // caller could not build a caller/callee witness from one query in C++
+  // the way Python's Executor already could.
+  Storage db(":memory:");
+  const int64_t component = db.add_component("project", "/tmp/site-endpoints");
+  const int64_t directory = db.add_directory(component, "src");
+  const int64_t file = db.add_file(directory, "same.cpp");
+  const int64_t caller =
+      db.add_symbol(make_sym("USR::endpoint-caller", "caller"));
+  const int64_t callee =
+      db.add_symbol(make_sym("USR::endpoint-callee", "callee"));
+  const int64_t edge = db.add_edge(make_edge(caller, callee, 1));
+  cidx::EdgeSite site;
+  site.edge_id = edge;
+  site.file_id = file;
+  site.line = 10;
+  site.col = 2;
+  db.add_edge_site(site);
+
+  QueryExecutor ex(db);
+  const Result result =
+      ex.run((start(codebase()) | view(View::Edge) | nodes() | sites() |
+              select({"edge_id", "src_id", "dst_id", "line", "col"}))
+                 .plan());
+  REQUIRE(result.rows.size() == 1);
+  CHECK(std::get<int64_t>(result.rows[0][0]) == edge);
+  CHECK(std::get<int64_t>(result.rows[0][1]) == caller);
+  CHECK(std::get<int64_t>(result.rows[0][2]) == callee);
+  CHECK(std::get<int64_t>(result.rows[0][3]) == 10);
+  CHECK(std::get<int64_t>(result.rows[0][4]) == 2);
+}
+
+TEST_CASE("query_plan: symbol view exposes decl_path independent of file") {
+  // [HSE-71 moduleCallGraphCheck false-positive fix] `decl_path` is the raw
+  // declaration path minted for a target in an UNREGISTERED (system/stdlib)
+  // file (Symbol::decl_path, storage.hpp), independent of `file`/`file_id`.
+  // scripts/self_host_architecture_report.py reads it to detect a symbol
+  // whose `file_id` was (incorrectly, for some implicit template
+  // instantiations) attributed to a registered project file even though its
+  // true declaration lives elsewhere -- see `_external_decl_path`'s own
+  // docstring. Exercise both a symbol carrying a decl_path and one that
+  // doesn't, to prove the field round-trips and nulls correctly rather than
+  // aliasing `file`.
+  Storage db(":memory:");
+  const int64_t component = db.add_component("project", "/tmp/decl-path");
+  const int64_t directory = db.add_directory(component, "src");
+  const int64_t file = db.add_file(directory, "instantiator.cpp");
+  Symbol external = make_sym("USR::external-decl", "operator+");
+  external.file_id = file;
+  external.line = 9;
+  external.decl_path = "/usr/include/c++/v1/string";
+  const int64_t external_id = db.add_symbol(external);
+  const int64_t plain_id =
+      db.add_symbol(make_sym("USR::no-decl-path", "plain"));
+
+  QueryExecutor ex(db);
+  const Result result =
+      ex.run((start(codebase()) | nodes() |
+              select({"id", "file", "decl_path"}) | order_by({"id"}))
+                 .plan());
+  REQUIRE(result.rows.size() == 2);
+  const auto &external_row = std::get<int64_t>(result.rows[0][0]) == external_id
+                                 ? result.rows[0]
+                                 : result.rows[1];
+  const auto &plain_row = std::get<int64_t>(result.rows[0][0]) == plain_id
+                              ? result.rows[0]
+                              : result.rows[1];
+  CHECK(std::get<std::string>(external_row[1]) ==
+        "/tmp/decl-path/src/instantiator.cpp");
+  CHECK(std::get<std::string>(external_row[2]) == "/usr/include/c++/v1/string");
+  CHECK(std::holds_alternative<std::nullptr_t>(plain_row[2]));
 }
 
 TEST_CASE("query_plan: typed provenance preserves status through select") {

@@ -668,6 +668,68 @@ TEST_SUITE("clang") {
                                     "construct-value"}));
   }
 
+  // ---- P1-2 fix: construction-family edges record a call SITE ---------------
+
+  TEST_CASE("P1-2 fix: construct/heap/destroy edges each carry an edge_site") {
+    // Before this fix, `emit_construction_form`/`VisitCXXNewExpr`/
+    // `VisitCXXDeleteExpr` called `ports().add_edge()` directly instead of
+    // the shared `emit_site_edge()` every ordinary calls/uses edge goes
+    // through -- a real self-index recorded zero line/col evidence for any
+    // construction-family edge kind (10-16), making it structurally
+    // invisible to any edge_site-driven check (e.g. the self-host
+    // architecture report's legacy-facade/module-boundary witnesses).
+    const IndexedTu tu(kConstructFormTu);
+    // construct-value: `Taker t(h);` at kConstructFormTu's line 16.
+    CHECK(query_col(tu.db_path(),
+                    "SELECT es.line || ':' || es.col "
+                    "FROM edge_site_read es "
+                    "JOIN edge e ON e.id = es.edge_id "
+                    "JOIN edge_kind ek ON ek.id = e.kind "
+                    "JOIN symbol ss ON ss.id = e.src_id "
+                    "JOIN symbol ds ON ds.id = e.dst_id "
+                    "WHERE ss.spelling = 'use_taker' AND ds.spelling = 'Taker' "
+                    "AND ek.name = 'construct-value'") ==
+          std::vector<std::string>{"16:9"});
+    // Every construction-form edge (10/11/13/14) for use_copyable has
+    // exactly one edge_site row -- not zero.
+    CHECK(query_col(tu.db_path(),
+                    "SELECT CAST(e.id AS TEXT) FROM edge e "
+                    "JOIN symbol ss ON ss.id = e.src_id "
+                    "JOIN symbol ds ON ds.id = e.dst_id "
+                    "WHERE ss.spelling = 'use_copyable' AND ds.spelling = "
+                    "'Copyable' AND e.kind IN (10, 11, 13, 14) "
+                    "AND e.id NOT IN (SELECT edge_id FROM edge_site)") ==
+          std::vector<std::string>{});
+
+    const IndexedTu heap_tu(R"cpp(
+struct Widget {};
+void use_heap() {
+  Widget *w = new Widget();
+  delete w;
+}
+)cpp");
+    // construct-heap(12): `new Widget()` at line 4.
+    CHECK(query_col(heap_tu.db_path(),
+                    "SELECT es.line FROM edge_site_read es "
+                    "JOIN edge e ON e.id = es.edge_id "
+                    "JOIN edge_kind ek ON ek.id = e.kind "
+                    "JOIN symbol ss ON ss.id = e.src_id "
+                    "JOIN symbol ds ON ds.id = e.dst_id "
+                    "WHERE ss.spelling = 'use_heap' AND ds.spelling = "
+                    "'Widget' AND ek.name = 'construct-heap'") ==
+          std::vector<std::string>{"4"});
+    // destroy(16): `delete w;` at line 5.
+    CHECK(query_col(heap_tu.db_path(),
+                    "SELECT es.line FROM edge_site_read es "
+                    "JOIN edge e ON e.id = es.edge_id "
+                    "JOIN edge_kind ek ON ek.id = e.kind "
+                    "JOIN symbol ss ON ss.id = e.src_id "
+                    "JOIN symbol ds ON ds.id = e.dst_id "
+                    "WHERE ss.spelling = 'use_heap' AND ds.spelling = "
+                    "'Widget' AND ek.name = 'destroy'") ==
+          std::vector<std::string>{"5"});
+  }
+
   // ---- template specialization handling (fix-spec acceptance matrix) -------
 
   TEST_CASE("template spec: partial specialization is a first-class symbol") {

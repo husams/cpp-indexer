@@ -809,6 +809,14 @@
       "boundary": "product surface -> loopback transport", "owner": "Platform M4 UI maintainers", "rationale": "The local explorer uses POSIX poll() for a non-blocking client-disconnect check until the shared transport adapter is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-84"
     }
   ],
+  "mutuallyExclusiveSourceGroups": [
+    {
+      "sources": ["src/astgraph/souffle_stub.cpp", "src/astgraph/souffle_runner.cpp"],
+      "owner": "Platform M2 analysis maintainers",
+      "rationale": "CMakeLists.txt compiles exactly one of these per build: souffle_stub.cpp when CIDX_ASTGRAPH_SOUFFLE_ENABLED is off (Souffle not found or disabled), souffle_runner.cpp when it is on. Both are real, manifest-classified production sources, but only one is ever a member of compile_commands.json in any single build configuration -- the self-host report's translation-unit coverage check treats a group as satisfied once ANY one member is present in the index, rather than requiring every mutually exclusive build variant simultaneously.",
+      "removalIssue": "HSE-62"
+    }
+  ],
   "ci": {
     "command": "python3 scripts/check_architecture.py --manifest architecture/cidx-module-manifest.json",
     "mutationTests": "python3 tests/architecture_test.py",

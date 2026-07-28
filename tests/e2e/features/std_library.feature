@@ -91,10 +91,10 @@ Feature: Capturing standard-library symbols referenced by user code
       | src                                           | kind            | dst                                                        | count | sites     |
       | greet(const std::string &)                    | calls           | std::operator+<>(const value_type *, const std::string &) | 1     | 5:12      |
       | makeNumbers()                                 | calls           | std::vector<int>::vector()                                 | 1     | 9:22      |
-      | makeNumbers()                                 | construct-value | std::vector<int>                                           | 1     | -         |
+      | makeNumbers()                                 | construct-value | std::vector<int>                                           | 1     | 9:22      |
       | makeNumbers()                                 | calls           | std::vector<int>::push_back(value_type &&)                 | 2     | 10:5,11:5 |
       | makeNumbers()                                 | calls           | std::vector<int>::vector(vector<int> &&)                   | 1     | 12:12     |
-      | makeNumbers()                                 | construct-move  | std::vector<int>                                           | 1     | -         |
+      | makeNumbers()                                 | construct-move  | std::vector<int>                                           | 1     | 12:12     |
       | totalLength(const std::vector<std::string> &) | calls           | std::string::size() const                                  | 1     | 18:35     |
       | std::vector<int>::vector()                    | method_of       | std::vector<int>                                           | 1     | -         |
       | std::vector<int>::vector(vector<int> &&)      | method_of       | std::vector<int>                                           | 1     | -         |

@@ -304,8 +304,8 @@ std::optional<Symbol> SqliteStorageService::lookup_symbol(
     const std::optional<std::string> &identity_translation_unit) {
   if (semantic_universe_id && identity_source && !identity_source->empty() &&
       identity_translation_unit && !identity_translation_unit->empty()) {
-    const auto universe = get_semantic_universe_by_id(*semantic_universe_id);
-    const std::string universe_key = universe ? universe->key : "legacy";
+    const std::string universe_key =
+        semantic_universe_key(*semantic_universe_id);
     const auto find_by_identity_key =
         [&](const std::string &identity_key) -> std::optional<Symbol> {
       auto scoped = db_.prepare(std::string("SELECT ") + kSymbolCols +
@@ -344,9 +344,8 @@ std::optional<Symbol> SqliteStorageService::lookup_symbol(
         return candidate;
       }
     }
-    const auto universe =
-        get_semantic_universe_by_id(matches.front().semantic_universe_id);
-    const std::string universe_key = universe ? universe->key : "legacy";
+    const std::string universe_key =
+        semantic_universe_key(matches.front().semantic_universe_id);
     std::vector<Symbol> portable_matches;
     for (const Symbol &candidate : matches) {
       std::string portable_key = universe_key;
@@ -362,11 +361,9 @@ std::optional<Symbol> SqliteStorageService::lookup_symbol(
     return std::nullopt;
   }
   if (identity_translation_unit && !identity_translation_unit->empty()) {
-    const auto universe =
-        get_semantic_universe_by_id(matches.front().semantic_universe_id);
-    const std::string prefix = (universe ? universe->key : "legacy") +
-                               "\x1flocal:" + *identity_translation_unit +
-                               "\x1f";
+    const std::string prefix =
+        semantic_universe_key(matches.front().semantic_universe_id) +
+        "\x1flocal:" + *identity_translation_unit + "\x1f";
     std::vector<Symbol> tu_matches;
     for (const Symbol &candidate : matches) {
       if (candidate.identity_key.starts_with(prefix)) {

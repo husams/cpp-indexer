@@ -294,6 +294,18 @@ std::string col_expr(const std::string &field, const std::string &symbol_alias,
   if (field == "col") {
     return symbol_alias + ".col";
   }
+  if (field == "decl_path") {
+    // The raw declaration path minted for a target in an unregistered
+    // (system/stdlib) file -- see `Symbol::decl_path`'s own doc comment in
+    // storage.hpp. Deliberately independent of `file`/`file_id`: an
+    // implicit-instantiation symbol can carry BOTH a (buggy) `file_id` that
+    // resolves to a registered project file (the point where the engine
+    // attributed the specialization) and a `decl_path` that still names
+    // its true, external declaration site. A consumer that needs to know a
+    // symbol's real origin regardless of what `file_id` says should prefer
+    // this field when it is non-null.
+    return symbol_alias + ".decl_path";
+  }
   throw PlanError("E_FIELD: unknown field '" + field + "'");
 }
 
@@ -799,7 +811,8 @@ class Exec {
 public:
   explicit Exec(QueryReadPort &read) : read_(read) {}
 
-  Stream run_plan(const Plan &plan) {
+  Stream run_plan(const Plan &plan,
+                  std::optional<int64_t> after_id = std::nullopt) {
     Stream st;
     st.view =
         plan.source.kind == SourceKind::Entity ? View::Entity : View::Symbol;
@@ -807,11 +820,13 @@ public:
       st.ids = resolve_source(plan.source);
     }
 
+    std::optional<int64_t> pending_after_id = after_id;
     for (const auto &stage : plan.stages) {
       reject_ambiguous_ungrouped(st);
       switch (stage.op) {
       case StageOp::Nodes:
-        enumerate(st, stage.pred, stage.unknown);
+        enumerate(st, stage.pred, stage.unknown, pending_after_id);
+        pending_after_id.reset();
         st.limit_in_effect = false;
         break;
       case StageOp::ChangeView:
@@ -1041,8 +1056,22 @@ private:
   }
 
   void enumerate(Stream &st, const std::optional<Pred> &pred,
-                 UnknownPolicy unknown) {
+                 UnknownPolicy unknown,
+                 const std::optional<int64_t> &after_id = std::nullopt) {
     if (st.view != View::Symbol && st.view != View::Entity) {
+      if (after_id.has_value() && st.view == View::Edge) {
+        st.keys = logical_rows(
+            st.view, "SELECT id FROM edge WHERE id > ? ORDER BY id LIMIT ?",
+            {SqlValue(after_id.value()), SqlValue(kEnumerateBudget + 1)});
+        if (st.keys.size() > static_cast<size_t>(kEnumerateBudget)) {
+          st.keys.resize(kEnumerateBudget);
+          st.truncated = true;
+        }
+        if (pred) {
+          filter(st, *pred, unknown);
+        }
+        return;
+      }
       std::string sql;
       switch (st.view) {
       case View::Parameter:
@@ -1136,6 +1165,10 @@ private:
         throw PlanError("E_UNKNOWN: predicate evaluation is unknown");
       }
       append_unknown_policy(sql, unknown);
+    }
+    if (after_id.has_value()) {
+      sql += pred ? " AND s.id > ?" : " WHERE s.id > ?";
+      args.emplace_back(after_id.value());
     }
     sql += " ORDER BY s.id LIMIT ?";
     args.emplace_back(kEnumerateBudget + 1);
@@ -3005,6 +3038,15 @@ private:
     if (field == "edge_id" && view == View::Edge) {
       return "edge.id";
     }
+    if ((field == "src_id" || field == "dst_id") && view == View::Site) {
+      // A site row is always scoped to exactly one edge (edge_site.edge_id
+      // is a foreign key into edge.id); exposing the edge's own stable
+      // endpoints here lets a caller correlate every call SITE straight to
+      // its (src_id, dst_id) in one query, without a second "edge" view
+      // round-trip -- mirrors python/indexer/queryplan.py's `_typed_column`.
+      return "(SELECT " + field +
+             " FROM edge WHERE edge.id = edge_site.edge_id)";
+    }
     const std::string table = typed_table(view);
     const std::set<std::string> allowed = [&] {
       if (view == View::Parameter) {
@@ -3701,7 +3743,7 @@ private:
                      f == "qual_name" || f == "semantic_universe" ||
                      f == "identity_key" || f == "callable_kind" ||
                      f == "template_origin" || f == "template_form" ||
-                     f == "owner") {
+                     f == "owner" || f == "decl_path") {
             cells.emplace_back(stq.col_text(col));
           } else {
             cells.emplace_back(stq.col_int64(col));
@@ -4215,10 +4257,10 @@ protocol::ResultEnvelope Result::to_envelope() const {
   return envelope;
 }
 
-Result Executor::run(const Plan &plan) {
+Result Executor::run(const Plan &plan, std::optional<int64_t> after_id) {
   const Plan normalized = validate(plan);
   Exec exec(read_);
-  Stream st = exec.run_plan(normalized);
+  Stream st = exec.run_plan(normalized, after_id);
   Result res = exec.finish(std::move(st));
   res.index = read_.index_identity();
   return res;

@@ -29,7 +29,7 @@ path = "indexer/_version.py"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
+pythonpath = [".", ".."]
 markers = ["spec: executable BDD specification"]
 
 [dependency-groups]

@@ -539,6 +539,42 @@ TEST_CASE("edge sink caches lookups and tracks unique facts in visit order") {
   CIDX_CHECK_BOOL(fixture.db.definitions_of(second_id).size() == 1);
 }
 
+TEST_CASE("edge sink retains positive lookup cache across symbol minting") {
+  SinkFixture fixture;
+  const int64_t existing_id = fixture.db.add_symbol(
+      SinkFixture::stored_symbol("sink:@F@existing", fixture.first_file));
+
+  cidx::ast::StorageEdgeSink sink(fixture.ports);
+  sink.set_current_file_id(fixture.first_file);
+  const auto first =
+      sink.lookup_symbol_id("sink:@F@existing", "/tmp/hse95-sink/first.cpp");
+  REQUIRE(first.has_value());
+  CIDX_CHECK_BOOL(first.value_or(-1) == existing_id);
+
+  cidx::ast::MintRequest request;
+  request.usr = "sink:@F@minted";
+  request.spelling = "minted";
+  request.qual_name = "minted";
+  request.display_name = "minted";
+  request.kind_name = "function";
+  request.identity_source = "/tmp/hse95-sink/first.cpp";
+  const int64_t minted_id = sink.mint_symbol(request);
+  const auto cached =
+      sink.lookup_symbol_id("sink:@F@existing", "/tmp/hse95-sink/first.cpp");
+  REQUIRE(cached.has_value());
+  CIDX_CHECK_BOOL(cached.value_or(-1) == existing_id);
+  const auto minted =
+      sink.lookup_symbol_id("sink:@F@minted", "/tmp/hse95-sink/first.cpp");
+  REQUIRE(minted.has_value());
+  CIDX_CHECK_BOOL(minted.value_or(-1) == minted_id);
+  sink.set_current_file_id(fixture.second_file);
+  const auto cross_file =
+      sink.lookup_symbol_id("sink:@F@existing", "/tmp/hse95-sink/first.cpp");
+  REQUIRE(cross_file.has_value());
+  CIDX_CHECK_BOOL(cross_file.value_or(-1) == existing_id);
+  CIDX_CHECK_BOOL(fixture.symbol_read.lookup_calls == 2);
+}
+
 TEST_CASE("sink ID collections preserve order across the 32-entry transition") {
   SinkFixture fixture;
   cidx::ast::StorageSymbolSink symbols(fixture.ports);

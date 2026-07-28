@@ -1083,6 +1083,28 @@ def test_site_view_expansion_exposes_deterministic_provenance():
     assert result.rows[1][2] == 5
 
 
+def test_site_view_exposes_stable_src_dst_endpoints():
+    """A "site" row's src_id/dst_id are the owning edge's own stable
+    endpoints (a correlated subquery against edge.id), not the "edge"
+    view's separate portable/logical row identity -- a caller can build a
+    caller/callee witness for every call site from ONE query, without a
+    second round-trip through a different id space to recover src/dst."""
+    db = Storage(":memory:")
+    _seed_reverse_typed_graph(db, "/tmp/site-endpoints/cpp-indexer", grouped=False)
+    caller, callee = db._conn.execute(
+        "SELECT src_id,dst_id FROM edge WHERE id=1"
+    ).fetchone()
+    result = Executor(db).run(
+        (start(codebase()) | view("edge") | nodes() | sites()
+         | select(["edge_id", "src_id", "dst_id", "line", "col"])).plan
+    )
+    assert len(result.rows) == 1
+    edge_id, src_id, dst_id, line, col = result.rows[0]
+    assert edge_id == 1
+    assert (src_id, dst_id) == (caller, callee)
+    assert (line, col) == (10, 2)
+
+
 def test_typed_provenance_preserves_status_through_select():
     def run(kind, unresolved_endpoint=False, unresolved_site=False):
         db = Storage(":memory:")
@@ -1242,6 +1264,153 @@ def test_sites_budget_boundaries_are_exact_and_ordered(site_count, expected, tru
     )
     assert result.scalar == expected
     assert result.truncated is truncated
+
+
+def test_after_id_cursor_pages_a_symbol_enumeration_past_its_budget():
+    # A single Executor.run() call's own `nodes()` enumeration is hard-capped
+    # at ENUMERATE_BUDGET (a real, non-negotiable ceiling on that one call --
+    # `limit()` cannot lift it, since the cap is applied inside the SQL the
+    # enumeration itself issues, before `limit()` ever runs). A caller that
+    # needs every row past that ceiling must re-run the SAME plan with an
+    # advancing `after_id` cursor. Prove two things: (1) without the cursor,
+    # a >ENUMERATE_BUDGET symbol table still silently truncates at the
+    # budget exactly as before (unchanged pre-existing behavior); (2)
+    # supplying `after_id` for the next page picks up exactly where the
+    # first page left off, and the two pages together cover every row with
+    # no gap and no duplicate.
+    db = Storage(":memory:")
+    total = qp.ENUMERATE_BUDGET + 1
+    db._conn.execute(
+        "WITH RECURSIVE lines(n) AS (SELECT 0 UNION ALL SELECT n + 1 "
+        f"FROM lines WHERE n < {total - 1}) "
+        "INSERT INTO symbol(usr, spelling, kind) "
+        "SELECT 'USR::budget-symbol-' || n, 'sym' || n, 8 FROM lines"
+    )
+    db._conn.commit()
+
+    plan = (start(codebase()) | nodes() | select(["id"]) | limit(qp.ENUMERATE_BUDGET)).plan
+    executor = Executor(db)
+
+    first_page = executor.run(plan)
+    assert len(first_page.rows) == qp.ENUMERATE_BUDGET
+    assert first_page.truncated
+
+    last_id_seen = first_page.rows[-1][0]
+    second_page = executor.run(plan, after_id=last_id_seen)
+    assert len(second_page.rows) == total - qp.ENUMERATE_BUDGET
+    assert not second_page.truncated
+
+    all_ids = [row[0] for row in first_page.rows] + [row[0] for row in second_page.rows]
+    assert len(all_ids) == total
+    assert len(set(all_ids)) == total  # no duplicate across the page boundary
+    assert all_ids == sorted(all_ids)  # strictly increasing, no gap logic needed downstream
+
+    # Every existing caller (no `after_id` argument at all) still gets
+    # exactly the pre-existing, budget-capped first page.
+    assert executor.run(plan).rows == first_page.rows
+
+
+def test_after_id_cursor_pages_an_edge_enumeration_past_its_budget():
+    # Same cursor mechanism, for the "edge" view -- the one non-symbol/entity
+    # view a real caller (the HSE-71 self-host report's call-site witness
+    # reader) needs to page past ENUMERATE_BUDGET too. That reader always
+    # expands `view("edge") | nodes()` with `sites()` before selecting
+    # fields, and reads the cursor back off the site rows' "edge_id" (the
+    # real, raw edge.id -- unlike the "edge" view's own "id" field, which is
+    # a portable logical row id, not something `after_id` can cursor on).
+    # Mirror that exact shape here: one site per edge keeps site order
+    # identical to edge-id order, so the arithmetic below is exact.
+    db = Storage(":memory:")
+    component = db.add_component("project", "/tmp/edge-cursor-view")
+    directory = db.add_directory(component, "src")
+    file_id = db.add_file(directory, "cursor.cpp")
+    caller = db.add_symbol(_make_sym("USR::edge-cursor-caller", "caller"))
+    total = qp.ENUMERATE_BUDGET + 1
+    db._conn.execute(
+        "WITH RECURSIVE lines(n) AS (SELECT 0 UNION ALL SELECT n + 1 "
+        f"FROM lines WHERE n < {total - 1}) "
+        "INSERT INTO symbol(usr, spelling, kind) "
+        "SELECT 'USR::edge-cursor-callee-' || n, 'callee' || n, 8 FROM lines"
+    )
+    db._conn.execute(
+        "INSERT INTO edge(src_id, dst_id, kind) "
+        "SELECT ?, id, 1 FROM symbol WHERE usr LIKE 'USR::edge-cursor-callee-%'",
+        (caller,),
+    )
+    db._conn.execute(
+        "INSERT INTO edge_site(edge_id, file_id, line, col) "
+        f"SELECT id, ?, 1, 1 FROM edge",
+        (file_id,),
+    )
+    db._conn.commit()
+
+    plan = (start(codebase()) | view("edge") | nodes() | sites()
+            | select(["edge_id"]) | limit(qp.ENUMERATE_BUDGET)).plan
+    executor = Executor(db)
+
+    first_page = executor.run(plan)
+    assert len(first_page.rows) == qp.ENUMERATE_BUDGET
+    assert first_page.truncated
+
+    last_id_seen = first_page.rows[-1][0]
+    second_page = executor.run(plan, after_id=last_id_seen)
+    assert len(second_page.rows) == total - qp.ENUMERATE_BUDGET
+    assert not second_page.truncated
+
+    all_ids = [row[0] for row in first_page.rows] + [row[0] for row in second_page.rows]
+    assert len(all_ids) == total
+    assert len(set(all_ids)) == total
+    assert all_ids == sorted(all_ids)
+
+    # Every existing caller (no `after_id` argument) still gets exactly the
+    # pre-existing, budget-capped first page.
+    assert executor.run(plan).rows == first_page.rows
+
+
+def test_edge_view_edge_id_field_exposes_the_raw_cursor_id_unlike_the_hashed_id_field():
+    # [P1-4 fix] The "edge" view's own "id" field is QueryPlan's PORTABLE
+    # logical identity (a hash of the edge's natural key), not the raw
+    # `edge.id` column -- correct and unchanged: it is what makes
+    # `packageHash`/canonical JSON checkout-location independent. But the
+    # `after_id` cursor argument (`Executor.run(plan, after_id=...)`) is
+    # wired against the RAW `edge.id` column for this view
+    # (`_enumerate`'s "edge" branch: "WHERE id > ?"), so a caller that must
+    # page the raw edge table to genuine completion -- independent of how
+    # many of those edges carry `edge_site` rows, which the self-host
+    # architecture report's `_run_all_site_pages` cannot assume are dense --
+    # needs a field that returns the SAME raw quantity `after_id` expects.
+    # That is "edge_id" (added to `_TYPED_FIELDS["edge"]` alongside this
+    # fix): every OTHER typed view's "edge_id" names its OWNING edge; on the
+    # "edge" view itself it names the row's own raw id.
+    db = Storage(":memory:")
+    component = db.add_component("project", "/tmp/edge-id-cursor-field")
+    directory = db.add_directory(component, "src")
+    db.add_file(directory, "cursor.cpp")
+    a = db.add_symbol(_make_sym("USR::edge-id-cursor-a", "a"))
+    b = db.add_symbol(_make_sym("USR::edge-id-cursor-b", "b"))
+    c = db.add_symbol(_make_sym("USR::edge-id-cursor-c", "c"))
+    e1 = db.add_edge(a, b, 1)
+    e2 = db.add_edge(b, c, 1)
+    db._conn.commit()
+
+    executor = Executor(db)
+    plan = (start(codebase()) | view("edge") | nodes()
+            | select(["edge_id", "id"]) | limit(100)).plan
+    result = executor.run(plan)
+    assert [row[0] for row in result.rows] == [e1, e2]
+    # The hashed "id" field is NOT the raw id -- proves the two fields are
+    # genuinely distinct, not accidental aliases of each other.
+    hashed_ids = [row[1] for row in result.rows]
+    assert e1 not in hashed_ids and e2 not in hashed_ids
+
+    # The raw "edge_id" value round-trips through `after_id` exactly like the
+    # symbol view's own "id" does; the hashed "id" value does not.
+    edge_id_plan = (start(codebase()) | view("edge") | nodes()
+                    | select(["edge_id"]) | limit(100)).plan
+    resumed = executor.run(edge_id_plan, after_id=e1)
+    assert [row[0] for row in resumed.rows] == [e2]
+    dead_end = executor.run(edge_id_plan, after_id=hashed_ids[0])
+    assert dead_end.rows == []
 
 
 def test_typed_view_compositions_are_rejected_before_execution():

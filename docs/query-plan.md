@@ -157,6 +157,11 @@ expanded quantifier tree.
   `union`) re-arms it, so an early `limit` can never disable the final safety
   cap. Hitting any budget sets `truncated: true` in the result — never
   silently treated as complete.
+- `Executor.run(plan, after_id)` is the shared C++/Python execution cursor for
+  deterministic pagination. When supplied, the first `nodes()` enumeration
+  starts strictly after that symbol or edge id. The cursor is execution state,
+  not part of the immutable plan IR, so validation, canonical JSON, and
+  `explain()` remain stable.
 - `count()` counts the full (budget-bounded) stream; the default result cap
   does not apply to it.
 - Relationship quantifiers use Kleene true/false/unknown evaluation. A

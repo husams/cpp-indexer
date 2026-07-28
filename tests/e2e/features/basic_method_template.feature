@@ -80,7 +80,7 @@ Feature: Indexing a member function template inside a struct
       | double_number                              | calls           | Calculator::Calculator()                   | 1     | 15:16 |
       | double_number                              | calls           | usr:c:@S@Calculator@F@add<#d>#d#d#         | 1     | 16:12 |
       | double_number                              | uses            | Calculator                                 | 1     | 15:16 |
-      | double_number                              | construct-value | Calculator                                 | 1     | -     |
+      | double_number                              | construct-value | Calculator                                 | 1     | 15:16 |
 
   Scenario: The member call resolves to the double instantiation, not to the int specialization
     Then symbol "double_number" calls:

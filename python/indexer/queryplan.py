@@ -172,8 +172,18 @@ _TYPED_FIELDS = {
     "template_argument": {"id", "identity_key", "owner_id", "position", "pack_index", "arg_kind", "ref_id", "literal", "type_id"},
     "signature_slot": {"id", "identity_key", "owner_id", "position", "pack_index", "slot_kind", "name", "type_id", "declared_type_id", "adjusted_type_id", "default_text", "default_origin", "reference_semantics", "mode", "value_kind", "named_decl"},
     "call_argument": {"id", "identity_key", "edge_id", "file_id", "line", "col", "position", "src_kind", "type_usr", "decl_usr", "callee_usr", "type_id", "decl_id", "callee_id", "type_is_value"},
-    "edge": {"id", "identity_key", "src_id", "dst_id", "kind", "count", "base_access", "is_virtual", "vtable_slot", "relation", "source", "target", "evidence", "status", "partial", "unknown"},
-    "site": {"id", "identity_key", "edge_id", "file_id", "file", "line", "col", "relation", "source", "target", "evidence", "status", "partial", "unknown"},
+    # "edge_id" duplicates "id"'s underlying raw `edge.id` column on this one
+    # view (every OTHER view's "edge_id" names its owning edge; the "edge"
+    # view names itself). It exists because "id" here is deliberately the
+    # portable logical identity (see docs/query-plan.md: "physical SQLite
+    # row ids are implementation details"), which cannot be cursored on --
+    # `after_id`'s "edge" branch filters the RAW `edge.id` column
+    # (`_enumerate`'s `WHERE id > ?`). A caller that must page the edge
+    # table itself to genuine completion independent of how many of those
+    # edges carry sites (self_host_architecture_report.py's
+    # `_run_all_site_pages`) needs the raw value back, not the hash.
+    "edge": {"id", "identity_key", "edge_id", "src_id", "dst_id", "kind", "count", "base_access", "is_virtual", "vtable_slot", "relation", "source", "target", "evidence", "status", "partial", "unknown"},
+    "site": {"id", "identity_key", "edge_id", "src_id", "dst_id", "file_id", "file", "line", "col", "relation", "source", "target", "evidence", "status", "partial", "unknown"},
     "evidence": {"id", "identity_key", "owner_id", "position", "default_txt", "default_type_id", "default_ref_id", "edge_id", "file_id", "line", "col", "conditional", "args_sig", "recv_src_kind", "recv_type_usr", "recv_decl_usr", "recv_type_id", "recv_decl_id", "recv_param_pos", "recv_type_is_value", "relation", "source", "target", "evidence", "status", "partial", "unknown"},
     "type_layer": {"id", "identity_key", "root_id", "path", "relation", "position", "depth", "status", "type_id", "spelling", "kind", "extent", "element_type", "decl_usr", "canonical_id", "is_const", "is_volatile", "is_restrict"},
     "type": {"id", "identity_key", "type_key", "spelling", "kind", "is_const", "is_volatile", "is_restrict", "cv_qualifiers", "decl_usr", "decl_id", "canonical_id", "extent"},
@@ -1469,6 +1479,17 @@ def _col_expr(field_name: str, symbol_alias: str = "s",
         return f"{symbol_alias}.line"
     if field_name == "col":
         return f"{symbol_alias}.col"
+    if field_name == "decl_path":
+        # The raw declaration path minted for a target in an unregistered
+        # (system/stdlib) file -- see `Symbol.decl_path`'s own docstring in
+        # storage.py. Deliberately independent of `file`/`file_id`: an
+        # implicit-instantiation symbol can carry BOTH a (buggy) `file_id`
+        # that resolves to a registered project file (the point where the
+        # engine attributed the specialization) and a `decl_path` that
+        # still names its true, external declaration site. A consumer that
+        # needs to know a symbol's real origin regardless of what `file_id`
+        # says should prefer this field when it is non-null.
+        return f"{symbol_alias}.decl_path"
     raise PlanError(f"E_FIELD: unknown field '{field_name}'")
 
 
@@ -1705,9 +1726,21 @@ class Executor:
 
     # -- public -------------------------------------------------------------
 
-    def run(self, plan: Plan) -> Result:
+    def run(self, plan: Plan, after_id: Optional[int] = None) -> Result:
+        """Run `plan`. `after_id` is the shared C++/Python execution cursor,
+        not part of the plan IR (it is invisible to `validate()`,
+        `plan_to_dict()`, and golden plan-parity tests). It restricts the
+        plan's FIRST `nodes()` enumeration to ids strictly greater than
+        `after_id`, so a caller can genuinely page past
+        `ENUMERATE_BUDGET`/`TRAVERSE_NODE_BUDGET` (real, hard-coded ceilings
+        inside a single call's own enumeration, not liftable via `limit()`)
+        by re-running the same plan with an advancing cursor rather than
+        ever silently accepting a capped prefix as if it were the whole
+        result. Every existing caller omits this argument and gets
+        byte-identical behavior to before it existed.
+        """
         normalized = validate(plan)
-        st = self._run_plan(normalized)
+        st = self._run_plan(normalized, after_id)
         result = self._finish(st)
         result.index = self._db.index_identity()
         return result
@@ -1754,15 +1787,22 @@ class Executor:
 
     # -- plan walk ------------------------------------------------------------
 
-    def _run_plan(self, plan: Plan) -> _Stream:
+    def _run_plan(self, plan: Plan, after_id: Optional[int] = None) -> _Stream:
         st = _Stream()
         st.view = ENTITY_VIEW if plan.source.kind == "entity" else SYMBOL_VIEW
         if plan.source.kind != "codebase":
             st.ids = self._resolve_source(plan.source)
+        # `after_id` is a pagination cursor for the plan's FIRST enumeration
+        # point only -- a plan can legitimately contain more than one
+        # `nodes()` stage (e.g. after a `view()` change), and the cursor
+        # names a position in that first enumeration's own id space, which
+        # has no meaning for a later, different enumeration.
+        pending_after_id = after_id
         for stage in plan.stages:
             self._reject_ambiguous_ungrouped(st)
             if stage.op == "nodes":
-                self._enumerate(st, stage.pred, stage.unknown)
+                self._enumerate(st, stage.pred, stage.unknown, pending_after_id)
+                pending_after_id = None
                 st.limit_in_effect = False
             elif stage.op == "view":
                 self._change_view(st, stage.level)
@@ -1807,6 +1847,16 @@ class Executor:
 
     def _expand_sites(self, st: _Stream) -> None:
         sites_rows: list[tuple[int, ...]] = []
+        # A LOCAL flag, not `st.truncated`: an earlier stage (e.g. `nodes()`
+        # enumerating more edges than ENUMERATE_BUDGET) may have already set
+        # `st.truncated = True` before this expansion even starts. Reading
+        # that shared flag as this loop's own stop condition would break out
+        # after the very first edge whenever the input was already
+        # truncated, silently collapsing the site expansion to almost
+        # nothing instead of filling out its own, independent
+        # TRAVERSE_NODE_BUDGET -- `st.truncated` is only ever OR'd into
+        # here, never read as a loop-control signal.
+        exceeded = False
         for edge in sorted(set(st.keys)):
             rows = self._conn.execute(
                 "SELECT edge_id,file_id,COALESCE(line,0),COALESCE(col,0) "
@@ -1817,10 +1867,12 @@ class Executor:
             for row in rows:
                 sites_rows.append(tuple(row))
                 if len(sites_rows) > TRAVERSE_NODE_BUDGET:
-                    st.truncated = True
+                    exceeded = True
                     break
-            if st.truncated:
+            if exceeded:
                 break
+        if exceeded:
+            st.truncated = True
         st.keys = sorted(set(sites_rows))
         if len(st.keys) > TRAVERSE_NODE_BUDGET:
             st.keys = st.keys[:TRAVERSE_NODE_BUDGET]
@@ -1871,8 +1923,27 @@ class Executor:
         sql.append(" IS NOT FALSE" if policy == UnknownPolicy.INCLUDE else " IS TRUE")
 
     def _enumerate(self, st: _Stream, pred: Optional[Pred],
-                   unknown: UnknownPolicy) -> None:
+                   unknown: UnknownPolicy, after_id: Optional[int] = None) -> None:
         if st.view not in (SYMBOL_VIEW, ENTITY_VIEW):
+            # Cursor pagination is only wired up for the "edge" view here --
+            # it is the one non-symbol/entity view a real caller currently
+            # needs to page past ENUMERATE_BUDGET, and it is the only one of
+            # these views with a single-column, strictly-ordered `id` to
+            # cursor on (the others key on composite (owner_id, position,
+            # ...) tuples). `after_id` is silently ignored for every other
+            # view, same as passing it to a plan whose first `nodes()`
+            # never runs on this branch at all.
+            if after_id is not None and st.view == "edge":
+                st.keys = [tuple(row) for row in self._conn.execute(
+                    "SELECT id FROM edge WHERE id > ? ORDER BY id LIMIT ?",
+                    (after_id, ENUMERATE_BUDGET + 1),
+                )]
+                if len(st.keys) > ENUMERATE_BUDGET:
+                    del st.keys[ENUMERATE_BUDGET:]
+                    st.truncated = True
+                if pred is not None:
+                    self._filter(st, pred, unknown)
+                return
             queries = {
                 "parameter": "SELECT owner_id,position,pack_index FROM parameter ORDER BY owner_id,position,pack_index",
                 "template_parameter": "SELECT owner_id,position FROM template_param ORDER BY owner_id,position",
@@ -1919,6 +1990,9 @@ class Executor:
                 if self._conn.execute(probe, args).fetchone() is not None:
                     raise PlanError("E_UNKNOWN: predicate evaluation is unknown")
             self._append_unknown_policy(sql, unknown)
+        if after_id is not None:
+            sql.append(" WHERE s.id > ?" if pred is None else " AND s.id > ?")
+            args.append(after_id)
         sql.append(" ORDER BY s.id LIMIT ?")
         args.append(ENUMERATE_BUDGET + 1)
         st.ids = [r["id"] for r in self._conn.execute("".join(sql), args)]
@@ -3077,6 +3151,13 @@ class Executor:
             return "(is_const + 2 * is_volatile + 4 * is_restrict)"
         if field_name == "edge_id" and view == "edge":
             return "id"
+        if field_name in ("src_id", "dst_id") and view == "site":
+            # A site row is always scoped to exactly one edge (edge_site.edge_id
+            # is a foreign key into edge.id); exposing the edge's own stable
+            # endpoints here lets a caller correlate every call SITE straight to
+            # its (src_id, dst_id) in one query, without a second "edge" view
+            # round-trip through a different (portable/logical) row identity.
+            return f"(SELECT {field_name} FROM edge WHERE edge.id = edge_site.edge_id)"
         if field_name in ("id", "identity_key"):
             return ""
         columns = {
