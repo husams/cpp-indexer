@@ -143,6 +143,10 @@ void build_top_level(CLI::App &app, ParsedArgs &pa) {
                     "named fact set to inspect");
   index->add_flag("--no-autoderive-labels", pa.no_autoderive_labels,
                   "disable label autoderive fallback at parse time");
+  index->add_option("--profile-json", pa.profile_json,
+                    "write opt-in indexing telemetry to PATH");
+  index->add_option("--profile-sqlite-config", pa.profile_sqlite_configuration,
+                    "apply benchmark-only SQLite settings from PATH");
   index->callback([&pa] { pa.command = "index"; });
   CLI::App *index_status =
       index->add_subcommand("status", "show transform readiness");
@@ -883,6 +887,18 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
     if (!pa.inc_duplicates && !pa.inc_unused) {
       pa.inc_duplicates = pa.inc_unused = true;
     }
+  }
+  if (pa.profile_json) {
+    pa.profile_json = pathutil::abspath(pathutil::expanduser(*pa.profile_json));
+  }
+  if (pa.profile_sqlite_configuration) {
+    pa.profile_sqlite_configuration = pathutil::abspath(
+        pathutil::expanduser(*pa.profile_sqlite_configuration));
+  }
+  if (pa.profile_sqlite_configuration && !pa.profile_json) {
+    throw UsageError(
+        "Usage: cidx index [OPTIONS] [files...]\n"
+        "cidx: error: --profile-sqlite-config requires --profile-json\n");
   }
   return pa;
 }

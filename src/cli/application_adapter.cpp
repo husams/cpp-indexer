@@ -1,4 +1,5 @@
 #include "cli/application_adapter.hpp"
+#include "profile/index_profile.hpp"
 
 #include <sys/stat.h>
 
@@ -254,11 +255,21 @@ parse_typed_index(const std::vector<std::string> &argv) {
     } else if (argv[i] == "--db") {
       request.index = pathutil::abspath(
           pathutil::expanduser(require_value(argv, i, "--db")));
+    } else if (argv[i] == "--profile-json") {
+      request.profile_json = pathutil::abspath(
+          pathutil::expanduser(require_value(argv, i, "--profile-json")));
+    } else if (argv[i] == "--profile-sqlite-config") {
+      request.profile_sqlite_configuration =
+          pathutil::abspath(pathutil::expanduser(
+              require_value(argv, i, "--profile-sqlite-config")));
     } else if (argv[i].starts_with('-')) {
       usage_error("unrecognized index option " + argv[i]);
     } else {
       request.files.push_back(argv[i]);
     }
+  }
+  if (request.profile_sqlite_configuration && !request.profile_json) {
+    usage_error("--profile-sqlite-config requires --profile-json");
   }
   return request;
 }
@@ -588,6 +599,12 @@ parse_application_request(const std::vector<std::string> &argv) {
 
 int run_application_request(const application::CommandRequest &request,
                             Context &ctx) {
+  std::optional<profile::Session> profiling;
+  if (const auto *index = std::get_if<application::IndexRequest>(&request);
+      index != nullptr && index->profile_json) {
+    profiling.emplace(*index->profile_json,
+                      index->profile_sqlite_configuration);
+  }
   std::visit(
       [&ctx](const auto &typed) {
         using T = std::decay_t<decltype(typed)>;
@@ -682,7 +699,11 @@ int run_application_request(const application::CommandRequest &request,
   const application::ApplicationService service(services);
   const protocol::ResultEnvelope result =
       service.execute(request, application_context);
-  return render_application_result(request, result, ctx);
+  const int exit_code = render_application_result(request, result, ctx);
+  if (profiling) {
+    profiling->finish();
+  }
+  return exit_code;
 }
 
 } // namespace cidx::cli

@@ -157,6 +157,7 @@ add_library(cidx_core STATIC
   src/util/pathutil.cpp
   src/util/repo.cpp
   src/util/files.cpp
+  src/profile/index_profile.cpp
   src/storage/sqlite.cpp
   src/storage/sqlite_adapters.cpp
   src/storage/storage.cpp

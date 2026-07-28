@@ -19,6 +19,57 @@ Generated sources, caches, logs, and JSON reports belong outside the checkout.
 The runner uses a temporary `INDEXER_CACHE`; it never opens the checkout's
 database. Keep reports under `/tmp` (or another disposable directory).
 
+## Production measurement gate (HSE-103)
+
+`production.py` is the supported end-to-end command for the PERF-002
+measurement gate. It retains the HSE-95 32/1,000-TU baseline (`D = 2` distinct
+new owned headers), adds header-heavy, `D = 128` many-owned-header, and
+controlled low/high-fan-in corpora, and benchmarks the current checkout using
+its recorded compilation database. It runs cold, unchanged warm, one-source,
+low-fan-in-header, high-fan-in-header, configuration-change, and
+generated-input states. Forward and reversed compilation-database orders
+separate translation-unit complexity from database-position effects.
+
+Run it only on a quiescent host. By default it refuses to collect authoritative
+timings while another `cidx index` process is visible:
+
+```sh
+python3 benchmarks/indexing/production.py \
+  --cidx build/cidx \
+  --uninstrumented-cidx /tmp/hse103-uninstrumented/build/cidx \
+  --checkout . \
+  --self-compile-db build/compile_commands.json \
+  --representative-files 32 \
+  --scale-files 1000 \
+  --many-header-target 128 \
+  --trials 3 \
+  --work-root /tmp/hse103-production.noindex \
+  --output /tmp/hse103-production.json
+```
+
+The output retains every trial, median aggregates, exact executable/commit,
+schema/catalog/compile-database/host/SQLite/Clang identities, canonical
+semantic parity, and the `--profile-json` per-TU series. The analysis compares
+constant, linear, and quadratic-superlinear models with residuals, coefficient
+standard errors, RMSE, R², and AIC. The SQLite matrix always includes the
+shipped profile as its control and never recommends a production setting.
+Each disposable setting is SIGKILL-interrupted during a real `cidx index`,
+resumed, integrity/foreign keys checked, and compared by canonical semantic
+digest before a separate production-profile change can be considered.
+
+`--uninstrumented-cidx` enables the required paired disabled-profiling overhead
+gate. It records all six cold 1,000-TU trial values, both medians and spreads,
+the percentage overhead, and paired canonical digests. Build that executable
+from the immediately preceding revision in a disposable worktree with the same
+compiler and build settings.
+
+Raw profile JSON, generated corpora, databases, command output, and recovery
+probes are written below `--work-root`, which must be outside the checkout.
+On macOS give that directory a `.noindex` suffix so Spotlight does not index
+the generated 1,000-TU corpora and contaminate later trials.
+Copy only a completed summary into
+`benchmarks/indexing/PRODUCTION_REPORT_TEMPLATE.md`.
+
 ## Reproduce a comparison
 
 Build the current binary in `build/cidx`. Build a baseline binary from the
@@ -75,3 +126,26 @@ benchmark host, an unchanged warm run in under 5 seconds, and a one-TU
 incremental re-index in under 2 seconds. These are operational targets for
 this harness, not correctness thresholds; the report records the measured
 values and host so they can be revisited with later profiling evidence.
+
+## Platform profiler guidance
+
+The existing `profile.py` helper remains the macOS `xctrace` entry point. Keep
+its `.trace` and exported XML below `/tmp`.
+
+On Linux, import into a disposable cache first, then capture the identical
+`cidx index --profile-json` command with:
+
+```sh
+INDEXER_CACHE=/tmp/hse103-cache \
+  perf record --call-graph dwarf --output /tmp/hse103-perf.data -- \
+  build/cidx index --profile-json /tmp/hse103-perf-profile.json
+
+INDEXER_CACHE=/tmp/hse103-cache \
+  strace -ff -tt -T -c -o /tmp/hse103-strace -- \
+  build/cidx index --profile-json /tmp/hse103-strace-profile.json
+```
+
+For SQLite statement evidence, use the profile JSON statement counters first.
+When SQL text is required, build a disposable diagnostic binary with SQLite
+trace hooks enabled and write the trace outside the checkout. Never enable SQL
+text tracing for authoritative timing: trace volume changes the workload.

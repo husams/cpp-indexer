@@ -747,9 +747,30 @@ TEST_CASE("args: index collects FILE... and --source") {
   CHECK(*pa.source == "comp");
 }
 
+TEST_CASE("args: index accepts profiling paths and documents the opt-in flag") {
+  const cli::ParsedArgs parsed = cli::parse_args(
+      {"index", "a.cpp", "--profile-json", "/tmp/cidx-profile.json",
+       "--profile-sqlite-config", "/tmp/cidx-sqlite.json"});
+  CHECK(parsed.profile_json ==
+        std::optional<std::string>{"/tmp/cidx-profile.json"});
+  CHECK(parsed.profile_sqlite_configuration ==
+        std::optional<std::string>{"/tmp/cidx-sqlite.json"});
+
+  const cli::ParsedArgs help = cli::parse_args({"index", "--help"});
+  REQUIRE(help.help_text);
+  CHECK(help.help_text->find("--profile-json") != std::string::npos);
+
+  const ParseFail missing_profile =
+      parse_fail({"index", "--profile-sqlite-config", "/tmp/sqlite.json"});
+  CHECK(missing_profile.code == 2);
+  CHECK(missing_profile.msg.find("requires --profile-json") !=
+        std::string::npos);
+  CHECK(parse_fail({"index", "--profile-json"}).code == 2);
+}
+
 TEST_CASE("args: index status and explain expose fact-set readiness") {
-  cli::ParsedArgs pa = cli::parse_args({"index", "status", "--fact-set",
-                                        "entity-graph"});
+  cli::ParsedArgs pa =
+      cli::parse_args({"index", "status", "--fact-set", "entity-graph"});
   CHECK(pa.command == "index");
   CHECK(pa.index_status);
   CHECK(*pa.index_fact_set == "entity-graph");
@@ -824,7 +845,7 @@ TEST_CASE("resolve compatibility adapter reports transform failure") {
     if (!baseline.complete) {
       for (const auto &run : baseline.runs) {
         MESSAGE(run.transform_id << " " << transform_run_status_name(run.status)
-                << " " << run.diagnostic);
+                                 << " " << run.diagnostic);
       }
     }
     REQUIRE(baseline.complete);
