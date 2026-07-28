@@ -91,7 +91,7 @@ is measured and which is inferred.
 | source validation / hashing | `<value>` | `<value>` | |
 | workspace snapshot / configuration | `<value>` | `<value>` | |
 | driver subprocesses | `<value>` | `<value>` | report separately from in-process CPU |
-| Clang front end | `<value>` | `<value>` | |
+| Clang front end | `<exclusive value>` | `<value>` | excludes registered pass timings; retain `clang_tool_inclusive` separately |
 | root AST pass: symbols | `<value>` | `<TraverseDecl calls>` | |
 | root AST pass: definitions | `<value>` | `<TraverseDecl calls>` | |
 | root AST pass: declarations/edges | `<value>` | `<TraverseDecl calls>` | |
@@ -110,9 +110,9 @@ is measured and which is inferred.
 | toolchain/cache | `<value>` | `<hits/misses>` | |
 
 Fact-family counts in profile JSON are attributed to their producing pass.
-When one pass declares several output families, its attempted, persisted, and
-duplicate totals are retained for each declared family rather than guessed
-apart after the fact.
+They are incremented at typed family emit/persist operations; multi-family pass
+totals are never copied onto every declared output family. Include path
+resolution is counted at each preprocessor resolution callback.
 
 ## Targeted attribution experiments
 

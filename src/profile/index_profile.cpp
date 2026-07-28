@@ -1,10 +1,10 @@
 #include "profile/index_profile.hpp"
 
-#include "cli/json_out.hpp"
 #include "util/errors.hpp"
 #include "util/json_read.hpp"
 
 #include <sqlite3.h>
+#include <sys/resource.h>
 
 #include <algorithm>
 #include <array>
@@ -29,6 +29,7 @@ constexpr auto kTimingNames = std::to_array<std::string_view>({
     "source_validation_hashing",
     "workspace_snapshot_configuration",
     "driver_subprocesses",
+    "clang_tool_inclusive",
     "clang_front_end",
     "root_symbols",
     "root_declarations",
@@ -48,7 +49,44 @@ constexpr auto kTimingNames = std::to_array<std::string_view>({
 });
 
 auto json_string(std::string_view value) -> std::string {
-  return json_out::dumps_indent2(json_out::Value::of(std::string(value)));
+  std::ostringstream output;
+  output << '"';
+  for (const unsigned char character : value) {
+    switch (character) {
+    case '"':
+      output << "\\\"";
+      break;
+    case '\\':
+      output << "\\\\";
+      break;
+    case '\b':
+      output << "\\b";
+      break;
+    case '\f':
+      output << "\\f";
+      break;
+    case '\n':
+      output << "\\n";
+      break;
+    case '\r':
+      output << "\\r";
+      break;
+    case '\t':
+      output << "\\t";
+      break;
+    default:
+      if (character < 0x20) {
+        output << "\\u00" << std::hex << std::setw(2) << std::setfill('0')
+               << static_cast<unsigned>(character) << std::dec
+               << std::setfill(' ');
+      } else {
+        output << static_cast<char>(character);
+      }
+      break;
+    }
+  }
+  output << '"';
+  return output.str();
 }
 
 auto seconds_json(double value) -> std::string {
@@ -415,6 +453,18 @@ auto driver_subprocess_wall_seconds() noexcept -> double {
   }
   std::scoped_lock lock(current->mutex);
   return current->driver_subprocess_wall_seconds;
+}
+
+auto process_peak_rss_bytes() noexcept -> std::uint64_t {
+  struct rusage usage{};
+  if (::getrusage(RUSAGE_SELF, &usage) != 0) {
+    return 0;
+  }
+#ifdef __APPLE__
+  return static_cast<std::uint64_t>(usage.ru_maxrss);
+#else
+  return static_cast<std::uint64_t>(usage.ru_maxrss) * 1024U;
+#endif
 }
 
 void note_toolchain_cache_lookup(bool hit) noexcept {

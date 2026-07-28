@@ -425,7 +425,7 @@ def run_stage(
     environment["INDEXER_CACHE"] = str(cache)
     command = [str(executable), *args]
     profile_path = _profile_path(case_root, label)
-    if profile and args and args[0] == "index":
+    if profile and args and args[0] in {"index", "resolve"}:
         command.extend(["--profile-json", str(profile_path)])
         if sqlite_experiment is not None:
             sqlite_path = case_root / f"{label}.sqlite-experiment.json"
@@ -437,7 +437,9 @@ def run_stage(
     database = cache / "index.db"
     current = _snapshot(database, corpus_root, require_coverage)
     stage_profile = (
-        _load_profile(profile_path) if profile and args[0] == "index" else None
+        _load_profile(profile_path)
+        if profile and args[0] in {"index", "resolve"}
+        else None
     )
     result = {
         key: value for key, value in metrics.items() if key not in {"stdout", "stderr"}

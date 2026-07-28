@@ -72,6 +72,7 @@ void note_reconciliation(std::uint64_t rows_changed) noexcept;
 void note_driver_subprocess(double wall_seconds,
                             std::uint64_t peak_rss_bytes) noexcept;
 [[nodiscard]] auto driver_subprocess_wall_seconds() noexcept -> double;
+[[nodiscard]] auto process_peak_rss_bytes() noexcept -> std::uint64_t;
 void note_toolchain_cache_lookup(bool hit) noexcept;
 
 void note_sqlite_prepare(double seconds) noexcept;

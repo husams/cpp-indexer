@@ -36,15 +36,15 @@
 #include "clang/Tooling/CompilationDatabase.h"
 #include "clang/Tooling/Tooling.h"
 
-#include <sys/resource.h>
 #include <sys/stat.h>
 
 #include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <ctime>
-#include <filesystem>
+#include <functional>
 #include <memory>
+#include <numeric>
 #include <stdexcept>
 #include <tuple>
 #include <unordered_set>
@@ -60,21 +60,11 @@ auto elapsed_seconds(ProfileClock::time_point started) -> double {
 }
 
 auto file_bytes(const std::string &path) -> std::uint64_t {
-  std::error_code error;
-  const auto size = std::filesystem::file_size(path, error);
-  return error ? 0 : size;
-}
-
-auto peak_rss_bytes() -> std::uint64_t {
-  struct rusage usage{};
-  if (::getrusage(RUSAGE_SELF, &usage) != 0) {
+  struct stat status{};
+  if (::stat(path.c_str(), &status) != 0 || status.st_size < 0) {
     return 0;
   }
-#ifdef __APPLE__
-  return static_cast<std::uint64_t>(usage.ru_maxrss);
-#else
-  return static_cast<std::uint64_t>(usage.ru_maxrss) * 1024U;
-#endif
+  return static_cast<std::uint64_t>(status.st_size);
 }
 
 std::optional<double> file_mtime(const std::string &path) {
@@ -333,6 +323,8 @@ public:
             db_.associate_facts_for_file(
                 header.file_id, state_.normalized_config_id, header.symbol_ids,
                 header.edge_ids, header.definition_ids);
+            execution.metrics.note_fact_family("file_associations", fact_count,
+                                               fact_count);
             db_.mark_file_indexed(header.file_id, header.mtime, header.md5);
             ++state_.out->headers.indexed;
             state_.out->headers.symbols += header.stored;
@@ -427,6 +419,9 @@ public:
           for (const auto &[symbol_id, display] : updates) {
             edges_.update_display_name(symbol_id, display);
           }
+          execution.metrics.note_fact_family(
+              "display_names", before, updates.size(),
+              before - state_.presentation_intents.size());
         });
     auto main_association = descriptor(
         "main.associate", {}, {"symbols", "relations", "definitions"},
@@ -452,6 +447,8 @@ public:
           db_.associate_facts_for_file(
               state_.rec->id, state_.normalized_config_id, main_symbol_ids_,
               main_edge_ids_, main_definition_ids_);
+          execution.metrics.note_fact_family("file_associations", fact_count,
+                                             fact_count);
         });
     registry.register_pass(
         descriptor("includes.persist", {FrontendCapability::preprocessor},
@@ -476,6 +473,9 @@ public:
           execution.metrics.note_duplicate(counts.duplicates);
           execution.metrics.note_emitted(counts.emitted_facts);
           persist_include_facts(db_, state_.includes, *state_.config);
+          execution.metrics.note_fact_family(
+              "include_facts", counts.emitted_facts + counts.duplicates,
+              counts.emitted_facts, counts.duplicates);
         });
     registry.register_pass(
         descriptor(
@@ -508,6 +508,9 @@ public:
           execution.metrics.note_duplicate(before -
                                            state_.out->evidence.size());
           execution.metrics.note_emitted(state_.out->evidence.size());
+          execution.metrics.note_fact_family(
+              "evidence_artifact", before, state_.out->evidence.size(),
+              before - state_.out->evidence.size());
         });
 
     IndexingPlan plan;
@@ -574,6 +577,7 @@ public:
            .unknown_constructs = pass.metrics.unknown_constructs,
            .duplicates = pass.metrics.duplicates,
            .diagnostics = pass.metrics.diagnostics,
+           .fact_families = pass.metrics.fact_families,
            .elapsed_microseconds = pass.metrics.elapsed.count(),
            .budget_exhausted = pass.metrics.budget_exhausted});
     }
@@ -1082,7 +1086,18 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
     out.error = error.what();
   }
   if (profiling) {
-    profile::add_timing("clang_front_end", elapsed_seconds(clang_started));
+    const double clang_tool_inclusive = elapsed_seconds(clang_started);
+    const double pass_seconds = std::transform_reduce(
+        out.pass_metrics.begin(), out.pass_metrics.end(), 0.0, std::plus<>(),
+        [](const IndexPassMetrics &pass) {
+          return static_cast<double>(pass.elapsed_microseconds) / 1'000'000.0;
+        });
+    profile::add_timing("clang_tool_inclusive", clang_tool_inclusive);
+    // LibTooling runs the registered visitors and persistence passes inside
+    // tool.run(). Subtract their disjoint registry timings so this attribution
+    // remains exclusive instead of double-counting those categories.
+    profile::add_timing("clang_front_end",
+                        std::max(0.0, clang_tool_inclusive - pass_seconds));
   }
   const auto record_profile = [&] {
     if (!profiling) {
@@ -1113,9 +1128,9 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
       if (pass.id.ends_with(".persist") || pass.id.ends_with(".associate")) {
         profile::add_timing("fact_persistence", elapsed);
       }
-      for (const std::string &family : pass.produced_fact_families) {
-        profile::add_fact_family(family, pass.visited_constructs,
-                                 pass.emitted_facts, pass.duplicates);
+      for (const auto &[family, counts] : pass.fact_families) {
+        profile::add_fact_family(family, counts.attempted, counts.persisted,
+                                 counts.duplicates);
       }
     }
     std::uint64_t preprocessed_bytes = file_bytes(path);
@@ -1124,8 +1139,6 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
         preprocessed_bytes += file_bytes(include.dst_path);
       }
     }
-    profile::add_counter("include_path_resolution_queries",
-                         state.includes.includes.size());
     profile::record_translation_unit(
         {.path = path,
          .start_position = start_position,
@@ -1144,7 +1157,7 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
              static_cast<double>(CLOCKS_PER_SEC),
          .child_process_wall_seconds =
              profile::driver_subprocess_wall_seconds() - child_wall_before,
-         .peak_rss_bytes = peak_rss_bytes()});
+         .peak_rss_bytes = profile::process_peak_rss_bytes()});
   };
   if (!state.tu_handled) {
     out.parse_failed = true;

@@ -53,6 +53,10 @@ semantic parity, and the `--profile-json` per-TU series. The analysis compares
 constant, linear, and quadratic-superlinear models with residuals, coefficient
 standard errors, RMSE, R², and AIC. The SQLite matrix always includes the
 shipped profile as its control and never recommends a production setting.
+Index and resolve stages both retain profiles: `clang_front_end` excludes the
+registered visitor/persistence pass timings, `clang_tool_inclusive` retains the
+enclosing LibTooling wall time, and `transforms` measures the actual resolve
+pipeline.
 Each disposable setting is SIGKILL-interrupted during a real `cidx index`,
 resumed, integrity/foreign keys checked, and compared by canonical semantic
 digest before a separate production-profile change can be considered.

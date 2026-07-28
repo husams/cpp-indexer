@@ -14,12 +14,10 @@
 
 namespace cidx::ast {
 
-FunctionDefinitionVisitor::FunctionDefinitionVisitor(clang::ASTContext &context,
-                                                     DeclarationIdentityResolver &identity,
-                                                     DefinitionScopeEmitter &definitions,
-                                                     std::string target_file,
-                                                     int64_t file_id,
-                                                     PassMetrics *metrics)
+FunctionDefinitionVisitor::FunctionDefinitionVisitor(
+    clang::ASTContext &context, DeclarationIdentityResolver &identity,
+    DefinitionScopeEmitter &definitions, std::string target_file,
+    int64_t file_id, PassMetrics *metrics)
     : context_(context), identity_(identity), definitions_(definitions),
       target_file_(std::move(target_file)), file_id_(file_id),
       metrics_(metrics) {}
@@ -45,9 +43,9 @@ bool FunctionDefinitionVisitor::is_indexable_definition(
   return expansion_loc(context_, decl->getLocation()).file == target_file_;
 }
 
-void FunctionDefinitionVisitor::run_statement_pass(StatementFactPorts &ports,
-                                                    PassMetrics *metrics,
-                                                    DefinitionScopeEmitter *statement_definitions) {
+void FunctionDefinitionVisitor::run_statement_pass(
+    StatementFactPorts &ports, PassMetrics *metrics,
+    DefinitionScopeEmitter *statement_definitions) {
   DefinitionScopeEmitter &definitions =
       statement_definitions != nullptr ? *statement_definitions : definitions_;
   for (const DefinitionFact &fact : definitions_found_) {
@@ -71,6 +69,9 @@ void FunctionDefinitionVisitor::index_definition(clang::FunctionDecl *decl,
   }
   const int64_t def_id = definitions_.get_or_create_definition(
       fn_sym, file_id_, start.line, start.col, end.line, end.col, std::nullopt);
+  if (metrics_ != nullptr) {
+    metrics_->note_fact_family("definitions", 1, 1);
+  }
   definitions_found_.push_back(
       {.decl = decl, .symbol_id = fn_sym, .definition_id = def_id});
 }

@@ -766,6 +766,13 @@ TEST_CASE("args: index accepts profiling paths and documents the opt-in flag") {
   CHECK(missing_profile.msg.find("requires --profile-json") !=
         std::string::npos);
   CHECK(parse_fail({"index", "--profile-json"}).code == 2);
+
+  const cli::ParsedArgs resolve = cli::parse_args(
+      {"resolve", "--profile-json", "/tmp/cidx-resolve-profile.json"});
+  CHECK(resolve.profile_json ==
+        std::optional<std::string>{"/tmp/cidx-resolve-profile.json"});
+  CHECK(parse_fail({"resolve", "--profile-sqlite-config", "/tmp/sqlite.json"})
+            .code == 2);
 }
 
 TEST_CASE("args: index status and explain expose fact-set readiness") {
@@ -857,6 +864,19 @@ TEST_CASE("resolve compatibility adapter reports transform failure") {
   CHECK(result.err.find("resolve failed") != std::string::npos);
   Storage db(cache + "/index.db");
   CHECK_FALSE(db.graph_resolved());
+}
+
+TEST_CASE("resolve profiling records transform wall time") {
+  const std::string cache = make_temp_dir();
+  const std::string profile_path = cache + "/resolve-profile.json";
+  const CmdResult result =
+      run_cli({"resolve", "--profile-json", profile_path}, cache);
+  REQUIRE(result.rc == 0);
+  const std::string profile = read_file(profile_path);
+  const std::string key = "\"transforms\": ";
+  const std::size_t position = profile.find(key);
+  REQUIRE(position != std::string::npos);
+  CHECK(std::stod(profile.substr(position + key.size())) > 0.0);
 }
 
 TEST_CASE("args: --version sets the version flag (top level only)") {

@@ -123,6 +123,57 @@ def test_profile_contract_requires_named_timings_and_counters(
         benchmark._load_profile(profile_path)
 
 
+def test_resolve_stage_retains_transform_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    benchmark = load_benchmark()
+    case_root = tmp_path / "case"
+    corpus_root = case_root / "corpus"
+    cache = case_root / "cache"
+    corpus_root.mkdir(parents=True)
+    cache.mkdir()
+    captured: list[str] = []
+    profile = {
+        "summary": {
+            "timings": {key: 0.0 for key in benchmark.REQUIRED_PROFILE_TIMINGS},
+            "counters": {key: 0 for key in benchmark.REQUIRED_PROFILE_COUNTERS},
+        },
+        "translation_units": [],
+    }
+
+    def fake_run_timed(command, *_args):
+        captured.extend(command)
+        return {
+            "wall_seconds": 0.1,
+            "peak_rss_bytes": 1,
+            "stdout": "",
+            "stderr": "",
+        }
+
+    monkeypatch.setattr(benchmark.HSE95, "run_timed", fake_run_timed)
+    monkeypatch.setattr(benchmark.HSE95, "parse_header_counts", lambda _output: {})
+    monkeypatch.setattr(
+        benchmark,
+        "_snapshot",
+        lambda *_args, **_kwargs: {"page_bytes": 0, "rows": {}},
+    )
+    monkeypatch.setattr(benchmark, "_load_profile", lambda _path: profile)
+
+    result, _ = benchmark.run_stage(
+        tmp_path / "cidx",
+        cache,
+        case_root,
+        corpus_root,
+        "resolve",
+        ["resolve"],
+        previous=None,
+        profile=True,
+    )
+
+    assert "--profile-json" in captured
+    assert result["profile"] is profile
+
+
 def test_disabled_overhead_retains_spread_and_parity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -167,6 +167,11 @@ void build_top_level(CLI::App &app, ParsedArgs &pa) {
 
   CLI::App *resolve = app.add_subcommand(
       "resolve", "finalize cross-repo edges and roll up edge counts");
+  resolve->add_option("--profile-json", pa.profile_json,
+                      "write opt-in transform telemetry to PATH");
+  resolve->add_option("--profile-sqlite-config",
+                      pa.profile_sqlite_configuration,
+                      "apply benchmark-only SQLite settings from PATH");
   resolve->callback([&pa] { pa.command = "resolve"; });
 
   CLI::App *search =
@@ -897,7 +902,8 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
   }
   if (pa.profile_sqlite_configuration && !pa.profile_json) {
     throw UsageError(
-        "Usage: cidx index [OPTIONS] [files...]\n"
+        "Usage: cidx " + pa.command +
+        " [OPTIONS]\n"
         "cidx: error: --profile-sqlite-config requires --profile-json\n");
   }
   return pa;

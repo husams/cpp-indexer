@@ -21,6 +21,7 @@
 #include "catalogs/generated_catalog.hpp"
 #include "util/version.hpp"
 #include "compiledb/compiledb.hpp"
+#include "profile/index_profile.hpp"
 #include "storage/storage_detail.hpp"
 #include "storage/storage_schema.hpp"
 #include "util/errors.hpp"
@@ -1946,6 +1947,19 @@ void SqliteStorageService::materialise_entity_edges() {
 }
 
 TransformReport SqliteStorageService::run_transform_pipeline() {
+  const bool profiling = profile::active();
+  const auto profile_started =
+      profiling ? std::chrono::steady_clock::now()
+                : std::chrono::steady_clock::time_point{};
+  const auto record_profile = [profiling, profile_started] {
+    if (profiling) {
+      profile::add_timing(
+          "transforms",
+          std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                        profile_started)
+              .count());
+    }
+  };
   const TransformRegistry registry = make_transform_registry(&db_);
   const auto ordered = registry.execution_order();
   TransformReport report;
@@ -2257,6 +2271,7 @@ TransformReport SqliteStorageService::run_transform_pipeline() {
     }
     report.failed = true;
     last_transform_runs_ = report.runs;
+    record_profile();
     return report;
   }
 
@@ -2264,6 +2279,7 @@ TransformReport SqliteStorageService::run_transform_pipeline() {
   report.complete = !report.runs.empty() &&
                     std::ranges::all_of(report.runs, qualified_ready);
   last_transform_runs_ = report.runs;
+  record_profile();
   return report;
 }
 
