@@ -9,6 +9,7 @@
 #include <array>
 #include <cctype>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -16,7 +17,6 @@
 #include <filesystem>
 #include <map>
 #include <optional>
-#include <print>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -747,19 +747,32 @@ void SqliteStorageService::
       current_external_identity_reconciliation_metrics_;
   if (external_identity_reconciliation_profile_) {
     const auto &metrics = last_external_identity_reconciliation_metrics_;
-    std::println(
-        stderr,
-        "external-identity-reconciliation mode={} emissions={} distinct={} "
-        "calls={} prepared={} steps={} matched={} changed={} wall_ns={} "
-        "cpu_ns={}",
-        external_identity_reconciliation_mode_ ==
-                ExternalIdentityReconciliationMode::immediate
-            ? "immediate"
-            : "batched",
-        metrics.emissions, metrics.distinct_identities, metrics.calls,
-        metrics.prepared_statements, metrics.vdbe_steps, metrics.rows_matched,
-        metrics.rows_changed, metrics.wall_nanoseconds,
-        metrics.cpu_nanoseconds);
+    std::string message = "external-identity-reconciliation mode=";
+    message += external_identity_reconciliation_mode_ ==
+                       ExternalIdentityReconciliationMode::immediate
+                   ? "immediate"
+                   : "batched";
+    for (const auto &[name, value] :
+         std::array<std::pair<std::string_view, std::uint64_t>, 9>{
+             {{" emissions=", metrics.emissions},
+              {" distinct=", metrics.distinct_identities},
+              {" calls=", metrics.calls},
+              {" prepared=", metrics.prepared_statements},
+              {" steps=", metrics.vdbe_steps},
+              {" matched=", metrics.rows_matched},
+              {" changed=", metrics.rows_changed},
+              {" wall_ns=", metrics.wall_nanoseconds},
+              {" cpu_ns=", metrics.cpu_nanoseconds}}}) {
+      message += name;
+      message += std::to_string(value);
+    }
+    message += '\n';
+    const std::size_t written =
+        std::fwrite(message.data(), sizeof(char), message.size(), stderr);
+    if (written != message.size()) {
+      throw StorageError(
+          "failed to write external-identity reconciliation metrics");
+    }
   }
   pending_symbol_identities_.clear();
   pending_symbol_identity_indexes_.clear();
