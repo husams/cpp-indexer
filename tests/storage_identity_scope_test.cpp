@@ -170,12 +170,12 @@ TEST_CASE("source identity cache follows component repository ownership") {
   const std::string component_root = "/tmp/cidx-source-identity-cache";
   const std::string source_path = component_root + "/src/unit.cpp";
   const auto component = db.add_component("component", component_root, "repo");
+  const auto repository = db.add_repository(
+      "repo", "repo", std::string("https://example.test/repo.git"));
 
   const auto ungrouped = db.portable_source_identity_for_path(source_path);
   CHECK(ungrouped.starts_with("component:"));
 
-  const auto repository = db.add_repository(
-      "repo", "repo", std::string("https://example.test/repo.git"));
   db.set_component_repository(component, repository);
   const auto attached = db.portable_source_identity_for_path(source_path);
   CHECK(attached.starts_with("remote:https://example.test/repo.git"));
