@@ -1948,16 +1948,15 @@ void SqliteStorageService::materialise_entity_edges() {
 
 TransformReport SqliteStorageService::run_transform_pipeline() {
   const bool profiling = profile::active();
-  const auto profile_started =
-      profiling ? std::chrono::steady_clock::now()
-                : std::chrono::steady_clock::time_point{};
+  const auto profile_started = profiling
+                                   ? std::chrono::steady_clock::now()
+                                   : std::chrono::steady_clock::time_point{};
   const auto record_profile = [profiling, profile_started] {
     if (profiling) {
       profile::add_timing(
-          "transforms",
-          std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                        profile_started)
-              .count());
+          "transforms", std::chrono::duration<double>(
+                            std::chrono::steady_clock::now() - profile_started)
+                            .count());
     }
   };
   const TransformRegistry registry = make_transform_registry(&db_);
@@ -2276,8 +2275,8 @@ TransformReport SqliteStorageService::run_transform_pipeline() {
   }
 
   report.still_stub_count = count_stubs(db_);
-  report.complete = !report.runs.empty() &&
-                    std::ranges::all_of(report.runs, qualified_ready);
+  report.complete =
+      !report.runs.empty() && std::ranges::all_of(report.runs, qualified_ready);
   last_transform_runs_ = report.runs;
   record_profile();
   return report;

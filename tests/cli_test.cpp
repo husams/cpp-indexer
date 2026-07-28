@@ -924,16 +924,22 @@ TEST_CASE("args: -h returns help text; validation beats help") {
   CHECK(pa.help_text->find("show at most N matches (0 = all; default 25)") !=
         std::string::npos);
 
-  // resolve takes no options other than -h (the destructive --rebuild flag
-  // was removed in v0.4.1 — it cleared all edges with no re-extract path).
+  // resolve exposes only telemetry options in addition to -h (the destructive
+  // --rebuild flag was removed in v0.4.1 — it cleared all edges with no
+  // re-extract path).
   pa = cli::parse_args({"resolve", "-h"});
   REQUIRE(pa.help_text);
-  CHECK(*pa.help_text ==
-        "finalize cross-repo edges and roll up edge counts\n"
-        "Usage: cidx resolve [OPTIONS]\n"
-        "\n"
-        "Options:\n"
-        "  -h,--help                   Print this help message and exit\n");
+  CHECK(
+      *pa.help_text ==
+      "finalize cross-repo edges and roll up edge counts\n"
+      "Usage: cidx resolve [OPTIONS]\n"
+      "\n"
+      "Options:\n"
+      "  -h,--help                   Print this help message and exit\n"
+      "  --profile-json TEXT         write opt-in transform telemetry to PATH\n"
+      "  --profile-sqlite-config TEXT\n"
+      "                              apply benchmark-only SQLite settings from "
+      "PATH\n");
 
   // Subcommand help carries the full "cidx file list" usage line.
   pa = cli::parse_args({"file", "list", "-h"});
