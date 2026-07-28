@@ -20,6 +20,7 @@
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -83,6 +84,23 @@ private:
   int uncaught_on_entry_;
 };
 
+enum class ExternalIdentityReconciliationMode : std::uint8_t {
+  batched,
+  immediate,
+};
+
+struct ExternalIdentityReconciliationMetrics {
+  std::uint64_t emissions = 0;
+  std::uint64_t distinct_identities = 0;
+  std::uint64_t calls = 0;
+  std::uint64_t prepared_statements = 0;
+  std::uint64_t vdbe_steps = 0;
+  std::uint64_t rows_matched = 0;
+  std::uint64_t rows_changed = 0;
+  std::uint64_t wall_nanoseconds = 0;
+  std::uint64_t cpu_nanoseconds = 0;
+};
+
 class SqliteStorageService {
 public:
   // read_only opens with SQLITE_OPEN_READONLY and performs NO mutation on
@@ -118,6 +136,19 @@ public:
   // Batch many mutations into one commit (the documented 100x win):
   //   { auto txn = db.transaction(); ...; }   // commits at scope end
   Transaction transaction() { return Transaction(*this); }
+
+  [[nodiscard]] ExternalIdentityReconciliationMetrics
+  external_identity_reconciliation_metrics() const {
+    return last_external_identity_reconciliation_metrics_;
+  }
+  void set_external_identity_reconciliation_mode_for_testing(
+      ExternalIdentityReconciliationMode mode) {
+    external_identity_reconciliation_mode_ = mode;
+  }
+  void inject_external_identity_reconciliation_failure_for_testing(
+      std::size_t after_statement) {
+    external_identity_reconciliation_failure_after_statement_ = after_statement;
+  }
 
   // -- semantic universes / symbol identity (v35) --------------------------
   // A universe is explicit policy: equal USRs merge only when their
@@ -815,6 +846,15 @@ private:
   void
   reconcile_external_identities(); // resolve evidence after local rows arrive
   void reconcile_symbol_identity(int64_t symbol_id, std::string_view usr);
+  void record_symbol_identity(int64_t symbol_id, std::string_view usr);
+  void begin_external_identity_reconciliation_transaction();
+  void reconcile_pending_symbol_identities();
+  void finish_external_identity_reconciliation_transaction();
+  void cancel_external_identity_reconciliation_transaction();
+  void note_external_identity_reconciliation_statement();
+  static ExternalIdentityReconciliationMode
+  external_identity_reconciliation_mode_from_environment();
+  static bool external_identity_reconciliation_profile_from_environment();
   void reconcile_type_identity(int64_t type_id, std::string_view decl_usr);
   void migrate_symbol_kind_to_int();    // v15 -> v16: rebuild symbol, kind->int
   void migrate_component_repo_unique(); // v23 -> v24: path UNIQUE per repo
@@ -838,6 +878,25 @@ private:
   SqliteDb db_;
   std::unique_ptr<storage::SqliteStoragePorts> ports_;
   bool in_txn_ = false;
+  struct PendingSymbolIdentity {
+    int64_t symbol_id;
+    std::string usr;
+    std::uint64_t first_seen;
+    std::uint64_t last_seen;
+  };
+  std::vector<PendingSymbolIdentity> pending_symbol_identities_;
+  std::unordered_map<int64_t, std::size_t> pending_symbol_identity_indexes_;
+  std::uint64_t pending_symbol_identity_sequence_ = 0;
+  ExternalIdentityReconciliationMode external_identity_reconciliation_mode_ =
+      external_identity_reconciliation_mode_from_environment();
+  bool external_identity_reconciliation_profile_ =
+      external_identity_reconciliation_profile_from_environment();
+  ExternalIdentityReconciliationMetrics
+      current_external_identity_reconciliation_metrics_;
+  ExternalIdentityReconciliationMetrics
+      last_external_identity_reconciliation_metrics_;
+  std::size_t external_identity_reconciliation_failure_after_statement_ = 0;
+  std::size_t external_identity_reconciliation_statement_ = 0;
   // Set by migrate() on the v21->v22 transition; consumed by the constructor to
   // backfill entity_node from existing symbols (pure-DB, no re-index/resolve).
   bool needs_entity_node_backfill_ = false;

@@ -179,7 +179,7 @@ int64_t SqliteStorageService::add_symbol(const Symbol &sym) {
     ds.bind(7, static_cast<int64_t>(sym.is_definition ? 1 : 0));
     ds.step_done();
   }
-  reconcile_symbol_identity(sid, sym.usr);
+  record_symbol_identity(sid, sym.usr);
   return sid;
 }
 
@@ -223,7 +223,7 @@ void SqliteStorageService::add_decl_site(int64_t symbol_id, const Symbol &sym) {
   bind_opt(ds, 6, sym.end_col);
   ds.bind(7, static_cast<int64_t>(sym.is_definition ? 1 : 0));
   ds.step_done();
-  reconcile_symbol_identity(symbol_id, sym.usr);
+  record_symbol_identity(symbol_id, sym.usr);
 }
 
 bool SqliteStorageService::update_symbol(

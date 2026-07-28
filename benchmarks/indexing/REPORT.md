@@ -180,3 +180,47 @@ the exact import/record commands and disposable traces remain available under
 
 No repository `index.db` was read, modified, regenerated, staged, or included;
 all benchmark databases were disposable files under `/tmp`.
+
+## HSE-114 external-identity reconciliation A/B
+
+HSE-114 used one candidate binary in two modes to isolate statement elimination
+from prepared-statement caching: `immediate` retained the former per-emission
+sequence, while `batched` reconciled distinct identities at transaction commit.
+The authoritative run used a quiescent host and a Spotlight-excluded temporary
+root:
+
+```text
+TMPDIR=/tmp/hse114-benchmark.noindex \
+python3 benchmarks/indexing/run.py \
+  --current-cidx build/cidx \
+  --reconciliation-ab \
+  --representative-files 32 \
+  --scale-files 1000 \
+  --per-tu 5 \
+  --trials 3 \
+  --output /tmp/hse114-indexing-post-refinement.json
+```
+
+Values are three-trial medians:
+
+| Corpus / stage | Calls | Prepare / steps | Rows matched / changed | Reconciliation wall / CPU | End-to-end wall |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 32 cold, immediate | 874 | 6,992 / 6,992 | 0 / 0 | 64.58 / 64.59 ms | 1.002 s |
+| 32 cold, batched | 32 | 136 / 136 | 0 / 1 | 1.53 / 1.53 ms | 0.940 s |
+| 1,000 cold, immediate | 27,010 | 216,080 / 216,080 | 0 / 0 | 2.027 / 2.027 s | 113.747 s |
+| 1,000 cold, batched | 1,000 | 4,008 / 4,008 | 0 / 1 | 32.33 / 32.19 ms | 112.110 s |
+| incremental, immediate | 34 | 272 / 272 | 0 / 1 | 2.48 / 2.48 ms | 0.353 s |
+| incremental, batched | 1 | 12 / 12 | 0 / 1 | 7.90 / 7.90 ms | 0.365 s |
+
+At 1,000 TUs, cold reconciliation prepares and step executions fell 98.15%,
+reconciliation wall time fell 98.40%, and end-to-end cold indexing improved
+1.44%. The incremental end-to-end median varied by 12.5 ms while remaining well
+below the two-second target. SQLite's changed-row counter includes a
+semantically idempotent type-row update; the normalized projections remain
+identical.
+
+All three baseline/current pairs matched for the 23 canonical semantic
+sections, diagnostics, normalized Layer-0 output, schema version 40, catalog
+version/hash, `PRAGMA integrity_check`, and foreign-key integrity. The report's
+`parity_failures` list is empty at cold, warm, and incremental states for both
+corpus sizes.

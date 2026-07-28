@@ -12,8 +12,12 @@ translation units, imports it into a temporary cache, and measures:
 - shared-header fan-in and the indexer's `indexed`/`already` header counters.
 - SQLite `integrity_check`, schema/catalog metadata, and a canonical semantic
   digest of normalized semantic/fact projections at each index state;
+- the normalized Layer-0 projection produced by `scripts/dump_layer0.sh`;
 - repeated trials with median timing, CPU utilization, and per-TU latency
   aggregation, including per-trial and intra-build parity checks.
+- optional immediate-versus-batched external-identity reconciliation metrics:
+  calls, prepared statements, VDBE steps, matched/changed rows, wall time, and
+  CPU time.
 
 Generated sources, caches, logs, and JSON reports belong outside the checkout.
 The runner uses a temporary `INDEXER_CACHE`; it never opens the checkout's
@@ -42,6 +46,27 @@ parity for cold, warm, and incremental index stages. Every trial is compared;
 the process exits nonzero and records `parity_failures` if any trial or
 intra-build repeat differs. It does not claim an improvement when no baseline
 executable is supplied.
+
+## Reproduce external-identity reconciliation A/B evidence
+
+Use one current binary for both modes so the comparison isolates the
+reconciliation strategy:
+
+```sh
+python3 benchmarks/indexing/run.py \
+  --current-cidx build/cidx \
+  --reconciliation-ab \
+  --representative-files 32 \
+  --scale-files 1000 \
+  --per-tu 5 \
+  --trials 3 \
+  --output /tmp/hse114-indexing.json
+```
+
+The baseline side uses immediate per-emission reconciliation, while the current
+side batches distinct symbol identities once per translation-unit transaction.
+The standard semantic, diagnostic, schema/catalog, integrity, and foreign-key
+parity gates still apply.
 
 ## Reproduce profiler evidence
 

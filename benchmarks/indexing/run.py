@@ -22,6 +22,7 @@ from typing import Any
 EXPECTED_SCHEMA_VERSION = 40
 EXPECTED_CATALOG_VERSION = 1
 EXPECTED_CATALOG_HASH = "21497a89add82fba96293f97b34f9a19c68912b6cc823a915889acf0709c216d"
+DUMP_LAYER0 = Path(__file__).resolve().parents[2] / "scripts/dump_layer0.sh"
 REQUIRED_CANONICAL_SECTIONS = frozenset(
     {
         "semantic_universe",
@@ -804,6 +805,17 @@ def database_snapshot(
         raise RuntimeError(
             f"unexpected catalog hash: {metadata.get('catalog_hash')}"
         )
+    layer0 = subprocess.run(
+        [str(DUMP_LAYER0), str(database)],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    normalized_layer0 = re.sub(
+        r"build:[0-9a-f]{40}",
+        "build:<build>",
+        layer0.replace(str(corpus_root), "<corpus>"),
+    )
     return {
         "integrity_check": integrity,
         "foreign_key_check": "ok" if not foreign_key_violations else "failed",
@@ -819,6 +831,9 @@ def database_snapshot(
         },
         "canonical_sha256": hashlib.sha256(
             canonical_json.encode("utf-8")
+        ).hexdigest(),
+        "normalized_layer0_sha256": hashlib.sha256(
+            normalized_layer0.encode("utf-8")
         ).hexdigest(),
         "page_count": page_count,
         "page_size": page_size,
@@ -844,6 +859,47 @@ def parse_header_counts(output: str) -> dict[str, int]:
     return counts
 
 
+def parse_reconciliation_metrics(output: str) -> dict[str, Any]:
+    totals = {
+        "transactions": 0,
+        "emissions": 0,
+        "distinct_identities": 0,
+        "calls": 0,
+        "prepared_statements": 0,
+        "vdbe_steps": 0,
+        "rows_matched": 0,
+        "rows_changed": 0,
+        "wall_seconds": 0.0,
+        "cpu_seconds": 0.0,
+    }
+    mode: str | None = None
+    pattern = re.compile(
+        r"external-identity-reconciliation mode=(\w+) emissions=(\d+) "
+        r"distinct=(\d+) calls=(\d+) prepared=(\d+) steps=(\d+) "
+        r"matched=(\d+) changed=(\d+) wall_ns=(\d+) cpu_ns=(\d+)"
+    )
+    for match in pattern.finditer(output):
+        if mode is None:
+            mode = match.group(1)
+        elif mode != match.group(1):
+            raise RuntimeError("mixed reconciliation modes in one stage")
+        totals["transactions"] += 1
+        for key, group in (
+            ("emissions", 2),
+            ("distinct_identities", 3),
+            ("calls", 4),
+            ("prepared_statements", 5),
+            ("vdbe_steps", 6),
+            ("rows_matched", 7),
+            ("rows_changed", 8),
+        ):
+            totals[key] += int(match.group(group))
+        totals["wall_seconds"] += int(match.group(9)) / 1_000_000_000
+        totals["cpu_seconds"] += int(match.group(10)) / 1_000_000_000
+    totals["mode"] = mode
+    return totals
+
+
 def stage(
     cidx: Path,
     cache: Path,
@@ -852,9 +908,13 @@ def stage(
     label: str,
     args: list[str],
     previous_db: dict[str, Any] | None,
+    reconciliation_mode: str | None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     env = dict(os.environ)
     env["INDEXER_CACHE"] = str(cache)
+    if reconciliation_mode is not None:
+        env["CIDX_EXTERNAL_IDENTITY_PROFILE"] = "1"
+        env["CIDX_EXTERNAL_IDENTITY_RECONCILIATION_MODE"] = reconciliation_mode
     metrics = run_timed([str(cidx), *args], env, run_root, label)
     metrics["label"] = label
     database = cache / "index.db"
@@ -879,10 +939,19 @@ def stage(
     metrics["header_counts"] = parse_header_counts(
         metrics["stdout"] + metrics["stderr"]
     )
+    metrics["external_identity_reconciliation"] = (
+        parse_reconciliation_metrics(metrics["stdout"] + metrics["stderr"])
+    )
     return metrics, snapshot
 
 
-def run_case(cidx: Path, count: int, per_tu: int, case_root: Path) -> dict[str, Any]:
+def run_case(
+    cidx: Path,
+    count: int,
+    per_tu: int,
+    case_root: Path,
+    reconciliation_mode: str | None,
+) -> dict[str, Any]:
     source_root = case_root / "corpus"
     compile_commands, sources, header = generate_corpus(source_root, count)
     cache = case_root / "cache"
@@ -896,7 +965,14 @@ def run_case(cidx: Path, count: int, per_tu: int, case_root: Path) -> dict[str, 
         ("index-warm", ["index"]),
     ):
         measured, previous_db = stage(
-            cidx, cache, case_root, source_root, label, args, previous_db
+            cidx,
+            cache,
+            case_root,
+            source_root,
+            label,
+            args,
+            previous_db,
+            reconciliation_mode,
         )
         stages.append(measured)
 
@@ -910,6 +986,7 @@ def run_case(cidx: Path, count: int, per_tu: int, case_root: Path) -> dict[str, 
         "index-incremental",
         ["index", str(changed)],
         previous_db,
+        reconciliation_mode,
     )
     stages.append(measured)
 
@@ -926,6 +1003,7 @@ def run_case(cidx: Path, count: int, per_tu: int, case_root: Path) -> dict[str, 
             f"tu-{index:04d}",
             ["index", str(source)],
             previous_db,
+            reconciliation_mode,
         )
         per_tu_results.append(
             {
@@ -966,6 +1044,7 @@ def comparison(
     def signature(snapshot: dict[str, Any]) -> tuple[Any, ...]:
         return (
             snapshot["canonical_sha256"],
+            snapshot["normalized_layer0_sha256"],
             tuple(snapshot["canonical_sections"]),
             snapshot["integrity_check"],
             snapshot["foreign_key_check"],
@@ -990,6 +1069,15 @@ def comparison(
         canonical_match = (
             same_trial_count and old_repeat and new_repeat
             and all(trial_matches)
+        )
+        layer0_match = (
+            same_trial_count
+            and all(
+                old_snapshot["normalized_layer0_sha256"]
+                == new_snapshots[index]["normalized_layer0_sha256"]
+                for index, old_snapshot in enumerate(old_snapshots)
+                if index < len(new_snapshots)
+            )
         )
         integrity_match = all(
             item["integrity_check"] == "ok"
@@ -1022,8 +1110,28 @@ def comparison(
             "current_repeat_consistent": new_repeat,
             "canonical_semantic_trial_matches": trial_matches,
             "canonical_semantic_match": canonical_match,
+            "normalized_layer0_match": layer0_match,
             "database_integrity_match": integrity_match,
             "schema_catalog_match": schema_catalog_match,
+            "external_identity_reconciliation": {
+                key: {
+                    "baseline": old["external_identity_reconciliation"][key],
+                    "current": new["external_identity_reconciliation"][key],
+                    "delta": (
+                        new["external_identity_reconciliation"][key]
+                        - old["external_identity_reconciliation"][key]
+                    ),
+                }
+                for key in (
+                    "calls",
+                    "prepared_statements",
+                    "vdbe_steps",
+                    "rows_matched",
+                    "rows_changed",
+                    "wall_seconds",
+                    "cpu_seconds",
+                )
+            },
         }
         if not same_trial_count:
             failures.append(f"{stage_name}: baseline/current trial counts differ")
@@ -1033,6 +1141,8 @@ def comparison(
             failures.append(f"{stage_name}: current trials are not repeat-consistent")
         if not all(trial_matches):
             failures.append(f"{stage_name}: one or more baseline/current trials differ")
+        if not layer0_match:
+            failures.append(f"{stage_name}: normalized Layer-0 output differs")
         if not integrity_match:
             failures.append(f"{stage_name}: database integrity mismatch")
         if not schema_catalog_match:
@@ -1109,6 +1219,29 @@ def aggregate_cases(cases: list[dict[str, Any]]) -> dict[str, Any]:
                     )
                     for key in stage_values[0]["header_counts"]
                 },
+                "external_identity_reconciliation": {
+                    "mode": first_stage["external_identity_reconciliation"]["mode"],
+                    **{
+                        key: median(
+                            [
+                                stage["external_identity_reconciliation"][key]
+                                for stage in stage_values
+                            ]
+                        )
+                        for key in (
+                            "transactions",
+                            "emissions",
+                            "distinct_identities",
+                            "calls",
+                            "prepared_statements",
+                            "vdbe_steps",
+                            "rows_matched",
+                            "rows_changed",
+                            "wall_seconds",
+                            "cpu_seconds",
+                        )
+                    },
+                },
             }
         )
 
@@ -1152,16 +1285,40 @@ def main() -> int:
     parser.add_argument("--scale-files", type=int, default=1000)
     parser.add_argument("--per-tu", type=int, default=5)
     parser.add_argument("--trials", type=int, default=1)
+    parser.add_argument(
+        "--reconciliation-ab",
+        action="store_true",
+        help=(
+            "compare immediate and batched external-identity reconciliation "
+            "using --current-cidx"
+        ),
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.trials < 1:
         raise SystemExit("--trials must be positive")
+    if args.reconciliation_ab and args.baseline_cidx:
+        raise SystemExit(
+            "--reconciliation-ab and --baseline-cidx are mutually exclusive"
+        )
 
+    reconciliation_modes: dict[str, str | None] = {"current": None}
     executables = {"current": args.current_cidx}
-    if args.baseline_cidx:
+    if args.reconciliation_ab:
+        executables = {
+            "baseline": args.current_cidx,
+            "current": args.current_cidx,
+        }
+        reconciliation_modes = {
+            "baseline": "immediate",
+            "current": "batched",
+        }
+    elif args.baseline_cidx:
         executables["baseline"] = args.baseline_cidx
+        reconciliation_modes["baseline"] = None
     report: dict[str, Any] = {
-        "method": "HSE-95",
+        "method": "HSE-114" if args.reconciliation_ab else "HSE-95",
+        "reconciliation_ab": args.reconciliation_ab,
         "environment": {
             "platform": platform.platform(),
             "python": platform.python_version(),
@@ -1185,7 +1342,11 @@ def main() -> int:
                     case_root = root / f"trial-{trial + 1}" / name / str(count)
                     case_root.mkdir(parents=True)
                     report["cases"][f"trial-{trial + 1}:{name}:{count}"] = run_case(
-                        executable, count, args.per_tu, case_root
+                        executable,
+                        count,
+                        args.per_tu,
+                        case_root,
+                        reconciliation_modes[name],
                     )
 
     for name in executables:
@@ -1199,7 +1360,7 @@ def main() -> int:
                 ]
             )
 
-    if args.baseline_cidx:
+    if args.baseline_cidx or args.reconciliation_ab:
         report["comparison"] = {}
         parity_failures: list[str] = []
         for count in dict.fromkeys(
