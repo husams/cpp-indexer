@@ -13,6 +13,7 @@
 
 #include "catalogs/generated_catalog.hpp"
 #include "compiledb/compiledb.hpp"
+#include "profile/index_profile.hpp"
 #include "storage/ports.hpp"
 #include "storage/sqlite_adapters.hpp"
 #include "storage/storage.hpp"
@@ -39,7 +40,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <ctime>
+#include <functional>
 #include <memory>
+#include <numeric>
 #include <stdexcept>
 #include <tuple>
 #include <unordered_set>
@@ -47,6 +52,20 @@
 namespace cidx::ast {
 
 namespace {
+
+using ProfileClock = std::chrono::steady_clock;
+
+auto elapsed_seconds(ProfileClock::time_point started) -> double {
+  return std::chrono::duration<double>(ProfileClock::now() - started).count();
+}
+
+auto file_bytes(const std::string &path) -> std::uint64_t {
+  struct stat status{};
+  if (::stat(path.c_str(), &status) != 0 || status.st_size < 0) {
+    return 0;
+  }
+  return static_cast<std::uint64_t>(status.st_size);
+}
 
 std::optional<double> file_mtime(const std::string &path) {
   struct stat st{};
@@ -289,12 +308,23 @@ public:
               db_.set_file_indexed(header.file_id, false);
               continue;
             }
-            execution.metrics.note_emitted(db_.association_fact_count(
+            const bool profiling = profile::active();
+            const auto metrics_started =
+                profiling ? ProfileClock::now() : ProfileClock::time_point{};
+            const auto fact_count = db_.association_fact_count(
                 header.file_id, header.symbol_ids, header.edge_ids,
-                header.definition_ids));
+                header.definition_ids);
+            if (profiling) {
+              profile::add_timing("metrics_only_sql",
+                                  elapsed_seconds(metrics_started));
+              profile::add_counter("association_fact_count", fact_count);
+            }
+            execution.metrics.note_emitted(fact_count);
             db_.associate_facts_for_file(
                 header.file_id, state_.normalized_config_id, header.symbol_ids,
                 header.edge_ids, header.definition_ids);
+            execution.metrics.note_fact_family("file_associations", fact_count,
+                                               fact_count);
             db_.mark_file_indexed(header.file_id, header.mtime, header.md5);
             ++state_.out->headers.indexed;
             state_.out->headers.symbols += header.stored;
@@ -389,6 +419,9 @@ public:
           for (const auto &[symbol_id, display] : updates) {
             edges_.update_display_name(symbol_id, display);
           }
+          execution.metrics.note_fact_family(
+              "display_names", before, updates.size(),
+              before - state_.presentation_intents.size());
         });
     auto main_association = descriptor(
         "main.associate", {}, {"symbols", "relations", "definitions"},
@@ -399,12 +432,23 @@ public:
     registry.register_pass(
         std::move(main_association),
         [this](PassExecutionContext &execution) -> void {
-          execution.metrics.note_emitted(
+          const bool profiling = profile::active();
+          const auto metrics_started =
+              profiling ? ProfileClock::now() : ProfileClock::time_point{};
+          const auto fact_count =
               db_.association_fact_count(state_.rec->id, main_symbol_ids_,
-                                         main_edge_ids_, main_definition_ids_));
+                                         main_edge_ids_, main_definition_ids_);
+          if (profiling) {
+            profile::add_timing("metrics_only_sql",
+                                elapsed_seconds(metrics_started));
+            profile::add_counter("association_fact_count", fact_count);
+          }
+          execution.metrics.note_emitted(fact_count);
           db_.associate_facts_for_file(
               state_.rec->id, state_.normalized_config_id, main_symbol_ids_,
               main_edge_ids_, main_definition_ids_);
+          execution.metrics.note_fact_family("file_associations", fact_count,
+                                             fact_count);
         });
     registry.register_pass(
         descriptor("includes.persist", {FrontendCapability::preprocessor},
@@ -416,11 +460,22 @@ public:
             resolve_include_guards(*state_.pp, state_.includes);
           }
           execution.metrics.note_visited(state_.includes.includes.size());
+          const bool profiling = profile::active();
+          const auto metrics_started =
+              profiling ? ProfileClock::now() : ProfileClock::time_point{};
           const IncludeFactCounts counts =
               include_fact_count(db_, state_.includes);
+          if (profiling) {
+            profile::add_timing("metrics_only_sql",
+                                elapsed_seconds(metrics_started));
+            profile::add_counter("include_fact_count", counts.emitted_facts);
+          }
           execution.metrics.note_duplicate(counts.duplicates);
           execution.metrics.note_emitted(counts.emitted_facts);
           persist_include_facts(db_, state_.includes, *state_.config);
+          execution.metrics.note_fact_family(
+              "include_facts", counts.emitted_facts + counts.duplicates,
+              counts.emitted_facts, counts.duplicates);
         });
     registry.register_pass(
         descriptor(
@@ -453,6 +508,9 @@ public:
           execution.metrics.note_duplicate(before -
                                            state_.out->evidence.size());
           execution.metrics.note_emitted(state_.out->evidence.size());
+          execution.metrics.note_fact_family(
+              "evidence_artifact", before, state_.out->evidence.size(),
+              before - state_.out->evidence.size());
         });
 
     IndexingPlan plan;
@@ -519,6 +577,7 @@ public:
            .unknown_constructs = pass.metrics.unknown_constructs,
            .duplicates = pass.metrics.duplicates,
            .diagnostics = pass.metrics.diagnostics,
+           .fact_families = pass.metrics.fact_families,
            .elapsed_microseconds = pass.metrics.elapsed.count(),
            .budget_exhausted = pass.metrics.budget_exhausted});
     }
@@ -550,6 +609,7 @@ private:
     symbols_.reset_counters();
     symbols_.set_metrics(&execution.metrics);
     SymbolVisitor visitor(context_, symbols_, file, &execution.metrics);
+    profile::add_counter("root_traverse_decl_calls");
     visitor.TraverseDecl(tu_);
     return symbols_.stored_count();
   }
@@ -591,6 +651,7 @@ private:
         static_cast<DefinitionScopeEmitter &>(edges_), execution.metrics);
     DeclarationEdgeVisitor decls(context_, ports, file, file_id, &definitions,
                                  &execution.metrics, &presentation_intents);
+    profile::add_counter("root_traverse_decl_calls");
     decls.TraverseDecl(tu_);
     if (edge_ids != nullptr) {
       append_fact_ids(*edge_ids, edges_.edge_ids());
@@ -613,6 +674,7 @@ private:
         context_, static_cast<DeclarationIdentityResolver &>(edges_),
         static_cast<DefinitionScopeEmitter &>(edges_), file, file_id,
         &execution.metrics);
+    profile::add_counter("root_traverse_decl_calls");
     visitor->TraverseDecl(tu_);
     if (edge_ids != nullptr) {
       append_fact_ids(*edge_ids, edges_.edge_ids());
@@ -657,6 +719,7 @@ private:
     BudgetedNamespacePassPorts ports(static_cast<NamespacePassPorts &>(edges_),
                                      execution.metrics);
     NamespaceUseVisitor ns(context_, ports, file, file_id, &execution.metrics);
+    profile::add_counter("root_traverse_decl_calls");
     ns.TraverseDecl(tu_);
     if (edge_ids != nullptr) {
       append_fact_ids(*edge_ids, edges_.edge_ids());
@@ -936,8 +999,30 @@ private:
 IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
                               const std::string &path, bool graph_enabled,
                               IndexFailurePoint failure) {
+  const bool profiling = profile::active();
+  const auto wall_started =
+      profiling ? ProfileClock::now() : ProfileClock::time_point{};
+  const std::clock_t cpu_started = profiling ? std::clock() : 0;
+  const std::uint64_t start_position =
+      profiling ? profile::next_translation_unit_position() : 0;
+  const double child_wall_before =
+      profiling ? profile::driver_subprocess_wall_seconds() : 0.0;
+  const auto source_started =
+      profiling ? ProfileClock::now() : ProfileClock::time_point{};
   IndexOneOutcome out;
   const SourceSnapshot source = SourceSnapshot::capture(path);
+  if (profiling) {
+    profile::add_timing("source_validation_hashing",
+                        elapsed_seconds(source_started));
+  }
+  std::pair<std::int64_t, std::int64_t> cardinality_before{};
+  if (profiling) {
+    const auto metrics_started = ProfileClock::now();
+    cardinality_before = db.indexing_cardinality();
+    profile::add_timing("metrics_only_sql", elapsed_seconds(metrics_started));
+  }
+  const auto workspace_started =
+      profiling ? ProfileClock::now() : ProfileClock::time_point{};
   out.source_md5 = source.md5;
   cidx::StorageWorkspaceAdapter workspace_data(db);
   WorkspaceContext context = WorkspaceContext::borrow(
@@ -949,6 +1034,10 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
   const std::vector<std::string> args =
       TranslationUnitConfigurationService::invocation_arguments(path,
                                                                 descriptor);
+  if (profiling) {
+    profile::add_timing("workspace_snapshot_configuration",
+                        elapsed_seconds(workspace_started));
+  }
   CompilationSetup setup(args, path);
   DiagCollector collector(out.diagnostics);
   setup.tool.setDiagnosticConsumer(&collector);
@@ -982,20 +1071,105 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
   state.out = &out;
   state.config = &config;
   state.unit = ports.unit_of_work().begin();
+  if (profiling) {
+    profile::note_transaction_begin();
+  }
   state.normalized_config_id = db.add_translation_unit_config(resolved);
 
   IndexFrontendActionFactory factory(state);
+  const auto clang_started =
+      profiling ? ProfileClock::now() : ProfileClock::time_point{};
   try {
     (void)setup.tool.run(&factory);
   } catch (const PassBudgetExceeded &error) {
     out.parse_failed = true;
     out.error = error.what();
   }
+  if (profiling) {
+    const double clang_tool_inclusive = elapsed_seconds(clang_started);
+    const double pass_seconds = std::transform_reduce(
+        out.pass_metrics.begin(), out.pass_metrics.end(), 0.0, std::plus<>(),
+        [](const IndexPassMetrics &pass) {
+          return static_cast<double>(pass.elapsed_microseconds) / 1'000'000.0;
+        });
+    profile::add_timing("clang_tool_inclusive", clang_tool_inclusive);
+    // LibTooling runs the registered visitors and persistence passes inside
+    // tool.run(). Subtract their disjoint registry timings so this attribution
+    // remains exclusive instead of double-counting those categories.
+    profile::add_timing("clang_front_end",
+                        std::max(0.0, clang_tool_inclusive - pass_seconds));
+  }
+  const auto record_profile = [&] {
+    if (!profiling) {
+      return;
+    }
+    for (const IndexPassMetrics &pass : out.pass_metrics) {
+      const double elapsed =
+          static_cast<double>(pass.elapsed_microseconds) / 1'000'000.0;
+      profile::add_timing("pass." + pass.id, elapsed);
+      if (pass.id.starts_with("symbols.")) {
+        profile::add_timing("root_symbols", elapsed);
+      } else if (pass.id.starts_with("declarations.")) {
+        profile::add_timing("root_declarations", elapsed);
+      } else if (pass.id.starts_with("definitions.")) {
+        profile::add_timing("root_definitions", elapsed);
+      } else if (pass.id.starts_with("namespaces.")) {
+        profile::add_timing("root_namespaces", elapsed);
+      }
+      if (pass.id.starts_with("statements.")) {
+        profile::add_timing("body_extraction", elapsed);
+      }
+      if (pass.id == "includes.persist") {
+        profile::add_timing("include_persistence", elapsed);
+      }
+      if (pass.id.ends_with(".associate")) {
+        profile::add_timing("applicability_association", elapsed);
+      }
+      if (pass.id.ends_with(".persist") || pass.id.ends_with(".associate")) {
+        profile::add_timing("fact_persistence", elapsed);
+      }
+      for (const auto &[family, counts] : pass.fact_families) {
+        profile::add_fact_family(family, counts.attempted, counts.persisted,
+                                 counts.duplicates);
+      }
+    }
+    std::uint64_t preprocessed_bytes = file_bytes(path);
+    for (const IncludeFact &include : state.includes.includes) {
+      if (include.resolved) {
+        preprocessed_bytes += file_bytes(include.dst_path);
+      }
+    }
+    profile::record_translation_unit(
+        {.path = path,
+         .start_position = start_position,
+         .database_cardinality_before = cardinality_before.first,
+         .fact_cardinality_before = cardinality_before.second,
+         .source_bytes = file_bytes(path),
+         .preprocessed_bytes = preprocessed_bytes,
+         .include_count = state.includes.includes.size(),
+         .new_headers = static_cast<std::uint64_t>(out.headers.indexed),
+         .already_indexed_headers =
+             static_cast<std::uint64_t>(out.headers.already),
+         .configuration_state = std::to_string(state.normalized_config_id),
+         .wall_seconds = elapsed_seconds(wall_started),
+         .in_process_cpu_seconds =
+             static_cast<double>(std::clock() - cpu_started) /
+             static_cast<double>(CLOCKS_PER_SEC),
+         .child_process_wall_seconds =
+             profile::driver_subprocess_wall_seconds() - child_wall_before,
+         .peak_rss_bytes = profile::process_peak_rss_bytes()});
+  };
   if (!state.tu_handled) {
     out.parse_failed = true;
     out.error = "cannot parse " + path;
+    if (profiling) {
+      profile::note_transaction_rollback();
+    }
+    record_profile();
     return out;
   }
+  const auto verification_started =
+      profiling ? ProfileClock::now() : ProfileClock::time_point{};
   apply_diagnostic_policy(path, state.strict, args, out);
   if (!source.matches(path)) {
     out.source_changed = true;
@@ -1003,9 +1177,21 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
   } else if (out.source_changed && out.error.empty()) {
     out.error = path + ": source changed during indexing; retry required";
   }
-  if (!out.parse_failed && !out.source_changed) {
-    state.unit->commit();
+  if (profiling) {
+    profile::add_timing("verification", elapsed_seconds(verification_started));
   }
+  if (!out.parse_failed && !out.source_changed) {
+    const auto commit_started =
+        profiling ? ProfileClock::now() : ProfileClock::time_point{};
+    state.unit->commit();
+    if (profiling) {
+      profile::note_transaction_commit();
+      profile::add_timing("commit", elapsed_seconds(commit_started));
+    }
+  } else if (profiling) {
+    profile::note_transaction_rollback();
+  }
+  record_profile();
   return out;
 }
 

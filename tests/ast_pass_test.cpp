@@ -44,6 +44,9 @@ valid_descriptor(std::string id, std::vector<std::string> dependencies = {}) {
 
 struct StatementRecordingResult {
   FactBatch batch;
+  PassMetrics::FactFamily relation_metrics;
+  PassMetrics::FactFamily symbol_metrics;
+  PassMetrics::FactFamily type_metrics;
   bool found = false;
   std::size_t emitted = 0;
 };
@@ -163,6 +166,9 @@ public:
                                  &metrics);
     visitor.walk(caller);
     result_.batch = recorder.canonical_batch();
+    result_.relation_metrics = metrics.fact_families.at("relations");
+    result_.symbol_metrics = metrics.fact_families.at("symbols");
+    result_.type_metrics = metrics.fact_families.at("types");
     result_.emitted = metrics.emitted_facts;
     result_.found = true;
   }
@@ -452,6 +458,12 @@ TEST_CASE("statement pass records calls from a parsed AST") {
   CHECK(result.batch.parameters.size() == 1);
   CHECK(result.batch.type_nodes.size() == 1);
   CHECK(result.batch.symbol_types.size() == 1);
+  CHECK(result.relation_metrics.attempted == 2);
+  CHECK(result.relation_metrics.persisted == 2);
+  CHECK(result.symbol_metrics.attempted == 1);
+  CHECK(result.symbol_metrics.persisted == 1);
+  CHECK(result.type_metrics.attempted == 3);
+  CHECK(result.type_metrics.persisted == 3);
 }
 
 TEST_CASE("focused ports are independently usable by a fact recorder") {

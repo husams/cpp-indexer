@@ -1,7 +1,9 @@
 #include "storage/sqlite.hpp"
+#include "profile/index_profile.hpp"
 
 #include <sqlite3.h>
 
+#include <chrono>
 #include <string>
 
 #include "util/errors.hpp"
@@ -71,8 +73,16 @@ auto sqlite_profile_name(SqliteProfile profile) -> std::string_view {
 // -- SqliteStmt --------------------------------------------------------------
 
 SqliteStmt::SqliteStmt(sqlite3 *db, std::string_view sql) : db_(db) {
+  const bool profiling = profile::active();
+  const auto started = profiling ? std::chrono::steady_clock::now()
+                                 : std::chrono::steady_clock::time_point{};
   const int rc = sqlite3_prepare_v2(
       db_, sql.data(), static_cast<int>(sql.size()), &stmt_, nullptr);
+  if (profiling) {
+    profile::note_sqlite_prepare(std::chrono::duration<double>(
+                                     std::chrono::steady_clock::now() - started)
+                                     .count());
+  }
   if (rc != SQLITE_OK) {
     throw_db_error(db_, "prepare failed for \"" + std::string(sql) + "\"");
   }
@@ -136,7 +146,21 @@ void SqliteStmt::bind(int idx, const SqlValue &value) {
 }
 
 bool SqliteStmt::step() {
+  const bool profiling = profile::active();
+  const auto started = profiling ? std::chrono::steady_clock::now()
+                                 : std::chrono::steady_clock::time_point{};
   const int rc = sqlite3_step(stmt_);
+  if (profiling) {
+    profile::note_sqlite_step(std::chrono::duration<double>(
+                                  std::chrono::steady_clock::now() - started)
+                                  .count(),
+                              static_cast<std::uint64_t>(sqlite3_stmt_status(
+                                  stmt_, SQLITE_STMTSTATUS_VM_STEP, 1)),
+                              static_cast<std::uint64_t>(sqlite3_stmt_status(
+                                  stmt_, SQLITE_STMTSTATUS_FULLSCAN_STEP, 1)),
+                              static_cast<std::uint64_t>(sqlite3_stmt_status(
+                                  stmt_, SQLITE_STMTSTATUS_REPREPARE, 1)));
+  }
   if (rc == SQLITE_ROW) {
     return true;
   }
@@ -227,6 +251,7 @@ SqliteDb::SqliteDb(const std::string &path, bool read_only,
     if (settings.full_synchronous) {
       exec("PRAGMA synchronous = FULL");
     }
+    profile::apply_sqlite_experiment(db_);
   } catch (...) {
     sqlite3_close(db_);
     db_ = nullptr;
