@@ -234,8 +234,9 @@ std::set<int64_t> StatementEdgeVisitor::overload_candidate_ids(
     if (auto req = ctx_.mint().build(cand)) {
       dst_ids.insert(ctx_.ports().mint_symbol(*req));
     } else {
-      ctx_.record_unsupported("CallExpr", call->getBeginLoc(),
-                              "overload candidate identity could not be minted");
+      ctx_.record_unsupported(
+          "CallExpr", call->getBeginLoc(),
+          "overload candidate identity could not be minted");
     }
   }
   if (dst_ids.empty() && !cands.empty()) {

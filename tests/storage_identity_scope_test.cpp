@@ -165,6 +165,27 @@ TEST_CASE("v35 local identity is stable across file insertion order") {
   check_condition(make_key(false) == make_key(true));
 }
 
+TEST_CASE("source identity cache follows component repository ownership") {
+  cidx::Storage db(":memory:");
+  const std::string component_root = "/tmp/cidx-source-identity-cache";
+  const std::string source_path = component_root + "/src/unit.cpp";
+  const auto component = db.add_component("component", component_root, "repo");
+
+  const auto ungrouped = db.portable_source_identity_for_path(source_path);
+  CHECK(ungrouped.starts_with("component:"));
+
+  const auto repository = db.add_repository(
+      "repo", "repo", std::string("https://example.test/repo.git"));
+  db.set_component_repository(component, repository);
+  const auto attached = db.portable_source_identity_for_path(source_path);
+  CHECK(attached.starts_with("remote:https://example.test/repo.git"));
+  CHECK(attached != ungrouped);
+
+  db.set_component_repository(component, std::nullopt);
+  const auto detached = db.portable_source_identity_for_path(source_path);
+  CHECK(detached == ungrouped);
+}
+
 TEST_CASE("v39 carries translation-unit identity through header sinks") {
   cidx::Storage db(":memory:");
   const auto universe = db.add_semantic_universe("program:banking");

@@ -747,12 +747,12 @@ bool field_available(View view, const std::string &name) {
     // python/indexer/queryplan.py's `_TYPED_FIELDS["edge"]`.
     return has(std::array{"edge_id", "src_id", "dst_id", "kind", "count",
                           "base_access", "is_virtual", "vtable_slot",
-                          "relation", "source", "target", "evidence",
-                          "status", "partial", "unknown"});
+                          "relation", "source", "target", "evidence", "status",
+                          "partial", "unknown"});
   case View::Site:
-    return has(std::array{"edge_id", "file_id", "file", "line", "col",
-                          "src_id", "dst_id", "relation", "source", "target",
-                          "evidence", "status", "partial", "unknown"});
+    return has(std::array{"edge_id", "file_id", "file", "line", "col", "src_id",
+                          "dst_id", "relation", "source", "target", "evidence",
+                          "status", "partial", "unknown"});
   case View::Evidence:
     return has(
         std::array{"owner_id",        "position",       "default_txt",

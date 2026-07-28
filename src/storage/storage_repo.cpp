@@ -476,6 +476,7 @@ void SqliteStorageService::relativize_component(int64_t component_id,
   upd.bind(1, std::string_view(rel));
   upd.bind(2, component_id);
   upd.step_done();
+  invalidate_source_identity_cache();
 }
 
 std::optional<Component>
@@ -645,6 +646,7 @@ void SqliteStorageService::set_component_repository(
   }
   st.bind(2, component_id);
   st.step_done();
+  invalidate_source_identity_cache();
 }
 
 std::vector<Component>
@@ -800,6 +802,7 @@ SqliteStorageService::add_clone(int64_t repository_id, const std::string &path,
   }
   const int64_t cid = st.col_int64(0);
   st.step_done();
+  invalidate_source_identity_cache();
   return cid;
 }
 

@@ -118,7 +118,8 @@ def _cpp_string_constants(path: Path) -> dict[str, str]:
 def _cpp_relation_catalog() -> tuple[tuple[str, str, int], ...]:
     source = (ROOT / "src/catalogs/generated_catalog.hpp").read_text(encoding="utf-8")
     rows = re.findall(
-        r'\{\.id = (\d+), \.name = "([^"]+)", \.layer = View::([A-Za-z]+),',
+        r'\{\.id = (\d+),\s*\.name = "([^"]+)",\s*'
+        r'\.layer = View::([A-Za-z]+),',
         source,
     )
     return tuple(
