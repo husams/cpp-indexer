@@ -4,7 +4,10 @@
 
 #include <algorithm>
 #include <array>
+#include <map>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <unistd.h>
 #include <vector>
 
@@ -46,7 +49,206 @@ cidx::Symbol external_symbol(const std::string &usr, int64_t file_id) {
   return sym;
 }
 
+using TableRows = std::vector<std::vector<std::optional<std::string>>>;
+
+TableRows table_rows(cidx::Storage &db, std::string_view table) {
+  TableRows rows;
+  std::string order = "id";
+  if (table == "edge_site") {
+    order = "edge_id, file_id, line, col";
+  } else if (table == "call_arg") {
+    order = "edge_id, file_id, line, col, position";
+  }
+  auto statement = db.raw_db().prepare("SELECT * FROM " + std::string(table) +
+                                       " ORDER BY " + order);
+  while (statement.step()) {
+    auto &row = rows.emplace_back();
+    for (int column = 0; column < statement.column_count(); ++column) {
+      row.push_back(statement.col_is_null(column)
+                        ? std::nullopt
+                        : std::optional(statement.col_text(column)));
+    }
+  }
+  return rows;
+}
+
+struct ReconciliationFixtureResult {
+  std::map<std::string, TableRows> tables;
+  cidx::ExternalIdentityReconciliationMetrics metrics;
+};
+
+ReconciliationFixtureResult
+run_reconciliation_fixture(cidx::ExternalIdentityReconciliationMode mode) {
+  cidx::Storage db(":memory:");
+  db.set_external_identity_reconciliation_mode_for_testing(mode);
+
+  const auto first_universe = db.add_semantic_universe("fixture:first");
+  const auto second_universe = db.add_semantic_universe("fixture:second");
+  const auto first_repository =
+      db.add_repository("fixture-first", "repo", std::nullopt, first_universe);
+  const auto second_repository = db.add_repository(
+      "fixture-second", "repo", std::nullopt, second_universe);
+  const auto first_component =
+      db.add_component("fixture-first", "/tmp/cidx-fixture-first");
+  const auto second_component =
+      db.add_component("fixture-second", "/tmp/cidx-fixture-second");
+  db.set_component_repository(first_component, first_repository);
+  db.set_component_repository(second_component, second_repository);
+  const auto first_file = file_for(db, first_component, "fixture.cpp");
+  const auto second_file = file_for(db, second_component, "fixture.cpp");
+
+  auto caller = external_symbol("c:@F@fixture_caller#", first_file);
+  caller.kind = "function";
+  const auto caller_id = db.add_symbol(caller);
+  auto target = external_symbol("c:@F@fixture_target#", first_file);
+  target.kind = "function";
+  const auto target_id = db.add_symbol(target);
+  cidx::Edge edge;
+  edge.src_id = caller_id;
+  edge.dst_id = target_id;
+  edge.kind = 1;
+  const auto edge_id = db.add_edge(edge);
+
+  constexpr std::string_view duplicate_usr = "c:@F@duplicate_fixture#";
+  constexpr std::string_view multi_universe_usr =
+      "c:@F@multi_universe_fixture#";
+  cidx::EdgeSite site;
+  site.edge_id = edge_id;
+  site.file_id = first_file;
+  site.line = 10;
+  site.col = 1;
+  site.recv_src_kind = std::nullopt;
+  site.recv_decl_usr = std::string(duplicate_usr);
+  db.add_edge_site(site);
+  cidx::CallArg argument;
+  argument.edge_id = edge_id;
+  argument.file_id = first_file;
+  argument.line = 10;
+  argument.col = 1;
+  argument.position = 0;
+  argument.src_kind = "local";
+  argument.decl_usr = std::string(duplicate_usr);
+  argument.callee_usr = std::string(multi_universe_usr);
+  db.add_call_arg(argument);
+  cidx::TypeNode type;
+  type.type_key = "record:duplicate_fixture";
+  type.spelling = "duplicate_fixture";
+  type.kind = cidx::kTypeKindRecord;
+  type.decl_usr = std::string(duplicate_usr);
+  db.intern_type_node(type);
+
+  const auto emit = [&db](const cidx::Symbol &symbol) {
+    const auto id = db.add_symbol(symbol);
+    db.add_decl_site(id, symbol);
+    return id;
+  };
+  {
+    auto transaction = db.transaction();
+    auto duplicate_first =
+        external_symbol(std::string(duplicate_usr), first_file);
+    duplicate_first.linkage = "no-linkage";
+    duplicate_first.identity_translation_unit = "fixture:tu:first";
+    duplicate_first.line = 20;
+    duplicate_first.col = 1;
+    emit(duplicate_first);
+
+    auto multi_first =
+        external_symbol(std::string(multi_universe_usr), first_file);
+    multi_first.line = 21;
+    multi_first.col = 1;
+    emit(multi_first);
+
+    auto duplicate_second =
+        external_symbol(std::string(duplicate_usr), first_file);
+    duplicate_second.linkage = "no-linkage";
+    duplicate_second.identity_translation_unit = "fixture:tu:second";
+    duplicate_second.line = 22;
+    duplicate_second.col = 1;
+    emit(duplicate_second);
+
+    auto multi_second =
+        external_symbol(std::string(multi_universe_usr), second_file);
+    multi_second.line = 23;
+    multi_second.col = 1;
+    emit(multi_second);
+    transaction.commit();
+  }
+
+  auto duplicate_count = db.raw_db().prepare(
+      "SELECT COUNT(*), COUNT(DISTINCT file_id) FROM symbol WHERE usr = ?");
+  duplicate_count.bind(1, duplicate_usr);
+  REQUIRE(duplicate_count.step());
+  CHECK(duplicate_count.col_int64(0) == 2);
+  CHECK(duplicate_count.col_int64(1) == 1);
+  auto universe_count = db.raw_db().prepare(
+      "SELECT COUNT(*), COUNT(DISTINCT semantic_universe_id) FROM symbol "
+      "WHERE usr = ?");
+  universe_count.bind(1, multi_universe_usr);
+  REQUIRE(universe_count.step());
+  CHECK(universe_count.col_int64(0) == 2);
+  CHECK(universe_count.col_int64(1) == 2);
+
+  ReconciliationFixtureResult result;
+  for (const std::string table :
+       {"external_identity", "type_node", "edge_site", "call_arg"}) {
+    result.tables.emplace(table, table_rows(db, table));
+  }
+  result.metrics = db.external_identity_reconciliation_metrics();
+  return result;
+}
+
 } // namespace
+
+TEST_CASE("batched identity reconciliation preserves schema-40 ordering") {
+  const auto immediate = run_reconciliation_fixture(
+      cidx::ExternalIdentityReconciliationMode::immediate);
+  const auto batched = run_reconciliation_fixture(
+      cidx::ExternalIdentityReconciliationMode::batched);
+
+  CHECK(batched.tables == immediate.tables);
+  CHECK(batched.metrics.emissions == immediate.metrics.emissions);
+  CHECK(batched.metrics.distinct_identities ==
+        immediate.metrics.distinct_identities);
+  CHECK(batched.metrics.calls == 1);
+  CHECK(batched.metrics.calls < immediate.metrics.calls);
+  CHECK(batched.metrics.prepared_statements <
+        immediate.metrics.prepared_statements);
+  CHECK(batched.metrics.vdbe_steps < immediate.metrics.vdbe_steps);
+}
+
+TEST_CASE("batched identity reconciliation failure rolls back the whole TU") {
+  cidx::Storage db(":memory:");
+  const auto component = db.add_component("rollback", "/tmp/cidx-rollback");
+  const auto file = file_for(db, component, "rollback.cpp");
+
+  bool failed = false;
+  try {
+    auto transaction = db.transaction();
+    auto symbol = external_symbol("c:@F@rollback_fixture#", file);
+    symbol.kind = "function";
+    symbol.line = 1;
+    symbol.col = 1;
+    db.add_symbol(symbol);
+    db.raw_db().exec("UPDATE file SET indexed = 1 WHERE id = " +
+                     std::to_string(file));
+    db.inject_external_identity_reconciliation_failure_for_testing(4);
+    transaction.commit();
+  } catch (const cidx::StorageError &) {
+    failed = true;
+  }
+  CHECK(failed);
+
+  CHECK(db.lookup_symbols_by_usr("c:@F@rollback_fixture#").empty());
+  auto indexed = db.raw_db().prepare("SELECT indexed FROM file WHERE id = ?");
+  indexed.bind(1, file);
+  REQUIRE(indexed.step());
+  CHECK(indexed.col_int64(0) == 0);
+  auto integrity = db.raw_db().prepare("PRAGMA integrity_check");
+  REQUIRE(integrity.step());
+  CHECK(integrity.col_text(0) == "ok");
+  auto foreign_keys = db.raw_db().prepare("PRAGMA foreign_key_check");
+  CHECK_FALSE(foreign_keys.step());
+}
 
 TEST_CASE("v39 isolates unrelated universes and merges declared sharing") {
   cidx::Storage db(":memory:");

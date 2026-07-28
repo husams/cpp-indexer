@@ -8,7 +8,11 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <exception>
 #include <filesystem>
 #include <map>
@@ -63,6 +67,7 @@ Transaction::Transaction(SqliteStorageService &db)
     throw StorageError(
         "nested SqliteStorageService::transaction() is not supported");
   }
+  db_.begin_external_identity_reconciliation_transaction();
   db_.db_.exec("BEGIN");
   db_.in_txn_ = true;
 }
@@ -79,6 +84,7 @@ Transaction::~Transaction() {
   } catch (...) {
     // Destructor must not throw; the connection rolls back on close anyway.
   }
+  db_.cancel_external_identity_reconciliation_transaction();
   db_.in_txn_ = false;
 }
 
@@ -86,6 +92,8 @@ void Transaction::commit() {
   if (done_) {
     return;
   }
+  db_.reconcile_pending_symbol_identities();
+  db_.finish_external_identity_reconciliation_transaction();
   db_.db_.exec("COMMIT");
   db_.in_txn_ = false;
   done_ = true;
@@ -96,6 +104,7 @@ void Transaction::rollback() {
     return;
   }
   db_.db_.exec("ROLLBACK");
+  db_.cancel_external_identity_reconciliation_transaction();
   db_.in_txn_ = false;
   done_ = true;
 }
@@ -388,18 +397,35 @@ void SqliteStorageService::reconcile_external_identities() {
 
 void SqliteStorageService::reconcile_symbol_identity(int64_t symbol_id,
                                                      std::string_view usr) {
+  const auto wall_started = std::chrono::steady_clock::now();
+  const std::clock_t cpu_started = std::clock();
+  ++current_external_identity_reconciliation_metrics_.calls;
+  current_external_identity_reconciliation_metrics_.prepared_statements += 8;
+  current_external_identity_reconciliation_metrics_.vdbe_steps += 8;
+
+  const auto record_changes = [this](bool identity_match) {
+    const auto changed = static_cast<std::uint64_t>(db_.changes());
+    if (identity_match) {
+      current_external_identity_reconciliation_metrics_.rows_matched += changed;
+    }
+    current_external_identity_reconciliation_metrics_.rows_changed += changed;
+    note_external_identity_reconciliation_statement();
+  };
+
   auto identity = db_.prepare(
       "UPDATE external_identity SET symbol_id = ?, resolution_status = 1 "
       "WHERE identity_kind = 2 AND identity_text = ?");
   identity.bind(1, symbol_id);
   identity.bind(2, usr);
   identity.step_done();
+  record_changes(true);
 
   auto type_decl =
       db_.prepare("UPDATE type_node SET decl_id = ? WHERE decl_usr = ?");
   type_decl.bind(1, symbol_id);
   type_decl.bind(2, usr);
   type_decl.step_done();
+  record_changes(false);
 
   auto edge_decl = db_.prepare(
       "UPDATE edge_site SET recv_decl_id = ? WHERE recv_decl_id IS NULL "
@@ -408,6 +434,7 @@ void SqliteStorageService::reconcile_symbol_identity(int64_t symbol_id,
   edge_decl.bind(1, symbol_id);
   edge_decl.bind(2, usr);
   edge_decl.step_done();
+  record_changes(false);
 
   auto call_decl =
       db_.prepare("UPDATE call_arg SET decl_id = ? WHERE decl_id IS NULL AND "
@@ -416,6 +443,7 @@ void SqliteStorageService::reconcile_symbol_identity(int64_t symbol_id,
   call_decl.bind(1, symbol_id);
   call_decl.bind(2, usr);
   call_decl.step_done();
+  record_changes(false);
 
   auto call_callee = db_.prepare(
       "UPDATE call_arg SET callee_id = ? WHERE callee_id IS NULL AND "
@@ -424,6 +452,7 @@ void SqliteStorageService::reconcile_symbol_identity(int64_t symbol_id,
   call_callee.bind(1, symbol_id);
   call_callee.bind(2, usr);
   call_callee.step_done();
+  record_changes(false);
 
   auto edge_clear = db_.prepare(
       "UPDATE edge_site SET recv_decl_identity_id = NULL WHERE "
@@ -431,12 +460,14 @@ void SqliteStorageService::reconcile_symbol_identity(int64_t symbol_id,
       "external_identity WHERE identity_kind = 2 AND identity_text = ?)");
   edge_clear.bind(1, usr);
   edge_clear.step_done();
+  record_changes(false);
   auto call_decl_clear = db_.prepare(
       "UPDATE call_arg SET decl_identity_id = NULL WHERE decl_id IS NOT NULL "
       "AND decl_identity_id IN (SELECT id FROM external_identity WHERE "
       "identity_kind = 2 AND identity_text = ?)");
   call_decl_clear.bind(1, usr);
   call_decl_clear.step_done();
+  record_changes(false);
   auto call_callee_clear = db_.prepare(
       "UPDATE call_arg SET callee_identity_id = NULL WHERE callee_id IS NOT "
       "NULL "
@@ -444,6 +475,318 @@ void SqliteStorageService::reconcile_symbol_identity(int64_t symbol_id,
       "identity_kind = 2 AND identity_text = ?)");
   call_callee_clear.bind(1, usr);
   call_callee_clear.step_done();
+  record_changes(false);
+
+  const auto wall_elapsed = std::chrono::steady_clock::now() - wall_started;
+  current_external_identity_reconciliation_metrics_.wall_nanoseconds +=
+      static_cast<std::uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(wall_elapsed)
+              .count());
+  const std::clock_t cpu_elapsed = std::clock() - cpu_started;
+  if (cpu_elapsed > 0) {
+    current_external_identity_reconciliation_metrics_.cpu_nanoseconds +=
+        static_cast<std::uint64_t>(static_cast<double>(cpu_elapsed) *
+                                   1'000'000'000.0 /
+                                   static_cast<double>(CLOCKS_PER_SEC));
+  }
+}
+
+ExternalIdentityReconciliationMode
+SqliteStorageService::external_identity_reconciliation_mode_from_environment() {
+  const char *mode = std::getenv("CIDX_EXTERNAL_IDENTITY_RECONCILIATION_MODE");
+  return mode != nullptr && std::string_view(mode) == "immediate"
+             ? ExternalIdentityReconciliationMode::immediate
+             : ExternalIdentityReconciliationMode::batched;
+}
+
+bool SqliteStorageService::
+    external_identity_reconciliation_profile_from_environment() {
+  return std::getenv("CIDX_EXTERNAL_IDENTITY_PROFILE") != nullptr;
+}
+
+void SqliteStorageService::
+    begin_external_identity_reconciliation_transaction() {
+  pending_symbol_identities_.clear();
+  pending_symbol_identity_indexes_.clear();
+  pending_symbol_identity_sequence_ = 0;
+  external_identity_reconciliation_statement_ = 0;
+  current_external_identity_reconciliation_metrics_ = {};
+}
+
+void SqliteStorageService::record_symbol_identity(int64_t symbol_id,
+                                                  std::string_view usr) {
+  ++current_external_identity_reconciliation_metrics_.emissions;
+  if (!in_txn_) {
+    ++current_external_identity_reconciliation_metrics_.distinct_identities;
+    reconcile_symbol_identity(symbol_id, usr);
+    return;
+  }
+
+  const std::uint64_t sequence = ++pending_symbol_identity_sequence_;
+  const auto [position, inserted] =
+      pending_symbol_identity_indexes_.try_emplace(
+          symbol_id, pending_symbol_identities_.size());
+  if (inserted) {
+    pending_symbol_identities_.push_back(PendingSymbolIdentity{
+        .symbol_id = symbol_id,
+        .usr = std::string(usr),
+        .first_seen = sequence,
+        .last_seen = sequence,
+    });
+  } else {
+    auto &pending = pending_symbol_identities_[position->second];
+    pending.usr = usr;
+    pending.last_seen = sequence;
+  }
+
+  if (external_identity_reconciliation_mode_ ==
+      ExternalIdentityReconciliationMode::immediate) {
+    reconcile_symbol_identity(symbol_id, usr);
+  }
+}
+
+void SqliteStorageService::note_external_identity_reconciliation_statement() {
+  ++external_identity_reconciliation_statement_;
+  if (external_identity_reconciliation_failure_after_statement_ != 0 &&
+      external_identity_reconciliation_statement_ ==
+          external_identity_reconciliation_failure_after_statement_) {
+    throw StorageError("injected external-identity reconciliation failure");
+  }
+}
+
+void SqliteStorageService::reconcile_pending_symbol_identities() {
+  current_external_identity_reconciliation_metrics_.distinct_identities =
+      pending_symbol_identities_.size();
+  if (pending_symbol_identities_.empty() ||
+      external_identity_reconciliation_mode_ ==
+          ExternalIdentityReconciliationMode::immediate) {
+    return;
+  }
+
+  const auto wall_started = std::chrono::steady_clock::now();
+  const std::clock_t cpu_started = std::clock();
+  ++current_external_identity_reconciliation_metrics_.calls;
+
+  const auto execute = [this](std::string_view sql) {
+    db_.exec(sql);
+    ++current_external_identity_reconciliation_metrics_.prepared_statements;
+    ++current_external_identity_reconciliation_metrics_.vdbe_steps;
+    note_external_identity_reconciliation_statement();
+  };
+  const auto update = [this](const std::string &sql, bool identity_match) {
+    auto statement = db_.prepare(sql);
+    ++current_external_identity_reconciliation_metrics_.prepared_statements;
+    statement.step_done();
+    ++current_external_identity_reconciliation_metrics_.vdbe_steps;
+    const auto changed = static_cast<std::uint64_t>(db_.changes());
+    if (identity_match) {
+      current_external_identity_reconciliation_metrics_.rows_matched += changed;
+    }
+    current_external_identity_reconciliation_metrics_.rows_changed += changed;
+    note_external_identity_reconciliation_statement();
+  };
+
+  execute("CREATE TEMP TABLE IF NOT EXISTS cidx_pending_symbol_identity ("
+          "first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, "
+          "symbol_id INTEGER PRIMARY KEY, usr TEXT NOT NULL) WITHOUT ROWID");
+
+  constexpr std::size_t rows_per_insert = 200;
+  for (std::size_t offset = 0; offset < pending_symbol_identities_.size();
+       offset += rows_per_insert) {
+    const std::size_t count =
+        std::min(rows_per_insert, pending_symbol_identities_.size() - offset);
+    std::string sql = "INSERT INTO temp.cidx_pending_symbol_identity "
+                      "(first_seen, last_seen, symbol_id, usr) VALUES ";
+    for (std::size_t index = 0; index < count; ++index) {
+      if (index != 0) {
+        sql += ',';
+      }
+      sql += "(?,?,?,?)";
+    }
+    auto insert = db_.prepare(sql);
+    ++current_external_identity_reconciliation_metrics_.prepared_statements;
+    for (std::size_t index = 0; index < count; ++index) {
+      const auto &pending = pending_symbol_identities_[offset + index];
+      const int bind_offset = static_cast<int>(index * 4);
+      insert.bind(bind_offset + 1, static_cast<int64_t>(pending.first_seen));
+      insert.bind(bind_offset + 2, static_cast<int64_t>(pending.last_seen));
+      insert.bind(bind_offset + 3, pending.symbol_id);
+      insert.bind(bind_offset + 4, std::string_view(pending.usr));
+    }
+    insert.step_done();
+    ++current_external_identity_reconciliation_metrics_.vdbe_steps;
+    note_external_identity_reconciliation_statement();
+  }
+
+  auto relevant =
+      db_.prepare("SELECT EXISTS("
+                  "SELECT 1 FROM temp.cidx_pending_symbol_identity pending "
+                  "JOIN external_identity identity "
+                  "ON identity.identity_kind = 2 "
+                  "AND identity.identity_text = pending.usr "
+                  "UNION ALL "
+                  "SELECT 1 FROM temp.cidx_pending_symbol_identity pending "
+                  "JOIN type_node type ON type.decl_usr = pending.usr)");
+  ++current_external_identity_reconciliation_metrics_.prepared_statements;
+  const bool has_relevant_identities =
+      relevant.step() && relevant.col_int64(0) != 0;
+  ++current_external_identity_reconciliation_metrics_.vdbe_steps;
+  note_external_identity_reconciliation_statement();
+
+  const std::string emitted =
+      "WITH emitted AS ("
+      "SELECT p.first_seen, p.last_seen, p.symbol_id, p.usr, "
+      "s.semantic_universe_id, s.identity_key "
+      "FROM temp.cidx_pending_symbol_identity p "
+      "JOIN symbol s ON s.id = p.symbol_id), ";
+  const std::string latest =
+      emitted +
+      "chosen AS (SELECT usr, symbol_id FROM ("
+      "SELECT usr, symbol_id, ROW_NUMBER() OVER ("
+      "PARTITION BY usr ORDER BY last_seen DESC, semantic_universe_id DESC, "
+      "identity_key DESC, symbol_id DESC) AS position FROM emitted) "
+      "WHERE position = 1) ";
+  const std::string earliest =
+      emitted + "chosen AS (SELECT usr, symbol_id FROM ("
+                "SELECT usr, symbol_id, ROW_NUMBER() OVER ("
+                "PARTITION BY usr ORDER BY first_seen, semantic_universe_id, "
+                "identity_key, symbol_id) AS position FROM emitted) "
+                "WHERE position = 1) ";
+
+  if (has_relevant_identities) {
+    update(latest + "UPDATE external_identity SET symbol_id = ("
+                    "SELECT chosen.symbol_id FROM chosen "
+                    "WHERE chosen.usr = external_identity.identity_text), "
+                    "resolution_status = 1 WHERE identity_kind = 2 AND EXISTS ("
+                    "SELECT 1 FROM chosen "
+                    "WHERE chosen.usr = external_identity.identity_text)",
+           true);
+    update(latest +
+               "UPDATE type_node SET decl_id = ("
+               "SELECT chosen.symbol_id FROM chosen "
+               "WHERE chosen.usr = type_node.decl_usr) WHERE EXISTS ("
+               "SELECT 1 FROM chosen WHERE chosen.usr = type_node.decl_usr)",
+           false);
+    update(earliest + "UPDATE edge_site SET recv_decl_id = ("
+                      "SELECT chosen.symbol_id FROM external_identity identity "
+                      "JOIN chosen ON chosen.usr = identity.identity_text "
+                      "WHERE identity.id = edge_site.recv_decl_identity_id "
+                      "AND identity.identity_kind = 2) "
+                      "WHERE recv_decl_id IS NULL AND EXISTS ("
+                      "SELECT 1 FROM external_identity identity "
+                      "JOIN chosen ON chosen.usr = identity.identity_text "
+                      "WHERE identity.id = edge_site.recv_decl_identity_id "
+                      "AND identity.identity_kind = 2)",
+           false);
+    update(earliest + "UPDATE call_arg SET decl_id = ("
+                      "SELECT chosen.symbol_id FROM external_identity identity "
+                      "JOIN chosen ON chosen.usr = identity.identity_text "
+                      "WHERE identity.id = call_arg.decl_identity_id "
+                      "AND identity.identity_kind = 2) "
+                      "WHERE decl_id IS NULL AND EXISTS ("
+                      "SELECT 1 FROM external_identity identity "
+                      "JOIN chosen ON chosen.usr = identity.identity_text "
+                      "WHERE identity.id = call_arg.decl_identity_id "
+                      "AND identity.identity_kind = 2)",
+           false);
+    update(earliest + "UPDATE call_arg SET callee_id = ("
+                      "SELECT chosen.symbol_id FROM external_identity identity "
+                      "JOIN chosen ON chosen.usr = identity.identity_text "
+                      "WHERE identity.id = call_arg.callee_identity_id "
+                      "AND identity.identity_kind = 2) "
+                      "WHERE callee_id IS NULL AND EXISTS ("
+                      "SELECT 1 FROM external_identity identity "
+                      "JOIN chosen ON chosen.usr = identity.identity_text "
+                      "WHERE identity.id = call_arg.callee_identity_id "
+                      "AND identity.identity_kind = 2)",
+           false);
+    update(emitted + "chosen AS (SELECT DISTINCT usr FROM emitted) "
+                     "UPDATE edge_site SET recv_decl_identity_id = NULL "
+                     "WHERE recv_decl_id IS NOT NULL AND EXISTS ("
+                     "SELECT 1 FROM external_identity identity "
+                     "JOIN chosen ON chosen.usr = identity.identity_text "
+                     "WHERE identity.id = edge_site.recv_decl_identity_id "
+                     "AND identity.identity_kind = 2)",
+           false);
+    update(emitted + "chosen AS (SELECT DISTINCT usr FROM emitted) "
+                     "UPDATE call_arg SET decl_identity_id = NULL "
+                     "WHERE decl_id IS NOT NULL AND EXISTS ("
+                     "SELECT 1 FROM external_identity identity "
+                     "JOIN chosen ON chosen.usr = identity.identity_text "
+                     "WHERE identity.id = call_arg.decl_identity_id "
+                     "AND identity.identity_kind = 2)",
+           false);
+    update(emitted + "chosen AS (SELECT DISTINCT usr FROM emitted) "
+                     "UPDATE call_arg SET callee_identity_id = NULL "
+                     "WHERE callee_id IS NOT NULL AND EXISTS ("
+                     "SELECT 1 FROM external_identity identity "
+                     "JOIN chosen ON chosen.usr = identity.identity_text "
+                     "WHERE identity.id = call_arg.callee_identity_id "
+                     "AND identity.identity_kind = 2)",
+           false);
+  }
+  execute("DELETE FROM temp.cidx_pending_symbol_identity");
+
+  const auto wall_elapsed = std::chrono::steady_clock::now() - wall_started;
+  current_external_identity_reconciliation_metrics_.wall_nanoseconds +=
+      static_cast<std::uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(wall_elapsed)
+              .count());
+  const std::clock_t cpu_elapsed = std::clock() - cpu_started;
+  if (cpu_elapsed > 0) {
+    current_external_identity_reconciliation_metrics_.cpu_nanoseconds +=
+        static_cast<std::uint64_t>(static_cast<double>(cpu_elapsed) *
+                                   1'000'000'000.0 /
+                                   static_cast<double>(CLOCKS_PER_SEC));
+  }
+}
+
+void SqliteStorageService::
+    finish_external_identity_reconciliation_transaction() {
+  last_external_identity_reconciliation_metrics_ =
+      current_external_identity_reconciliation_metrics_;
+  if (external_identity_reconciliation_profile_) {
+    const auto &metrics = last_external_identity_reconciliation_metrics_;
+    std::string message = "external-identity-reconciliation mode=";
+    message += external_identity_reconciliation_mode_ ==
+                       ExternalIdentityReconciliationMode::immediate
+                   ? "immediate"
+                   : "batched";
+    for (const auto &[name, value] :
+         std::array<std::pair<std::string_view, std::uint64_t>, 9>{
+             {{" emissions=", metrics.emissions},
+              {" distinct=", metrics.distinct_identities},
+              {" calls=", metrics.calls},
+              {" prepared=", metrics.prepared_statements},
+              {" steps=", metrics.vdbe_steps},
+              {" matched=", metrics.rows_matched},
+              {" changed=", metrics.rows_changed},
+              {" wall_ns=", metrics.wall_nanoseconds},
+              {" cpu_ns=", metrics.cpu_nanoseconds}}}) {
+      message += name;
+      message += std::to_string(value);
+    }
+    message += '\n';
+    const std::size_t written =
+        std::fwrite(message.data(), sizeof(char), message.size(), stderr);
+    if (written != message.size()) {
+      throw StorageError(
+          "failed to write external-identity reconciliation metrics");
+    }
+  }
+  pending_symbol_identities_.clear();
+  pending_symbol_identity_indexes_.clear();
+  pending_symbol_identity_sequence_ = 0;
+  external_identity_reconciliation_failure_after_statement_ = 0;
+}
+
+void SqliteStorageService::
+    cancel_external_identity_reconciliation_transaction() {
+  pending_symbol_identities_.clear();
+  pending_symbol_identity_indexes_.clear();
+  pending_symbol_identity_sequence_ = 0;
+  current_external_identity_reconciliation_metrics_ = {};
+  external_identity_reconciliation_failure_after_statement_ = 0;
 }
 
 void SqliteStorageService::reconcile_type_identity(int64_t type_id,
