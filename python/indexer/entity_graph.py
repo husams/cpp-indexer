@@ -46,6 +46,7 @@ from .queryplan import (
     Pred,
     Query as PlanQuery,
     Executor,
+    all_of,
     codebase,
     entity,
     eq,
@@ -1177,10 +1178,7 @@ class EntityGraph:
             seed_nodes = self._resolve_seeds(start)
             query = self._plan_for_nodes(seed_nodes)
             if query is None:
-                # Preserve the legacy empty-seed result with a valid plan.
-                query = plan_start(codebase()) | plan_nodes(
-                    eq("name", "__entity_query_empty__")
-                ) | plan_view("entity")
+                query = self._empty_plan()
             return EntityQuery(self, plan=query)
         query = plan_start(codebase()) | plan_nodes() | plan_view("entity")
         return EntityQuery(self, plan=query)
@@ -1286,6 +1284,19 @@ class EntityGraph:
         for operand in plans[1:]:
             query = query | plan_union(operand)
         return query
+
+    @staticmethod
+    def _empty_plan() -> PlanQuery:
+        """A valid, collision-proof empty entity stream.
+
+        Symbol ids cannot satisfy both equalities at once, unlike a sentinel
+        spelling that may be present in a user index.
+        """
+        return (
+            plan_start(codebase())
+            | plan_nodes(all_of([eq("id", -1), eq("id", -2)]))
+            | plan_view("entity")
+        )
 
     def _run_plan_ids(self, query: PlanQuery) -> list[int]:
         """Execute an adapter plan through the shared read-only executor."""
@@ -1518,9 +1529,13 @@ class EntityQuery:
             raise ValueError(
                 f"direction must be one of {_DIRECTIONS}, got {direction!r}"
             )
-        if self._plan is not None:
+        plan_depth_supported = (
+            not transitive
+            or (max_depth is not None and 1 <= max_depth <= 32)
+        )
+        if self._plan is not None and not self._post_filters and plan_depth_supported:
             max_hops = max_depth if max_depth is not None else 32
-            max_hops = max(1, min(max_hops, 32)) if transitive else 1
+            max_hops = max_hops if transitive else 1
             if direction == "out":
                 query = self._plan | plan_out(
                     kind.name.lower(), 1, max_hops
@@ -1552,9 +1567,14 @@ class EntityQuery:
                 self._g,
                 plan=query,
                 edges_src=edges_src,
-                post_filters=self._post_filters,
             )
-        prev = self._nodes_src
+        # QueryPlan intentionally bounds traversal depth at 32. Retain the
+        # legacy iterator for unbounded, zero-depth, and >32-depth requests;
+        # it preserves the historical cardinality and BFS ordering until the
+        # executor gains an equivalent unbounded compatibility stage. Any
+        # callback/name filters also stay here so they are applied before the
+        # next relation, exactly as the original fluent API required.
+        prev = self._planned_nodes if self._plan is not None else self._nodes_src
 
         if transitive:
             def nodes_src() -> Iterator[EntityNode]:
