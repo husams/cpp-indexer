@@ -9,7 +9,6 @@ const run = promisify(execFile);
 const root = resolve(new URL('..', import.meta.url).pathname, '..');
 const manifest = JSON.parse(await readFile(resolve(root, 'web/qualification-manifest.json'), 'utf8'));
 const cidx = process.env.CIDX_BIN || resolve(root, 'build/cidx');
-const record = process.argv.includes('--record');
 const hashFile = async (path) => createHash('sha256').update(await readFile(path)).digest('hex');
 const hashText = (text) => createHash('sha256').update(text).digest('hex');
 const execute = async (args, options = {}) => run(cidx, args, {cwd: root, ...options});
@@ -60,7 +59,7 @@ const extractGraphView = (html, scenario) => {
   const view = JSON.parse(match[1]);
   const names = view.nodes.map((node) => node.name).sort();
   if (view.schema !== manifest.schema.graph_view ||
-      JSON.stringify(names) !== JSON.stringify([...scenario.expected.node_names].sort())) {
+      (scenario.expected.node_names && JSON.stringify(names) !== JSON.stringify([...scenario.expected.node_names].sort()))) {
     throw new Error(`${scenario.id}: production GraphView drift (${JSON.stringify(names)})`);
   }
 };
@@ -83,7 +82,7 @@ try {
     const db = workspaceDbs.get(scenario.workspace);
     if (!db) throw new Error(`${scenario.id}: workspace is not prepared`);
     const output = join(temporary, `${scenario.id}.html`);
-    await execute(['ui', 'export', '--db', db, ...scenario.args, '--workspace', scenario.id, '--output', output]);
+    await execute(['ui', 'export', '--db', db, ...scenario.args, '--output', output]);
     const html = await readFile(output, 'utf8');
     extractGraphView(html, scenario);
     const match = html.match(/window\.CIDX_GRAPH_VIEW = ([\s\S]*?);\s*<\/script>/);
@@ -91,14 +90,15 @@ try {
     const semantic = JSON.stringify({schema: view.schema, status: view.status,
       workspace: view.identity?.workspace,
       markers: view.markers, request: view.request,
-      args: [...scenario.args, '--workspace', scenario.id],
       nodes: view.nodes.map((node) => node.name).sort(),
       edges: view.edges.map((edge) => [edge.source, edge.target, edge.kind]).sort()});
     if (seenSemanticOutputs.has(semantic)) {
       throw new Error(`${scenario.id}: semantic duplicate of an earlier production scenario`);
     }
     seenSemanticOutputs.add(semantic);
-    if (record) console.log(`${scenario.id} ${hashText(html)}`);
+    if (hashText(html) !== scenario.expected.export_sha256) {
+      throw new Error(`${scenario.id}: exported explorer output drift`);
+    }
   }
 } finally {
   await rm(temporary, {recursive: true, force: true});
