@@ -1,0 +1,7 @@
+[
+  {
+    "directory": "examples/packages/banking/qualification-peer",
+    "command": "clang++ -std=c++23 -c banking_peer.cpp",
+    "file": "banking_peer.cpp"
+  }
+]

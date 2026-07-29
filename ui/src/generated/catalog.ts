@@ -9,10 +9,13 @@ export const CORE_CATALOG = {
     "parameter",
     "template_parameter",
     "template_argument",
+    "signature_slot",
     "call_argument",
     "edge",
+    "site",
     "evidence",
-    "type"
+    "type",
+    "type_layer"
   ],
   "symbol_kinds": [
     {
@@ -728,6 +731,24 @@ export const CORE_CATALOG = {
       "virtual": true
     },
     {
+      "id": 26,
+      "name": "has_signature_slot",
+      "layer": "symbol",
+      "source": "symbol.callable",
+      "target": "signature_slot",
+      "inverse": "of_callable",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "declaration",
+      "evidence_capabilities": [
+        "declaration"
+      ],
+      "completeness": "complete",
+      "virtual": true
+    },
+    {
       "id": 1,
       "name": "of_type",
       "layer": "parameter",
@@ -926,6 +947,24 @@ export const CORE_CATALOG = {
       "virtual": true
     },
     {
+      "id": 3,
+      "name": "has_site",
+      "layer": "edge",
+      "source": "edge",
+      "target": "site",
+      "inverse": "of_edge",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "call_site",
+      "evidence_capabilities": [
+        "call_site"
+      ],
+      "completeness": "partial",
+      "virtual": true
+    },
+    {
       "id": 1,
       "name": "of_type",
       "layer": "call_argument",
@@ -999,6 +1038,24 @@ export const CORE_CATALOG = {
     },
     {
       "id": 1,
+      "name": "of_edge",
+      "layer": "site",
+      "source": "site",
+      "target": "edge",
+      "inverse": "has_site",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "call_site",
+      "evidence_capabilities": [
+        "call_site"
+      ],
+      "completeness": "partial",
+      "virtual": true
+    },
+    {
+      "id": 1,
       "name": "references_symbol",
       "layer": "type",
       "source": "type",
@@ -1031,6 +1088,96 @@ export const CORE_CATALOG = {
         "derived"
       ],
       "completeness": "partial",
+      "virtual": true
+    },
+    {
+      "id": 3,
+      "name": "has_layer",
+      "layer": "type",
+      "source": "type",
+      "target": "type_layer",
+      "inverse": "of_type",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "derived",
+      "evidence_capabilities": [
+        "derived"
+      ],
+      "completeness": "complete",
+      "virtual": true
+    },
+    {
+      "id": 1,
+      "name": "of_callable",
+      "layer": "signature_slot",
+      "source": "signature_slot",
+      "target": "symbol",
+      "inverse": "has_signature_slot",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "declaration",
+      "evidence_capabilities": [
+        "declaration"
+      ],
+      "completeness": "complete",
+      "virtual": true
+    },
+    {
+      "id": 2,
+      "name": "of_type",
+      "layer": "signature_slot",
+      "source": "signature_slot",
+      "target": "type",
+      "inverse": "has_signature_slot",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "declaration",
+      "evidence_capabilities": [
+        "declaration"
+      ],
+      "completeness": "complete",
+      "virtual": true
+    },
+    {
+      "id": 1,
+      "name": "of_type",
+      "layer": "type_layer",
+      "source": "type_layer",
+      "target": "type",
+      "inverse": "has_layer",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "derived",
+      "evidence_capabilities": [
+        "derived"
+      ],
+      "completeness": "complete",
+      "virtual": true
+    },
+    {
+      "id": 2,
+      "name": "child",
+      "layer": "type_layer",
+      "source": "type_layer",
+      "target": "type_layer",
+      "inverse": "parent",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "derived",
+      "evidence_capabilities": [
+        "derived"
+      ],
+      "completeness": "complete",
       "virtual": true
     }
   ],
@@ -1128,6 +1275,10 @@ export const CORE_CATALOG = {
     {
       "id": 13,
       "name": "member-function-pointer"
+    },
+    {
+      "id": 14,
+      "name": "pack-expansion"
     }
   ],
   "type_edge_kinds": [
@@ -1216,6 +1367,26 @@ export const CORE_CATALOG = {
       "is_string": false
     },
     {
+      "name": "callable_kind",
+      "filterable": true,
+      "is_string": true
+    },
+    {
+      "name": "template_origin",
+      "filterable": true,
+      "is_string": true
+    },
+    {
+      "name": "template_form",
+      "filterable": true,
+      "is_string": true
+    },
+    {
+      "name": "owner",
+      "filterable": true,
+      "is_string": true
+    },
+    {
       "name": "file",
       "filterable": false,
       "is_string": true
@@ -1229,6 +1400,11 @@ export const CORE_CATALOG = {
       "name": "col",
       "filterable": false,
       "is_string": false
+    },
+    {
+      "name": "decl_path",
+      "filterable": false,
+      "is_string": true
     },
     {
       "name": "semantic_universe",
@@ -1366,6 +1542,61 @@ export const CORE_CATALOG = {
       "is_string": false
     },
     {
+      "name": "extent",
+      "filterable": true,
+      "is_string": true
+    },
+    {
+      "name": "element_type",
+      "filterable": true,
+      "is_string": true
+    },
+    {
+      "name": "path",
+      "filterable": true,
+      "is_string": true
+    },
+    {
+      "name": "relation",
+      "filterable": true,
+      "is_string": true
+    },
+    {
+      "name": "depth",
+      "filterable": true,
+      "is_string": false
+    },
+    {
+      "name": "status",
+      "filterable": true,
+      "is_string": true
+    },
+    {
+      "name": "root_id",
+      "filterable": true,
+      "is_string": false
+    },
+    {
+      "name": "slot_kind",
+      "filterable": true,
+      "is_string": true
+    },
+    {
+      "name": "mode",
+      "filterable": true,
+      "is_string": true
+    },
+    {
+      "name": "value_kind",
+      "filterable": true,
+      "is_string": true
+    },
+    {
+      "name": "named_decl",
+      "filterable": true,
+      "is_string": true
+    },
+    {
       "name": "src_id",
       "filterable": true,
       "is_string": false
@@ -1499,7 +1730,7 @@ export const CORE_CATALOG = {
     {
       "id": 1,
       "name": "semantic-index",
-      "schema_version": 39
+      "schema_version": 40
     },
     {
       "id": 2,
@@ -1574,5 +1805,5 @@ export const CORE_CATALOG = {
     }
   ],
   "migrations": [],
-  "catalog_hash": "1adb5f6663a2e48dc3a624c79703ceaa5287f2784731a00bbc469dba8d5935d4"
+  "catalog_hash": "c4f426232c34739c83a3d15c3bd91b4d4f8934ec8853f8efaa7a27939e37e9f7"
 } as const;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <functional>
 #include <optional>
 #include <ostream>
@@ -11,6 +12,12 @@ namespace cidx::ui {
 struct ServerOptions {
   int port = 0;
   bool launch_browser = true;
+  // Transport limits are independent of GraphView's semantic budgets: a
+  // malformed client or provider bug must not create an unbounded socket or
+  // response allocation sink.
+  std::size_t max_request_bytes = std::size_t{16} * 1024;
+  std::size_t max_response_bytes = std::size_t{64} * 1024 * 1024;
+  int request_timeout_ms = 1000;
   // HSE-92 round 3: caps how many graph/search/evidence provider
   // invocations may be genuinely in flight at once. Each such request
   // spawns both a connection thread and a provider worker thread, so

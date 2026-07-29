@@ -1,0 +1,20 @@
+{
+  "format": "cidx.dependency-inventory.v1",
+  "lockfiles": [
+    "web/package-lock.json",
+    "ui/package-lock.json"
+  ],
+  "direct": [
+    {"package": "cytoscape", "version": "3.31.2", "license": "MIT", "surface": "web"},
+    {"package": "playwright", "version": "1.55.1", "license": "Apache-2.0", "surface": "web:test"},
+    {"package": "cytoscape", "version": "3.33.1", "license": "MIT", "surface": "ui:prototype"},
+    {"package": "@types/node", "version": "24.0.12", "license": "MIT", "surface": "ui:build"},
+    {"package": "ajv", "version": "8.18.0", "license": "MIT", "surface": "ui:test"},
+    {"package": "typescript", "version": "5.8.3", "license": "Apache-2.0", "surface": "ui:build"},
+    {"package": "vite", "version": "7.3.6", "license": "MIT", "surface": "ui:build"}
+  ],
+  "offline_assets": [
+    {"path": "web/vendor/cytoscape.min.js", "license_file": "web/vendor/CYTOSCAPE-LICENSE", "sha256": "a9e75b12b6dab7b7f5b428636070b38c59eba2a4a7d0a3af36b2afdd67b13499"}
+  ],
+  "audit_policy": "Run npm audit --offline when the advisory cache is available; network access is never required to build or run the explorer."
+}
