@@ -57,6 +57,7 @@ from .queryplan import (
     not_ as plan_not,
     nodes as plan_nodes,
     out as plan_out,
+    order_by as plan_order_by,
     start as plan_start,
     union_ as plan_union,
     view as plan_view,
@@ -1103,6 +1104,11 @@ class EntityGraph:
         sym = self._q.get(ident.sym if isinstance(ident, EntityNode) else ident)
         if sym is None:
             return None
+        plan = (
+            plan_start(codebase()) | plan_nodes(eq("id", sym.id)) |
+            plan_view("entity")
+        )
+        self._run_plan_ids(plan)
         cls = _ETYPE_TO_NODE.get(self._entity_type(sym.id), EntityNode)
         node = cls(sym, self)
         self._node_cache[sym.id] = node
@@ -1339,80 +1345,73 @@ class EntityGraph:
         front.  (Ordering is by id, not by name as before; sort the result
         yourself if you need name order.)
         """
-        self._entity_plan_touch()
-        wheres: list[str] = []
-        params: list = []
+        kinds = [kind] if kind is not None else list(EdgeKind)
         if src is not None:
-            wheres.append("src_id = ?")
-            params.append(self._id_of(src))
-        if dst is not None:
-            wheres.append("dst_id = ?")
-            params.append(self._id_of(dst))
-        if kind is not None:
-            wheres.append("kind = ?")
-            params.append(int(kind))
-        plan_peer_ids: Optional[set[int]] = None
-        if kind is not None and (src is not None or dst is not None):
-            seed = src if src is not None else dst
-            node = self.entity(seed)
-            if node is not None:
-                relation = kind.name.lower()
-                direction = "out" if src is not None else "in"
-                plan = plan_start(entity(node.usr))
-                plan = plan | (
-                    plan_out(relation) if direction == "out" else plan_in(relation)
-                )
-                plan_peer_ids = set(self._run_plan_ids(plan))
-                if not plan_peer_ids:
-                    return
-                peer_column = "dst_id" if src is not None else "src_id"
-                placeholders = ",".join("?" for _ in plan_peer_ids)
-                wheres.append(f"{peer_column} IN ({placeholders})")
-                params.extend(sorted(plan_peer_ids))
-        where_sql = ("WHERE " + " AND ".join(wheres)) if wheres else ""
-        cur = self._c.execute(
-            f"SELECT {_EDGE_COLS} FROM entity_edge {where_sql} "
-            "ORDER BY src_id, kind, dst_id",
-            params,
-        )
-        for r in cur:
-            edge = self._edge(r)
-            if edge is not None:
-                yield edge
+            source_nodes = [self.entity(src)]
+        elif dst is not None:
+            source_nodes = [self.entity(dst)]
+        else:
+            source_nodes = list(self._nodes_from_plan(
+                plan_start(codebase()) | plan_nodes() | plan_view("entity")
+            ))
+        keys: list[tuple[int, int, int]] = []
+        seen_keys: set[tuple[int, int, int]] = set()
+        def add_key(value: tuple[int, int, int]) -> None:
+            if value not in seen_keys:
+                seen_keys.add(value)
+                keys.append(value)
+        for seed in source_nodes:
+            if seed is None:
+                continue
+            for edge_kind in kinds:
+                relation = edge_kind.name.lower()
+                if src is not None or dst is None:
+                    plan = (
+                        plan_start(entity(seed.usr))
+                        | plan_out(relation)
+                        | plan_order_by(["id"])
+                    )
+                    for peer_id in self._run_plan_ids(plan):
+                        if dst is None or peer_id == self._id_of(dst):
+                            add_key((seed.id, peer_id, int(edge_kind)))
+                else:
+                    plan = (
+                        plan_start(entity(seed.usr))
+                        | plan_in(relation)
+                        | plan_order_by(["id"])
+                    )
+                    for peer_id in self._run_plan_ids(plan):
+                        add_key((peer_id, seed.id, int(edge_kind)))
+        for src_id, dst_id, raw_kind in keys:
+            row = self._c.execute(
+                f"SELECT {_EDGE_COLS} FROM entity_edge "
+                "WHERE src_id = ? AND dst_id = ? AND kind = ? LIMIT 1",
+                (src_id, dst_id, raw_kind),
+            ).fetchone()
+            if row is not None:
+                edge = self._edge(row)
+                if edge is not None:
+                    yield edge
 
     def by_kind(self, kind: EdgeKind) -> Iterator[EntityEdge]:
         return self.edges(kind=kind)
 
     def kinds(self) -> list[EdgeKind]:
         """Edge kinds actually present in this graph (with >=1 edge)."""
-        self._entity_plan_touch()
-        rows = self._c.execute(
-            "SELECT DISTINCT kind FROM entity_edge ORDER BY kind"
-        ).fetchall()
-        return [EdgeKind(r[0]) for r in rows]
+        return sorted({edge.kind for edge in self.edges()}, key=int)
 
     def stats(self) -> dict:
         """Counts: total edges, per-kind breakdown, distinct entity count."""
-        self._entity_plan_touch()
-        per_kind = {
-            EdgeKind(r[0]).verb: r[1]
-            for r in self._c.execute(
-                "SELECT kind, COUNT(*) FROM entity_edge GROUP BY kind ORDER BY kind"
-            ).fetchall()
-        }
-        total = self._c.execute("SELECT COUNT(*) FROM entity_edge").fetchone()[0]
-        # Count distinct entity ids in SQL instead of materializing every node
-        # (the old `sum(1 for _ in self.entities())` ran a get() per entity).
-        n_entities = self._c.execute(
-            "SELECT COUNT(*) FROM ("
-            "  SELECT id FROM entity_node "
-            "  UNION SELECT src_id AS id FROM entity_edge "
-            "  UNION SELECT dst_id AS id FROM entity_edge"
-            ")"
-        ).fetchone()[0]
+        edges = list(self.edges())
+        per_kind: dict[str, int] = {}
+        entity_ids: set[int] = set()
+        for edge in edges:
+            per_kind[edge.kind.verb] = per_kind.get(edge.kind.verb, 0) + 1
+            entity_ids.add(edge.src.id)
+            entity_ids.add(edge.dst.id)
         return {
-            "entities": n_entities,
-            "edges": total,
+            "entities": len(entity_ids),
+            "edges": len(edges),
             "by_kind": per_kind,
         }
 

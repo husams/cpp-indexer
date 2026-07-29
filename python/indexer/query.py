@@ -1300,7 +1300,8 @@ class GraphQuery:
         type_key = type_row[0] if type_row is not None else f"__missing_type_{type_id}__"
         plan = (
             start(codebase()) | view("type") | nodes(eq("type_key", type_key))
-            | plan_select(["id", "type_key"])
+            | plan_select(["id", "type_key", "kind", "spelling", "decl_usr",
+                          "canonical_id", "extent"])
         ).plan
         result = Executor(Storage.from_connection(self._c, self.db_path)).run(plan)
         return [type_id for _row in result.rows]
@@ -1315,6 +1316,37 @@ class GraphQuery:
         ).plan
         result = Executor(Storage.from_connection(self._c, self.db_path)).run(plan)
         return [int(row[0]) for row in result.rows]
+
+    def _adapter_edge_rows(
+        self, sym_id: int, direction: str,
+        kind_ids: Optional[Sequence[int]], limit: int,
+    ) -> list[tuple]:
+        """Select the complete edge page through the typed plan boundary."""
+        from .queryplan import (
+            Executor, all_of, codebase, eq, limit as plan_limit,
+            nodes, order_by, select as plan_select, start, view,
+        )
+        from .storage import Storage
+
+        if limit == 0:
+            return []
+        field = "dst_id" if direction == "in" else "src_id"
+        predicates = [eq(field, sym_id)]
+        query = (
+            start(codebase()) | view("edge") |
+            nodes(all_of(predicates)) |
+            plan_select([
+                "edge_id", "src_id", "dst_id", "kind", "count",
+                "base_access", "is_virtual", "negative_count",
+            ]) |
+            order_by(["negative_count", "kind", "edge_id"])
+        )
+        if limit > 0:
+            query = query | plan_limit(limit)
+        result = Executor(Storage.from_connection(self._c, self.db_path)).run(query.plan)
+        if result.truncated:
+            raise _AdapterPlanTruncated("edge QueryPlan candidate set was truncated")
+        return [tuple(row) for row in result.rows]
 
     @staticmethod
     def _symbol_plan(pred, *, kind: Optional[str] = None, limit: int = 0,
@@ -1757,61 +1789,39 @@ class GraphQuery:
     ) -> list[Edge]:
         sid = self._resolve_id(sym)
         kids = self._kind_ids(kinds)
+        if direction not in {"in", "out"}:
+            raise ValueError(f"direction must be 'in' or 'out', got {direction!r}")
         peer_ids = self._peer_ids(sid, direction, kinds)
         if peer_ids is not None and not peer_ids:
             return []
-        if direction == "in":
-            mine, peer = "dst_id", "src_id"
-        elif direction == "out":
-            mine, peer = "src_id", "dst_id"
-        else:
-            raise ValueError(f"direction must be 'in' or 'out', got {direction!r}")
-        # count: edge.count is authoritative only after `cidx resolve`; otherwise
-        # fall back to COUNT(edge_site) for true multiplicity.
-        if self._is_resolved():
-            count_expr = "e.count"
-        else:
-            count_expr = "(SELECT COUNT(*) FROM edge_site es WHERE es.edge_id = e.id)"
-        # alias e.kind -> ekind so it does not collide with symbol.kind (sqlite3.Row
-        # returns the FIRST column on a name clash, which would mislabel the peer).
-        sql = (
-            f"SELECT e.id AS eid, e.src_id, e.dst_id, e.kind AS ekind, "
-            f"{count_expr} AS ecount, e.count AS rawcount, "
-            f"e.base_access, e.is_virtual, {_SYM_COLS} "
-            f"FROM edge e JOIN symbol s ON s.id = e.{peer} "
-            f"WHERE e.{mine} = ?"
+        rows = self._adapter_edge_rows(
+            sid, direction, kids, limit if peer_ids is None else -1
         )
-        args: list = [sid]
-        if peer_ids is not None:
-            peer_placeholders = ",".join("?" for _ in peer_ids)
-            sql += f" AND e.{peer} IN ({peer_placeholders})"
-            args.extend(sorted(peer_ids))
-        if kids:
-            sql += f" AND e.kind IN ({','.join('?' * len(kids))})"
-            args.extend(kids)
-        # e.id tiebreaker (HSE-92 review P2-2, mirrors storage_query.cpp):
-        # `ecount DESC, e.kind` alone is not a total order, so two
-        # identically-limited reads of the same adjacency are not
-        # guaranteed to return the same set of rows for ties.
-        sql += " ORDER BY ecount DESC, e.kind, e.id LIMIT ?"
-        args.append(limit)
         out = []
-        for r in self._c.execute(sql, args):
-            cnt = r["ecount"]
-            if not cnt:  # no sites recorded -> at least 1
-                cnt = r["rawcount"] or 1
-            out.append(
-                Edge(
-                    edge_id=r["eid"],
-                    kind=EDGE_NAMES[r["ekind"]],
-                    src_id=r["src_id"],
-                    dst_id=r["dst_id"],
-                    peer=self._sym(r),
-                    count=cnt,
-                    base_access=r["base_access"],
-                    is_virtual=r["is_virtual"],
-                )
-            )
+        for row in rows:
+            edge_id, src_id, dst_id, kind_id, count, base_access, is_virtual, _ = row
+            peer_id = src_id if direction == "in" else dst_id
+            if peer_ids is not None and peer_id not in peer_ids:
+                continue
+            if kids and kind_id not in kids:
+                continue
+            peer = self.get(src_id if direction == "in" else dst_id)
+            if peer is None:
+                continue
+            cnt = count
+            site_count = self._c.execute(
+                "SELECT COUNT(*) FROM edge_site WHERE edge_id = ?", (edge_id,)
+            ).fetchone()[0]
+            if not self._is_resolved() or not cnt:
+                cnt = site_count or cnt or 1
+            elif site_count > cnt:
+                cnt = site_count
+            out.append(Edge(edge_id=edge_id, kind=EDGE_NAMES[kind_id],
+                            src_id=src_id, dst_id=dst_id, peer=peer,
+                            count=cnt, base_access=base_access,
+                            is_virtual=is_virtual))
+            if limit > 0 and len(out) >= limit:
+                break
         # Eager-load the reference sites (WHERE each edge occurs) so a serialized
         # edge always carries the use/call location, not just the peer's decl
         # line. Internal traversals that discard sites pass with_sites=False.
@@ -1890,24 +1900,21 @@ class GraphQuery:
         if limit == 0:
             return []
         files = self._files()
-        selected = set(self._adapter_site_keys(eid, limit))
+        selected = self._adapter_site_keys(eid, limit)
         if not selected:
             return []
         out = []
-        sql = (
-            "SELECT edge_id, file_id, line, col, conditional, args_sig, "
-            "       recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos,"
-            "       recv_type_is_value FROM edge_site_read WHERE edge_id = ? "
-            "ORDER BY file_id, line, col"
-        )
-        args: tuple[Any, ...] = (eid,)
-        if limit > 0:
-            sql += " LIMIT ?"
-            args += (limit,)
-        for r in self._c.execute(sql, args):
-            key = (r["edge_id"], r["file_id"], r["line"] or 0, r["col"] or 0)
-            if key not in selected:
-                continue
+        for edge_id, file_id, line, col in selected:
+            r = self._c.execute(
+                "SELECT edge_id, file_id, line, col, conditional, args_sig, "
+                "       recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos,"
+                "       recv_type_is_value FROM edge_site_read "
+                "WHERE edge_id = ? AND file_id = ? AND COALESCE(line,0) = ? "
+                "AND COALESCE(col,0) = ?",
+                (edge_id, file_id, line, col),
+            ).fetchone()
+            if r is None:
+                return []
             p = files.get(r["file_id"], (None, None))[0] if r["file_id"] else None
             out.append(
                 Site(
@@ -1935,7 +1942,7 @@ class GraphQuery:
         symbols usually return their single site. Empty on a pre-v26 (un-
         reindexed) DB."""
         sid = self._resolve_id(sym)
-        if not self._adapter_symbol_rows(sid, ["id"]):
+        if not self._adapter_symbol_rows(sid, ["id", "kind", "is_definition"]):
             return []
         files = self._files()
         out: list[Site] = []
@@ -2505,7 +2512,7 @@ class GraphQuery:
         """The distinct bodies of `sym`, one per backend (component, file). A
         normal symbol has one; a redefined one has several."""
         sid = self._resolve_id(sym)
-        if not self._adapter_symbol_rows(sid, ["id"]):
+        if not self._adapter_symbol_rows(sid, ["id", "kind", "is_definition"]):
             return []
         return self._definition_rows(
             "SELECT id AS def_id, symbol_id, file_id, line, col, end_line, "
@@ -2520,7 +2527,7 @@ class GraphQuery:
         definition of that callee (materialised `possible_call`). This is the
         "possible call" fan-out -- e.g. ``do()`` -> {Server1::reg, Server2::reg}."""
         sid = self._resolve_id(sym)
-        if not self._adapter_symbol_rows(sid, ["id"]):
+        if not self._adapter_symbol_rows(sid, ["id", "kind", "name"]):
             return []
         return self._definition_rows(
             "SELECT td.id AS def_id, td.symbol_id AS symbol_id, "

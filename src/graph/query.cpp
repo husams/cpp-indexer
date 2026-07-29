@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <limits>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -136,21 +137,22 @@ bool GraphQuery::adapter_symbol_exists(int64_t sym_id) {
   if (!query_read_) {
     return true;
   }
-  const auto ids = adapter_ids(
-      (query::start(query::codebase()) | query::nodes(query::eq("id", sym_id)))
-          .plan());
-  return std::ranges::find(ids, sym_id) != ids.end();
+  auto plan = query::start(query::codebase()) |
+              query::nodes(query::eq("id", sym_id)) |
+              query::select({"id", "kind", "name", "is_definition"});
+  query::Executor executor(*query_read_);
+  return !executor.run_fast(plan.plan()).rows.empty();
 }
 
 bool GraphQuery::adapter_edge_exists(int64_t edge_id) {
   if (!query_read_) {
     return true;
   }
-  const auto ids = adapter_ids((query::start(query::codebase()) |
-                                query::view(query::View::Edge) |
-                                query::nodes(query::eq("edge_id", edge_id)))
-                                   .plan());
-  return !ids.empty();
+  auto plan = query::start(query::codebase()) | query::view(query::View::Edge) |
+              query::nodes(query::eq("edge_id", edge_id)) |
+              query::select({"edge_id", "src_id", "dst_id", "kind"});
+  query::Executor executor(*query_read_);
+  return !executor.run_fast(plan.plan()).rows.empty();
 }
 
 bool GraphQuery::adapter_type_exists(int64_t type_id) {
@@ -165,7 +167,8 @@ bool GraphQuery::adapter_type_exists(int64_t type_id) {
                   : "__missing_type_" + std::to_string(type_id);
   auto plan = query::start(query::codebase()) | query::view(query::View::Type) |
               query::nodes(query::eq("type_key", type_key)) |
-              query::select({"id", "type_key"});
+              query::select({"id", "type_key", "kind", "spelling", "decl_usr",
+                             "canonical_id", "extent"});
   query::Executor executor(*query_read_);
   const auto result = executor.run_fast(plan.plan());
   return !result.rows.empty();
@@ -195,6 +198,42 @@ GraphQuery::adapter_site_keys(int64_t edge_id, int limit) {
                       std::get<int64_t>(row[3]), std::get<int64_t>(row[4]));
   }
   return keys;
+}
+
+std::vector<
+    std::tuple<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t>>
+GraphQuery::adapter_edge_rows(int64_t sym_id, const std::string &direction,
+                              int limit) {
+  std::vector<
+      std::tuple<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t>>
+      rows;
+  if (!query_read_ || limit == 0) {
+    return rows;
+  }
+  const std::string field = direction == "in" ? "dst_id" : "src_id";
+  auto plan = query::start(query::codebase()) | query::view(query::View::Edge) |
+              query::nodes(query::eq(field, sym_id)) |
+              query::select({"edge_id", "src_id", "dst_id", "kind", "count",
+                             "negative_count", "base_access", "is_virtual"}) |
+              query::order_by({"negative_count", "kind", "edge_id"});
+  if (limit > 0) {
+    plan = plan | query::limit(limit);
+  }
+  query::Executor executor(*query_read_);
+  const auto result = executor.run_fast(plan.plan());
+  for (const auto &row : result.rows) {
+    if (row.size() != 8) {
+      continue;
+    }
+    const auto int_cell = [](const query::Cell &cell) {
+      return std::holds_alternative<int64_t>(cell) ? std::get<int64_t>(cell)
+                                                   : int64_t{0};
+    };
+    rows.emplace_back(int_cell(row[0]), int_cell(row[1]), int_cell(row[2]),
+                      int_cell(row[3]), int_cell(row[4]), int_cell(row[6]),
+                      int_cell(row[7]));
+  }
+  return rows;
 }
 
 std::vector<int64_t> GraphQuery::adapter_ordered_ids(const query::Plan &plan) {
@@ -738,44 +777,85 @@ std::vector<Edge>
 GraphQuery::edges(int64_t sym_id, const std::string &direction,
                   const std::optional<std::vector<int64_t>> &kind_ids_opt,
                   int limit, bool with_sites) {
+  if (limit == 0) {
+    return {};
+  }
   if (!adapter_symbol_exists(sym_id)) {
     return {};
   }
   const std::vector<int64_t> kv =
       kind_ids_opt ? *kind_ids_opt : std::vector<int64_t>{};
   const auto candidate_ids = adapter_peer_ids(sym_id, direction, kind_ids_opt);
-  const bool use_plan_candidates = candidate_ids.has_value();
-  if (use_plan_candidates && candidate_ids->empty()) {
+  if (candidate_ids && candidate_ids->empty()) {
     return {};
   }
-  const bool cr = is_resolved();
-  auto rows = db_.graph_edges(sym_id, direction, kv, cr, limit);
+  if (!query_read_) {
+    const auto rows =
+        db_.graph_edges(sym_id, direction, kv, is_resolved(), limit);
+    std::vector<Edge> out;
+    out.reserve(rows.size());
+    for (const auto &row : rows) {
+      Edge edge;
+      edge.edge_id = row.eid;
+      const auto name = edge_names_map().find(row.ekind);
+      edge.kind = name == edge_names_map().end() ? std::to_string(row.ekind)
+                                                 : name->second;
+      edge.src_id = row.src_id;
+      edge.dst_id = row.dst_id;
+      edge.peer = make_sym_from_row(row);
+      edge.count =
+          row.ecount != 0 ? row.ecount : (row.rawcount != 0 ? row.rawcount : 1);
+      edge.base_access = row.base_access;
+      edge.is_virtual = row.is_virtual;
+      out.push_back(std::move(edge));
+    }
+    return out;
+  }
+  std::vector<
+      std::tuple<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t>>
+      planned_rows;
+  if (query_read_) {
+    planned_rows =
+        adapter_edge_rows(sym_id, direction, candidate_ids ? -1 : limit);
+  }
 
   const auto &nm = edge_names_map();
   std::vector<Edge> out;
-  out.reserve(rows.size());
+  out.reserve(planned_rows.size());
 
-  for (auto &row : rows) {
-    const int64_t peer_id = direction == "in" ? row.src_id : row.dst_id;
-    if (use_plan_candidates && !candidate_ids->contains(peer_id)) {
+  for (const auto &[edge_id, src_id, dst_id, kind_id, planned_count,
+                    base_access, is_virtual] : planned_rows) {
+    const int64_t peer_id = direction == "in" ? src_id : dst_id;
+    if (candidate_ids && !candidate_ids->contains(peer_id)) {
+      continue;
+    }
+    if (kind_ids_opt && !std::ranges::contains(kv, kind_id)) {
       continue;
     }
     Edge e;
-    e.edge_id = row.eid;
-    auto nit = nm.find(row.ekind);
-    e.kind = (nit != nm.end()) ? nit->second : std::to_string(row.ekind);
-    e.src_id = row.src_id;
-    e.dst_id = row.dst_id;
-    e.peer = make_sym_from_row(row);
-    // count fallback (R3): 0 is falsy
-    int64_t cnt = row.ecount;
-    if (cnt == 0) {
-      cnt = (row.rawcount != 0) ? row.rawcount : 1;
+    e.edge_id = edge_id;
+    auto nit = nm.find(kind_id);
+    e.kind = (nit != nm.end()) ? nit->second : std::to_string(kind_id);
+    e.src_id = src_id;
+    e.dst_id = dst_id;
+    const auto peer = db_.graph_symbol_by_id(peer_id);
+    if (!peer) {
+      continue;
+    }
+    e.peer = make_sym_from_symbol(*peer);
+    int64_t cnt = planned_count;
+    if (!is_resolved() || cnt == 0) {
+      const auto site_rows = db_.edge_sites_one(edge_id, -1);
+      cnt = site_rows.empty() ? (cnt == 0 ? 1 : cnt)
+                              : static_cast<int64_t>(site_rows.size());
     }
     e.count = cnt;
-    e.base_access = row.base_access;
-    e.is_virtual = row.is_virtual;
+    e.base_access = base_access;
+    e.is_virtual = is_virtual != 0;
     out.push_back(std::move(e));
+    if (limit > 0 && out.size() >= static_cast<std::size_t>(limit)) {
+      break;
+    }
   }
 
   if (with_sites && !out.empty()) {
@@ -861,14 +941,27 @@ std::vector<Sym> GraphQuery::aliased_by(int64_t sym_id, int limit) {
 }
 
 std::vector<Site> GraphQuery::sites(int64_t edge_id, int limit) {
-  if (!adapter_edge_exists(edge_id)) {
+  if (limit == 0) {
     return {};
   }
-  auto rows = db_.edge_sites_one(edge_id, limit);
+  if (!query_read_) {
+    auto rows = db_.edge_sites_one(edge_id, limit);
+    std::vector<Site> out;
+    out.reserve(rows.size());
+    for (const auto &row : rows) {
+      out.push_back(make_site(row));
+    }
+    return out;
+  }
+  const auto keys = adapter_site_keys(edge_id, limit);
   std::vector<Site> out;
-  out.reserve(rows.size());
-  for (const auto &row : rows) {
-    out.push_back(make_site(row));
+  out.reserve(keys.size());
+  for (const auto &[selected_edge, file_id, line, col] : keys) {
+    const auto row = db_.edge_site_by_key(selected_edge, file_id, line, col);
+    if (!row) {
+      return {};
+    }
+    out.push_back(make_site(*row));
   }
   return out;
 }
@@ -887,13 +980,18 @@ std::vector<Site> GraphQuery::sites_page(int64_t edge_id, int offset,
     }
     return out;
   }
-  auto selected =
-      adapter_site_keys(edge_id, limit > 0 ? offset + limit : limit);
+  const int safe_offset = std::max(offset, 0);
+  const int64_t page_end = static_cast<int64_t>(safe_offset) + limit;
+  const int selection_limit =
+      page_end > std::numeric_limits<int>::max()
+          ? -1
+          : (limit > 0 ? static_cast<int>(page_end) : limit);
+  auto selected = adapter_site_keys(edge_id, selection_limit);
   if (limit > 0) {
-    if (offset < 0 || std::cmp_greater_equal(offset, selected.size())) {
+    if (std::cmp_greater_equal(safe_offset, selected.size())) {
       return {};
     }
-    const auto first = selected.begin() + offset;
+    const auto first = selected.begin() + safe_offset;
     const auto last =
         first + std::min<std::ptrdiff_t>(limit, selected.end() - first);
     selected = std::vector(first, last);
@@ -911,7 +1009,16 @@ std::vector<Site> GraphQuery::sites_page(int64_t edge_id, int offset,
 }
 
 bool GraphQuery::edge_conditional(int64_t edge_id) {
-  if (!adapter_edge_exists(edge_id)) {
+  if (!query_read_) {
+    return db_.edge_has_conditional_site(edge_id);
+  }
+  auto plan = query::start(query::codebase()) |
+              query::view(query::View::Evidence) |
+              query::nodes(query::eq("edge_id", edge_id)) |
+              query::where(query::eq("conditional", static_cast<int64_t>(1))) |
+              query::count();
+  query::Executor executor(*query_read_);
+  if (executor.run_fast(plan.plan()).scalar == 0) {
     return false;
   }
   return db_.edge_has_conditional_site(edge_id);
@@ -919,7 +1026,21 @@ bool GraphQuery::edge_conditional(int64_t edge_id) {
 
 std::optional<int64_t> GraphQuery::edge_id_for(int64_t src_id, int64_t dst_id,
                                                int64_t kind) {
-  if (!adapter_symbol_exists(src_id) || !adapter_symbol_exists(dst_id)) {
+  if (!query_read_) {
+    return db_.edge_id_for(src_id, dst_id, kind);
+  }
+  const auto src = db_.graph_symbol_by_id(src_id);
+  const auto dst = db_.graph_symbol_by_id(dst_id);
+  const auto relation = edge_names_map().find(kind);
+  if (!src || !dst || relation == edge_names_map().end()) {
+    return std::nullopt;
+  }
+  auto plan = query::start(query::symbol(src->usr)) |
+              query::out(relation->second) |
+              query::where(query::eq("id", dst_id)) | query::select({"id"}) |
+              query::limit(1);
+  query::Executor executor(*query_read_);
+  if (executor.run_fast(plan.plan()).rows.empty()) {
     return std::nullopt;
   }
   return db_.edge_id_for(src_id, dst_id, kind);
@@ -927,6 +1048,23 @@ std::optional<int64_t> GraphQuery::edge_id_for(int64_t src_id, int64_t dst_id,
 
 std::map<int64_t, std::vector<Site>>
 GraphQuery::sites_for(const std::vector<int64_t> &edge_ids) {
+  if (query_read_) {
+    std::map<int64_t, std::vector<Site>> out;
+    for (const auto edge_id : edge_ids) {
+      std::vector<Site> sites;
+      for (const auto &[selected_edge, file_id, line, col] :
+           adapter_site_keys(edge_id, -1)) {
+        const auto row =
+            db_.edge_site_by_key(selected_edge, file_id, line, col);
+        if (!row) {
+          return {};
+        }
+        sites.push_back(make_site(*row));
+      }
+      out.emplace(edge_id, std::move(sites));
+    }
+    return out;
+  }
   auto raw_map = db_.edge_sites_for(edge_ids);
   std::map<int64_t, std::vector<Site>> out;
   for (auto &kv : raw_map) {

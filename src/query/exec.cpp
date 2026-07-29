@@ -266,6 +266,11 @@ std::string col_expr(const std::string &field, const std::string &symbol_alias,
   if (field == "negative_multi_def") {
     return "-" + symbol_alias + ".multi_def";
   }
+  if (field == "negative_count") {
+    return "-(CASE WHEN COALESCE((SELECT value FROM meta WHERE key = "
+           "'graph_resolved_at'), '') <> '' THEN edge.count ELSE "
+           "(SELECT COUNT(*) FROM edge_site WHERE edge_id = edge.id) END)";
+  }
   if (field == "spelling") {
     return symbol_alias + ".spelling";
   }
@@ -3098,6 +3103,11 @@ private:
     if (field == "edge_id" && view == View::Edge) {
       return "edge.id";
     }
+    if (field == "negative_count" && view == View::Edge) {
+      return "-(CASE WHEN COALESCE((SELECT value FROM meta WHERE key = "
+             "'graph_resolved_at'), '') <> '' THEN edge.count ELSE "
+             "(SELECT COUNT(*) FROM edge_site WHERE edge_id = edge.id) END)";
+    }
     if ((field == "src_id" || field == "dst_id") && view == View::Site) {
       // A site row is always scoped to exactly one edge (edge_site.edge_id
       // is a foreign key into edge.id); exposing the edge's own stable
@@ -3185,9 +3195,10 @@ private:
                                      "is_const", "is_volatile", "is_restrict"};
       }
       if (view == View::Edge) {
-        return std::set<std::string>{"id",         "src_id",     "dst_id",
-                                     "kind",       "count",      "base_access",
-                                     "is_virtual", "vtable_slot"};
+        return std::set<std::string>{
+            "id",          "src_id",     "dst_id",
+            "kind",        "count",      "negative_count",
+            "base_access", "is_virtual", "vtable_slot"};
       }
       return std::set<std::string>{};
     }();

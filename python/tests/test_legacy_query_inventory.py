@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from pathlib import Path
 
 import pytest
@@ -63,6 +64,17 @@ def _consume(value):
     if hasattr(value, "__iter__"):
         return [_consume(item) for item in value]
     return repr(value)
+
+
+def _assert_operation_plan(calls: list[str], before: int, operation: str):
+    produced = calls[before:]
+    assert produced, f"{operation} did not execute a production QueryPlan"
+    meaningful = {"select", "out", "in", "where", "view", "sites", "limit",
+                  "count", "union", "except"}
+    assert any(
+        meaningful.intersection(stage["op"] for stage in json.loads(plan)["stages"])
+        for plan in produced
+    ), f"{operation} executed only an existence/touch plan"
 
 
 def _graph_args(name, graph, sym, edge, definition):
@@ -149,7 +161,7 @@ def test_python_inventory_executes_production_plans_and_legacy_oracles(
         except Exception as exc:  # pragma: no cover - identifies a missing case
             pytest.fail(f"{owner}.{operation} did not execute: {exc}")
         if operation not in builder_only:
-            assert len(calls) > before, f"{owner}.{operation} bypassed QueryPlan"
+            _assert_operation_plan(calls, before, operation)
 
     # Differential production oracles for the seeded selection, ordering, and
     # hydration boundary. These are independent SQLite legacy reads, not
@@ -187,6 +199,7 @@ def test_entity_inventory_executes_production_plans(g, monkeypatch):
     graph = EntityGraph(g)
     query = graph.query()
     for surface, owner, operation in entries:
+        before = len(calls)
         if surface == "python_entity_graph":
             method = getattr(graph, operation)
             if operation in {"abstract_class", "instance", "interface", "klass",
@@ -201,6 +214,9 @@ def test_entity_inventory_executes_production_plans(g, monkeypatch):
             else:
                 value = method()
             _consume(value)
+            if operation not in {"query", "klass", "struct", "record", "template",
+                                 "instance", "abstract_class", "interface", "edges"}:
+                _assert_operation_plan(calls, before, f"{owner}.{operation}")
         elif surface == "python_entity_query":
             method = getattr(query, operation)
             if operation in {"relation", "step", "then"}:
@@ -222,4 +238,6 @@ def test_entity_inventory_executes_production_plans(g, monkeypatch):
             else:
                 value = method()
             _consume(value)
-    assert calls, "entity production inventory did not execute QueryPlan"
+            if operation not in {"query", "klass", "struct", "record", "template",
+                                 "instance", "abstract_class", "interface", "edges"}:
+                _assert_operation_plan(calls, before, f"{owner}.{operation}")

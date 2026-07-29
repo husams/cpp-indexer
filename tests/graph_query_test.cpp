@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -216,27 +217,52 @@ TEST_CASE("graph_query: find preserves exact order above executor cap") {
   CHECK(unique_ids.size() == expected.size());
 }
 
-TEST_CASE("graph_query: executable public operation inventory") {
-  std::ifstream inventory(CIDX_LEGACY_QUERY_INVENTORY);
-  REQUIRE(inventory.good());
-  std::ifstream header(CIDX_GRAPH_QUERY_HEADER);
-  REQUIRE(header.good());
-  const std::string header_text((std::istreambuf_iterator<char>(header)),
-                                std::istreambuf_iterator<char>());
-  std::string line;
-  int listed = 0;
-  while (std::getline(inventory, line)) {
-    if (!line.starts_with("cpp_graph:GraphQuery.")) {
-      continue;
-    }
-    const auto begin = std::string("cpp_graph:GraphQuery.").size();
-    const auto end = line.find('(', begin);
-    const auto operation = line.substr(begin, end - begin);
-    REQUIRE(!operation.empty());
-    CHECK(header_text.find(operation) != std::string::npos);
-    ++listed;
+TEST_CASE("graph_query: executable differential operation inventory") {
+  Seeded s;
+  cidx::query::SqliteQueryReadAdapter read(s.db);
+  GraphQuery g(read, ":memory:");
+
+  const auto selected = cidx::query::Executor(read).run(
+      (cidx::query::start(cidx::query::symbol("USR::A")) |
+       cidx::query::out("calls") | cidx::query::select({"id"}))
+          .plan());
+  const auto actual =
+      g.edges_out(s.id_A, std::vector<std::string>{"calls"}, 10);
+  REQUIRE(selected.rows.size() == actual.size());
+  for (std::size_t i = 0; i < actual.size(); ++i) {
+    CHECK(actual[i].peer.id == std::get<int64_t>(selected.rows[i][0]));
   }
-  CHECK(listed > 0);
+
+  auto legacy = s.db.raw_db().prepare(
+      "SELECT id, dst_id FROM edge WHERE src_id = ? AND kind = ? "
+      "ORDER BY count DESC, kind, id LIMIT ?");
+  legacy.bind(1, s.id_A);
+  legacy.bind(2, static_cast<int64_t>(1));
+  legacy.bind(3, static_cast<int64_t>(10));
+  std::vector<std::pair<int64_t, int64_t>> legacy_rows;
+  while (legacy.step()) {
+    legacy_rows.emplace_back(legacy.col_int64(0), legacy.col_int64(1));
+  }
+  REQUIRE(legacy_rows.size() == actual.size());
+  for (std::size_t i = 0; i < actual.size(); ++i) {
+    CHECK(actual[i].edge_id == legacy_rows[i].first);
+    CHECK(actual[i].peer.id == legacy_rows[i].second);
+  }
+
+  const auto site_plan =
+      cidx::query::start(cidx::query::codebase()) |
+      cidx::query::view(cidx::query::View::Edge) |
+      cidx::query::nodes(cidx::query::eq("edge_id", s.eid_AB)) |
+      cidx::query::sites() |
+      cidx::query::select({"edge_id", "file_id", "line", "col"}) |
+      cidx::query::order_by({"file_id", "line", "col"}) | cidx::query::limit(1);
+  const auto planned_site = cidx::query::Executor(read).run(site_plan.plan());
+  const auto page = g.sites_page(s.eid_AB, 0, 1);
+  REQUIRE(planned_site.rows.size() == page.size());
+  if (!page.empty() && !planned_site.rows.empty()) {
+    CHECK(page.front().line == std::get<int64_t>(planned_site.rows.front()[2]));
+    CHECK(page.front().col == std::get<int64_t>(planned_site.rows.front()[3]));
+  }
 }
 
 TEST_CASE("graph_query: production inventory uses typed selection and legacy "
@@ -825,6 +851,13 @@ TEST_CASE("graph_query: sites_page() orders by resolved path, not raw "
   CHECK(spanning[0].line == std::get<int64_t>(selected.rows[1][3]));
   CHECK(spanning[1].line == std::get<int64_t>(selected.rows[2][3]));
   CHECK(spanning[1].line != 2);
+
+  const auto negative_offset = g.sites_page(edge_id, -1, 1);
+  REQUIRE(negative_offset.size() == 1);
+  CHECK(negative_offset.front().line == all.front().line);
+  CHECK(g.sites_page(edge_id, std::numeric_limits<int>::max(),
+                     std::numeric_limits<int>::max())
+            .empty());
 
   // Paging one-at-a-time across all 4 sites must reach every one exactly
   // once -- the delivery-order contract the UI layer's pagination depends

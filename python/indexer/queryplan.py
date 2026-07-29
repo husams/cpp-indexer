@@ -171,6 +171,7 @@ _FIELDS = {name: (filterable, is_string) for name, filterable, is_string in _GEN
 _FIELDS["name_length"] = (False, False)
 _FIELDS["multi_def"] = (True, False)
 _FIELDS["negative_multi_def"] = (False, False)
+_FIELDS["negative_count"] = (False, False)
 _FIELDS["is_instantiation"] = (True, False)
 # The compatibility adapter uses the persisted file id to narrow a symbol
 # stream after resolving a path substring through the read-only file catalog.
@@ -192,7 +193,7 @@ _TYPED_FIELDS = {
     # table itself to genuine completion independent of how many of those
     # edges carry sites (self_host_architecture_report.py's
     # `_run_all_site_pages`) needs the raw value back, not the hash.
-    "edge": {"id", "identity_key", "edge_id", "src_id", "dst_id", "kind", "count", "base_access", "is_virtual", "vtable_slot", "relation", "source", "target", "evidence", "status", "partial", "unknown"},
+    "edge": {"id", "identity_key", "edge_id", "src_id", "dst_id", "kind", "count", "negative_count", "base_access", "is_virtual", "vtable_slot", "relation", "source", "target", "evidence", "status", "partial", "unknown"},
     "site": {"id", "identity_key", "edge_id", "src_id", "dst_id", "file_id", "file", "line", "col", "relation", "source", "target", "evidence", "status", "partial", "unknown"},
     "evidence": {"id", "identity_key", "owner_id", "position", "default_txt", "default_type_id", "default_ref_id", "edge_id", "file_id", "line", "col", "conditional", "args_sig", "recv_src_kind", "recv_type_usr", "recv_decl_usr", "recv_type_id", "recv_decl_id", "recv_param_pos", "recv_type_is_value", "relation", "source", "target", "evidence", "status", "partial", "unknown"},
     "type_layer": {"id", "identity_key", "root_id", "path", "relation", "position", "depth", "status", "type_id", "spelling", "kind", "extent", "element_type", "decl_usr", "canonical_id", "is_const", "is_volatile", "is_restrict"},
@@ -1471,6 +1472,13 @@ def _col_expr(field_name: str, symbol_alias: str = "s",
         return f"{symbol_alias}.multi_def"
     if field_name == "negative_multi_def":
         return f"-{symbol_alias}.multi_def"
+    if field_name == "negative_count":
+        return (
+            "-(CASE WHEN COALESCE((SELECT value FROM meta "
+            "WHERE key = 'graph_resolved_at'), '') <> '' "
+            "THEN edge.count ELSE (SELECT COUNT(*) FROM edge_site "
+            "WHERE edge_id = edge.id) END)"
+        )
     if field_name == "is_instantiation":
         return f"{symbol_alias}.is_instantiation"
     if field_name == "spelling":
@@ -3173,6 +3181,13 @@ class Executor:
             return "(is_const + 2 * is_volatile + 4 * is_restrict)"
         if field_name == "edge_id" and view == "edge":
             return "id"
+        if field_name == "negative_count" and view == "edge":
+            return (
+                "-(CASE WHEN COALESCE((SELECT value FROM meta "
+                "WHERE key = 'graph_resolved_at'), '') <> '' "
+                "THEN edge.count ELSE (SELECT COUNT(*) FROM edge_site "
+                "WHERE edge_id = edge.id) END)"
+            )
         if field_name in ("src_id", "dst_id") and view == "site":
             # A site row is always scoped to exactly one edge (edge_site.edge_id
             # is a foreign key into edge.id); exposing the edge's own stable
@@ -3189,7 +3204,7 @@ class Executor:
             "call_argument": {"edge_id", "file_id", "line", "col", "position", "src_kind", "type_usr", "decl_usr", "callee_usr", "type_id", "decl_id", "callee_id", "type_is_value"},
             "evidence": {"edge_id", "file_id", "line", "col", "conditional", "args_sig", "recv_src_kind", "recv_type_usr", "recv_decl_usr", "recv_type_id", "recv_decl_id", "recv_param_pos", "recv_type_is_value"},
             "site": {"edge_id", "file_id", "line", "col"},
-            "edge": {"id", "src_id", "dst_id", "kind", "count", "base_access", "is_virtual", "vtable_slot"},
+            "edge": {"id", "src_id", "dst_id", "kind", "count", "negative_count", "base_access", "is_virtual", "vtable_slot"},
         "type": {"id", "type_key", "spelling", "kind", "is_const", "is_volatile", "is_restrict", "decl_usr", "decl_id", "canonical_id", "extent"},
         }
         return field_name if field_name in columns[view] else ""
