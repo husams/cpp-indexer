@@ -239,7 +239,38 @@ const graphState = (() => {
   return {mergeSlices, trackFreshness, computeGroups};
 })();
 
-if (typeof module !== 'undefined') module.exports = graphState;
+const overlayState = (() => {
+  const kinds = ['evidence', 'diff', 'effect', 'proof', 'counterexample'];
+  const bundleFor = (view) => view?.overlays || view?.metadata?.overlays || {};
+  const get = (view, kind) => {
+    const bundle = bundleFor(view);
+    return kinds.includes(kind) ? bundle[kind] || null : null;
+  };
+  const identityText = (identity = {}) => {
+    const source = identity.source || identity.location;
+    const provenance = source ? `${source.path || source.file || 'source'}:${source.line ?? ''}${source.column === undefined ? '' : `:${source.column}`}` : `limitation: ${identity.limitation || 'named limitation unavailable'}`;
+    return `result ${identity.resultId || identity.result_id || 'unknown'} · ${identity.evidenceId || identity.evidence_id || 'no evidence id'} · ${provenance}`;
+  };
+  const items = (overlay) => {
+    if (!overlay) return [];
+    if (overlay.kind === 'evidence') return [...(overlay.items || []), ...(overlay.path || []).map((step) => ({...step, id: `path:${step.sequence}`, label: step.label, state: step.relation || 'step'}))];
+    if (overlay.kind === 'diff') return overlay.entries || [];
+    if (overlay.kind === 'effect') return ['regions', 'callDependencies', 'assumptions', 'targetCoverage', 'unknownBoundaries'].flatMap((name) => overlay[name] || []);
+    if (overlay.kind === 'proof') return overlay.claims || [];
+    return overlay.steps || [];
+  };
+  const snapshot = (overlay, maxBytes = 16384) => {
+    const result = {version: 1, bounded: true, truncated: false, overlay: JSON.parse(JSON.stringify(overlay))};
+    const arrays = overlay?.kind === 'evidence' ? [result.overlay.items, result.overlay.path] : overlay?.kind === 'diff' ? [result.overlay.entries] : overlay?.kind === 'effect' ? [result.overlay.regions, result.overlay.callDependencies, result.overlay.assumptions, result.overlay.targetCoverage, result.overlay.unknownBoundaries] : overlay?.kind === 'proof' ? [result.overlay.claims] : [result.overlay.steps];
+    const bytes = () => new TextEncoder().encode(JSON.stringify(result)).byteLength;
+    for (const entries of arrays) while (bytes() > maxBytes && entries.length) { entries.pop(); result.truncated = true; }
+    if (bytes() > maxBytes) throw new Error('overlay cannot fit its bounded export snapshot');
+    return JSON.stringify(result);
+  };
+  return {kinds, get, identityText, items, snapshot};
+})();
+
+if (typeof module !== 'undefined') module.exports = {...graphState, overlayState};
 if (typeof document !== 'undefined') {
 (() => {
   const embedded = window.CIDX_GRAPH_VIEW || {nodes: [], edges: [], metadata: {}};
@@ -262,12 +293,18 @@ if (typeof document !== 'undefined') {
   const expandInButton = document.getElementById('expand-in');
   const accessible = document.getElementById('accessible-nodes');
   const liveControls = document.getElementById('live-controls');
+  const overlayPanel = document.getElementById('overlay-panel');
+  const overlayKind = document.getElementById('overlay-kind');
+  const overlayExport = document.getElementById('overlay-export');
+  let overlayStep = 0;
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const badge = (name, cls) => `<span class="badge ${cls || ''}">${esc(name)}</span>`;
   const statusBadges = (s = {}) => Object.entries(s)
     .filter(([k, v]) => v === true || v === 'partial' || v === 'unknown' || v === 'stale' || v === 'truncated' || v === 'external')
     .map(([k, v]) => badge(`${k}${v === true ? '' : `: ${v}`}`, k === 'external' ? 'external' : k))
     .join('');
+  const overlayCue = (state) => ({added: '+', removed: '−', changed: '↔', invalidated: '!', unchanged: '=', known: '●', unknown: '?', conditional: '◇', proved: '✓', open: '○', refuted: '×', assumed: '◇', inferred: '≈'}[state] || '·');
+  const renderOverlayItems = (items) => (items || []).map((item) => `<li><div class="overlay-item-title"><strong>${esc(item.label || item.name || `step ${item.index ?? ''}`)}</strong>${item.state || item.strength || item.relation ? `<span class="overlay-state">${esc(`${overlayCue(item.state || item.strength || item.relation)} ${item.state || item.strength || item.relation}`)}</span>` : ''}</div><code>${esc(overlayState.identityText(item.identity))}</code></li>`).join('');
   const sourceLocation = (item) => item?.location || (item?.file ? `${item.file}:${item.line ?? ''}:${item.col ?? ''}` : 'No location');
   const copyButton = (text) => liveToken && text
     ? `<button type="button" class="copy-location" data-copy="${esc(text)}">Copy location</button>`
@@ -303,6 +340,37 @@ if (typeof document !== 'undefined') {
       const continuation = view.metadata?.continuation;
       lastContinuationToken = continuation?.available && continuation?.token ? continuation.token : null;
       loadMoreButton.hidden = !lastContinuationToken;
+    }
+    renderOverlayPanel();
+  };
+  const renderOverlayPanel = () => {
+    if (!overlayPanel || !overlayKind) return;
+    const selectedKind = overlayKind.value || 'evidence';
+    const overlay = overlayState.get(view, selectedKind);
+    if (!overlay) {
+      overlayPanel.innerHTML = '<p class="muted">This result has no selected analysis overlay.</p>';
+      if (overlayExport) overlayExport.disabled = true;
+      return;
+    }
+    if (overlayExport) overlayExport.disabled = false;
+    const heading = `<p class="overlay-title"><strong>${esc(overlay.title || selectedKind)}</strong><span class="overlay-kind">${esc(overlay.kind || selectedKind)}</span></p>`;
+    if (selectedKind === 'evidence') {
+      overlayPanel.innerHTML = `${heading}<p class="muted">Canonical evidence and bounded explanation path.</p><h4>Evidence</h4><ul class="overlay-list">${renderOverlayItems(overlay.items)}</ul><h4>Path</h4><ol class="overlay-list">${renderOverlayItems(overlay.path)}</ol>`;
+    } else if (selectedKind === 'diff') {
+      const oldId = `${overlay.oldWorkspace?.version || 'unknown'} / ${overlay.oldFactSet?.version || 'unknown'}`;
+      const newId = `${overlay.newWorkspace?.version || 'unknown'} / ${overlay.newFactSet?.version || 'unknown'}`;
+      overlayPanel.innerHTML = `${heading}<p><code>old ${esc(oldId)}</code><br><code>new ${esc(newId)}</code></p><ul class="overlay-list">${renderOverlayItems(overlay.entries)}</ul>`;
+    } else if (selectedKind === 'effect') {
+      const section = (label, entries) => `<h4>${esc(label)}</h4><ul class="overlay-list">${renderOverlayItems(entries) || '<li class="muted">None declared.</li>'}</ul>`;
+      overlayPanel.innerHTML = `${heading}<p>${esc(overlay.summary || 'No effect summary supplied.')}</p>${section('Abstract regions', overlay.regions)}${section('Call dependencies', overlay.callDependencies)}${section('Assumptions', overlay.assumptions)}${section('Target coverage', overlay.targetCoverage)}${section('Unknown boundaries', overlay.unknownBoundaries)}`;
+    } else if (selectedKind === 'proof') {
+      overlayPanel.innerHTML = `${heading}<p class="muted">Trusted models: ${esc((overlay.trustedModels || []).join(', ') || 'none')}</p><ul class="overlay-list">${renderOverlayItems(overlay.claims)}</ul><p class="muted">Assumptions: ${esc((overlay.assumptions || []).join('; ') || 'none')}</p>`;
+    } else {
+      const steps = overlay.steps || [];
+      const boundedStep = steps[Math.min(overlayStep, Math.max(steps.length - 1, 0))];
+      overlayPanel.innerHTML = `${heading}<p><strong>${esc(overlay.specification || 'specification')}</strong>: ${esc(overlay.violation || 'safety violation')}</p><div class="trace-controls"><button id="overlay-prev" type="button" ${overlayStep === 0 ? 'disabled' : ''}>Previous</button><span>Step ${boundedStep ? boundedStep.index + 1 : 0} / ${steps.length}</span><button id="overlay-next" type="button" ${overlayStep >= steps.length - 1 ? 'disabled' : ''}>Next</button></div>${boundedStep ? `<dl class="trace-state">${(boundedStep.state || []).map((binding) => `<dt>${esc(binding.name)}</dt><dd><code>${esc(binding.value)}</code></dd>`).join('')}</dl><p class="muted">Action: ${esc(boundedStep.action || 'state observation')}</p><code>${esc(overlayState.identityText(boundedStep.identity))}</code>` : '<p class="muted">No bounded trace steps.</p>'}`;
+      overlayPanel.querySelector('#overlay-prev')?.addEventListener('click', () => { overlayStep -= 1; renderOverlayPanel(); });
+      overlayPanel.querySelector('#overlay-next')?.addEventListener('click', () => { overlayStep += 1; renderOverlayPanel(); });
     }
   };
   const showSnapshot = () => {
@@ -734,6 +802,22 @@ if (typeof document !== 'undefined') {
     document.getElementById('save').onclick = () => { localStorage.setItem(viewKey, JSON.stringify({positions: cy.nodes().reduce((p, n) => ({...p, [n.id()]: n.position()}), {}), zoom: cy.zoom(), pan: cy.pan()})); };
     document.getElementById('restore').onclick = () => { try { const saved = JSON.parse(localStorage.getItem(viewKey) || 'null'); if (!saved) return; cy.nodes().positions((n) => saved.positions?.[n.id()] || n.position()); if (saved.zoom) cy.zoom(saved.zoom); if (saved.pan) cy.pan(saved.pan); } catch (_error) {} };
     document.getElementById('search').oninput = (event) => { const query = event.target.value.toLowerCase(); cy.nodes().forEach((n) => n.toggleClass('filtered', query && !String(n.data('label')).toLowerCase().includes(query))); };
+    if (overlayKind) overlayKind.onchange = () => { overlayStep = 0; renderOverlayPanel(); };
+    if (overlayExport) overlayExport.onclick = () => {
+      const overlay = overlayState.get(view, overlayKind?.value || 'evidence');
+      if (!overlay) return;
+      try {
+        const bundle = view.overlays || view.metadata?.overlays || {};
+        const payload = overlayState.snapshot(overlay, Number(bundle.exportMaxBytes) || 16384);
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(new Blob([payload], {type: 'application/json'}));
+        link.download = `cidx-${overlay.kind || 'overlay'}-snapshot.json`;
+        link.click();
+        URL.revokeObjectURL(link.href);
+      } catch (error) {
+        reportError(error);
+      }
+    };
     if (!liveToken) return;
     if (expandOutButton) expandOutButton.onclick = () => expandDirection('out');
     if (expandInButton) expandInButton.onclick = () => expandDirection('in');

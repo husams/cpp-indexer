@@ -185,6 +185,70 @@
         "remaining": { "$ref": "#/$defs/remainingUsage" }
       }
     },
+    "overlayIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resultId"],
+      "properties": {
+        "resultId": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "evidenceId": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "source": { "$ref": "#/$defs/location" },
+        "limitation": { "type": "string", "minLength": 1, "maxLength": 160 }
+      },
+      "anyOf": [{ "required": ["source"] }, { "required": ["limitation"] }]
+    },
+    "overlayItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "identity"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "label": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "strength": { "enum": ["direct", "bounded", "inferred", "assumed"] },
+        "state": { "enum": ["added", "removed", "changed", "invalidated", "unchanged", "known", "unknown", "conditional", "proved", "open", "refuted", "assumed", "inferred"] },
+        "parentId": { "type": "string", "maxLength": 120 },
+        "oldRef": { "$ref": "#/$defs/portableReference" },
+        "newRef": { "$ref": "#/$defs/portableReference" },
+        "identity": { "$ref": "#/$defs/overlayIdentity" }
+      }
+    },
+    "evidenceOverlay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "title", "items", "path"],
+      "properties": {
+        "kind": { "const": "evidence" }, "title": { "type": "string", "maxLength": 160 },
+        "items": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/overlayItem" } },
+        "path": { "type": "array", "maxItems": 128, "items": { "type": "object", "additionalProperties": false, "required": ["sequence", "label", "identity"], "properties": { "sequence": { "type": "integer", "minimum": 0 }, "label": { "type": "string", "maxLength": 160 }, "relation": { "type": "string", "maxLength": 120 }, "identity": { "$ref": "#/$defs/overlayIdentity" } } } }
+      }
+    },
+    "diffOverlay": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "title", "oldWorkspace", "newWorkspace", "oldFactSet", "newFactSet", "entries"],
+      "properties": {
+        "kind": { "const": "diff" }, "title": { "type": "string", "maxLength": 160 },
+        "oldWorkspace": { "$ref": "#/$defs/identity" }, "newWorkspace": { "$ref": "#/$defs/identity" }, "oldFactSet": { "$ref": "#/$defs/identity" }, "newFactSet": { "$ref": "#/$defs/identity" },
+        "entries": { "type": "array", "maxItems": 256, "items": { "allOf": [{ "$ref": "#/$defs/overlayItem" }, { "type": "object", "required": ["state"], "properties": { "state": { "enum": ["added", "removed", "changed", "invalidated", "unchanged"] }, "oldRef": { "$ref": "#/$defs/portableReference" }, "newRef": { "$ref": "#/$defs/portableReference" } } }] } }
+      }
+    },
+    "effectOverlay": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "title", "summary", "regions", "callDependencies", "assumptions", "targetCoverage", "unknownBoundaries"],
+      "properties": {
+        "kind": { "const": "effect" }, "title": { "type": "string", "maxLength": 160 }, "summary": { "type": "string", "maxLength": 160 },
+        "regions": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/overlayItem" } }, "callDependencies": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/overlayItem" } }, "assumptions": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/overlayItem" } }, "targetCoverage": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/overlayItem" } }, "unknownBoundaries": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/overlayItem" } }
+      }
+    },
+    "proofOverlay": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "title", "claims", "trustedModels", "assumptions"],
+      "properties": { "kind": { "const": "proof" }, "title": { "type": "string", "maxLength": 160 }, "claims": { "type": "array", "maxItems": 256, "items": { "allOf": [{ "$ref": "#/$defs/overlayItem" }, { "type": "object", "required": ["state"], "properties": { "parentId": { "type": "string", "maxLength": 120 }, "state": { "enum": ["proved", "open", "refuted", "conditional", "assumed", "inferred"] } } }] } }, "trustedModels": { "type": "array", "maxItems": 64, "items": { "type": "string", "maxLength": 160 } }, "assumptions": { "type": "array", "maxItems": 64, "items": { "type": "string", "maxLength": 160 } } }
+    },
+    "counterexampleOverlay": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "title", "specification", "violation", "steps"],
+      "properties": { "kind": { "const": "counterexample" }, "title": { "type": "string", "maxLength": 160 }, "specification": { "type": "string", "maxLength": 160 }, "violation": { "type": "string", "maxLength": 160 }, "steps": { "type": "array", "minItems": 1, "maxItems": 256, "items": { "type": "object", "additionalProperties": false, "required": ["index", "state", "identity"], "properties": { "index": { "type": "integer", "minimum": 0 }, "action": { "type": "string", "maxLength": 160 }, "state": { "type": "array", "maxItems": 16, "items": { "type": "object", "additionalProperties": false, "required": ["name", "value"], "properties": { "name": { "type": "string", "maxLength": 80 }, "value": { "type": "string", "maxLength": 160 } } } }, "identity": { "$ref": "#/$defs/overlayIdentity" } } } } }
+    },
+    "overlayBundle": {
+      "type": "object", "additionalProperties": false, "required": ["exportMaxBytes"],
+      "properties": { "evidence": { "$ref": "#/$defs/evidenceOverlay" }, "diff": { "$ref": "#/$defs/diffOverlay" }, "effect": { "$ref": "#/$defs/effectOverlay" }, "proof": { "$ref": "#/$defs/proofOverlay" }, "counterexample": { "$ref": "#/$defs/counterexampleOverlay" }, "exportMaxBytes": { "type": "integer", "minimum": 512, "maximum": 1000000 } }
+    },
     "presentation": {
       "type": "object",
       "additionalProperties": false,
@@ -270,6 +334,7 @@
         "evidence": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/evidence" } },
         "capabilities": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/capability" } },
         "diagnostics": { "type": "array", "maxItems": 8, "items": { "type": "object", "additionalProperties": false, "required": ["code", "message", "severity"], "properties": { "code": { "type": "string", "enum": ["usage", "invalid_input", "stale_input", "timeout", "backend_error", "policy_refuted", "unknown", "truncated_budget", "missing_evidence"] }, "message": { "type": "string", "maxLength": 160 }, "severity": { "type": "string", "enum": ["info", "warning", "error"] } } } },
+        "overlays": { "$ref": "#/$defs/overlayBundle" },
         "continuation": { "$ref": "#/$defs/continuation" }
       }
     }
