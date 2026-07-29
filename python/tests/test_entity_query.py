@@ -21,6 +21,7 @@ from indexer.query import GraphQuery  # noqa: E402
 from indexer.clang import ast as A  # noqa: E402
 from indexer.clang import util as U  # noqa: E402
 from indexer.entity_graph import EntityGraph, EntityKind, EdgeKind  # noqa: E402
+from indexer.queryplan import eq, plan_to_dict  # noqa: E402
 
 try:
     from indexer.entity_rollup import materialize_entity_edges
@@ -141,6 +142,7 @@ def test_of_kind_filter(eg):
 
 def test_named_filter(eg):
     assert eg.query("Shape").derived().named("ircl").names() == ["Circle"]
+    assert eg.query("Shape").derived().named("CIRCL").names() == ["Circle"]
 
 
 def test_exclude_filter(eg):
@@ -158,6 +160,29 @@ def test_multi_seed_union(eg):
 def test_node_query_entrypoint(eg):
     circle = eg.find("Circle")[0]
     assert circle.query().bases().names() == ["Shape"]
+
+
+def test_queryplan_adapter_exposes_the_legacy_query_as_a_canonical_plan(eg):
+    """The public EntityQuery surface lowers each declarative step to CXQ."""
+    query = eg.query("Shape").derived().where(eq("name", "Circle"))
+
+    assert query.names() == ["Circle"]
+    assert plan_to_dict(query.to_plan()) == {
+        "cxq": 1,
+        "source": {"kind": "entity", "ref": "c:@S@Shape"},
+        "stages": [
+            {
+                "op": "in",
+                "relation": "entity.generalizes",
+                "min_depth": 1,
+                "max_depth": 1,
+            },
+            {
+                "op": "where",
+                "pred": {"op": "eq", "field": "name", "value": "Circle"},
+            },
+        ],
+    }
 
 
 def test_edges_terminal_carries_step_edges(eg):
