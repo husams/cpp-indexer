@@ -3,8 +3,8 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import Ajv2020 from "ajv/dist/2020.js";
 import { toCytoscapeElements } from "../src/cytoscape-adapter.ts";
-import { boundedFixture, canonicalFixture, oversizedFixture } from "../src/fixtures.ts";
-import { applyBudget, assertPortableReference, canonicalSemanticContent, catalogRelationNames, createSavedView, stablePortableId, toResultEnvelope, usageOf, utf8ByteLength, validateGraphView, visualSemantics, type Budget } from "../src/graph-view.ts";
+import { boundedFixture, canonicalFixture, oversizedFixture, overlayFixture } from "../src/fixtures.ts";
+import { applyBudget, assertPortableReference, canonicalSemanticContent, catalogRelationNames, createSavedView, exportOverlaySnapshot, stablePortableId, toResultEnvelope, usageOf, utf8ByteLength, validateGraphView, visualSemantics, type Budget } from "../src/graph-view.ts";
 import { CORE_CATALOG } from "../src/generated/catalog.ts";
 
 const smallBudget: Budget = { maxNodes: 2, maxEdges: 1, maxGroups: 0, maxLabelChars: 400, maxEvidenceRefs: 4, maxSites: 4, maxSiteBytes: 512 };
@@ -218,4 +218,34 @@ test("saved presentation state is separate from query/result identity", () => {
   assert.equal(saved.queryIdentity, result.queryIdentity);
   assert.notEqual(saved.savedViewId, result.resultId);
   assert.equal(saved.presentation.layout, "preset");
+});
+
+test("analysis overlays preserve canonical provenance and bounded non-colour states", () => {
+  const schema = JSON.parse(readFileSync(new URL("../../schemas/graph-view.schema.json", import.meta.url), "utf8"));
+  const sharedSchema = JSON.parse(readFileSync(new URL("../../spec/contracts/result-envelope.schema.json", import.meta.url), "utf8"));
+  const ajv = new Ajv2020({ allErrors: true, strict: false });
+  ajv.addSchema(sharedSchema, "https://cidx.dev/schemas/result-envelope/v1");
+  const validator = ajv.compile(schema);
+  for (const kind of ["evidence", "diff", "effect", "proof", "counterexample"] as const) {
+    const result = overlayFixture(kind);
+    validateGraphView(result);
+    const envelope = toResultEnvelope(result);
+    assert.equal(validator(envelope), true, `${kind}: ${JSON.stringify(validator.errors)}`);
+    const overlay = result.overlays?.[kind];
+    assert.ok(overlay);
+    const snapshot = exportOverlaySnapshot(overlay, result.overlays!.exportMaxBytes);
+    assert.ok(utf8ByteLength(snapshot) <= result.overlays!.exportMaxBytes);
+    assert.match(snapshot, /"bounded":true/);
+  }
+});
+
+test("overlay identities reject frontend-invented or incompatible provenance", () => {
+  const result = overlayFixture("proof");
+  const invalid = structuredClone(result);
+  invalid.overlays!.proof!.claims[0]!.identity.resultId = "other-result";
+  assert.throws(() => validateGraphView(invalid), /canonical result/);
+  const missingProvenance = structuredClone(result);
+  delete missingProvenance.overlays!.proof!.claims[0]!.identity.source;
+  delete missingProvenance.overlays!.proof!.claims[0]!.identity.limitation;
+  assert.throws(() => validateGraphView(missingProvenance), /source provenance/);
 });
