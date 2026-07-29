@@ -1,0 +1,21 @@
+{
+  "format": "cidx.explorer-qualification.v1",
+  "frontend": {"package": "cidx-graph-explorer", "version": "0.1.0"},
+  "cytoscape": {"version": "3.31.2", "asset_sha256": "a9e75b12b6dab7b7f5b428636070b38c59eba2a4a7d0a3af36b2afdd67b13499"},
+  "catalog": {"path": "catalogs/core.json", "version": 1},
+  "schema": {"graph_view": "cidx.graph-view.v1", "result_protocol": "spec/contracts/result-protocol.json"},
+  "workspaces": [
+    {"name": "cpp-indexer", "root": ".", "index": "index.db", "corpus": "manifests"},
+    {"name": "banking", "root": "examples/packages/banking", "fixture": "fixture/workspace.json", "lock": "cidx.lock.json"}
+  ],
+  "scenarios": [
+    "symbol", "entity", "include", "type", "high-degree", "multi-repository",
+    "stale", "partial", "external", "proof", "trace"
+  ],
+  "evidence": {
+    "versions_are_pinned": true,
+    "offline_export": "web/scripts/offline-smoke.mjs",
+    "live_loopback": "tests/ui_server_test.cpp",
+    "browser_budgets": "web/performance-budget.json"
+  }
+}

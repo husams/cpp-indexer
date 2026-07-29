@@ -15,3 +15,23 @@ not load assets or data from a network at runtime. A live `cidx ui open` session
 fetches only authenticated, bounded GraphView slices from its loopback `/api/graph`
 endpoint when a user expands a selected node; it never contacts an external
 origin.
+
+## M4 qualification gates
+
+`npm run check` verifies the pinned offline asset, dependency inventory, browser
+budgets, DOM-level regressions, and the Playwright `file://` smoke test. The
+published limits are in `performance-budget.json`; an incoming view that
+exceeds them is refused before Cytoscape layout starts. The
+`qualification-manifest.json` records the frontend, Cytoscape, catalog, schema,
+workspace, and corpus identifiers used by the M4 qualification.
+
+The live server binds to IPv4 loopback, requires its ephemeral session token,
+rejects a non-matching Origin, caps request/response sizes, times out incomplete
+HTTP headers, and emits no-store plus CSP, referrer, MIME, permissions, and
+cross-origin policy headers. Source actions copy a bounded, redacted location;
+they never open a user-controlled path or URL.
+
+The graph canvas has a keyboard/screen-reader text and table alternative for
+nodes, edges, bounded evidence, paths, and result status. Statuses include a
+glyph and explanation in addition to colour, and reduced-motion preferences
+disable camera animation.

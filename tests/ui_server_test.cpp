@@ -124,6 +124,7 @@ int parse_int(std::string_view text) {
 
 struct HttpResponse {
   int status = 0;
+  std::string headers;
   std::string body;
 };
 
@@ -167,6 +168,7 @@ HttpResponse http_get(int port, const std::string &target,
   }
   const std::size_t body_start = response.find("\r\n\r\n");
   if (body_start != std::string::npos) {
+    result.headers = response.substr(0, body_start);
     result.body = response.substr(body_start + 4);
   }
   return result;
@@ -286,20 +288,21 @@ struct RunningServer {
   ui::GraphProvider graph_provider;
   ui::GraphProvider search_provider;
   ui::GraphProvider evidence_provider;
+  ui::ServerOptions options{.port = 0, .launch_browser = false};
   std::thread thread;
   int port = 0;
   std::string token;
 
   explicit RunningServer(ui::GraphProvider graph, ui::GraphProvider search = {},
-                         ui::GraphProvider evidence = {})
+                         ui::GraphProvider evidence = {},
+                         ui::ServerOptions server_options = {})
       : graph_provider(std::move(graph)), search_provider(std::move(search)),
-        evidence_provider(std::move(evidence)) {
+        evidence_provider(std::move(evidence)), options(server_options) {
     thread = std::thread([this] {
       ui::serve_live(ui::render_html(json_out::Value::obj({}),
                                      ui::RenderMode::LoopbackLive),
                      graph_provider, search_provider, evidence_provider,
-                     ui::ServerOptions{.port = 0, .launch_browser = false}, out,
-                     err);
+                     options, out, err);
     });
     auto future = url_promise.get_future();
     REQUIRE(future.wait_for(std::chrono::seconds(5)) ==
@@ -1587,6 +1590,39 @@ TEST_CASE("Live explorer rejects a request from an unapproved Origin") {
   const auto cross_origin = http_get(server.port, "/?token=" + server.token,
                                      std::string("http://evil.example"));
   CHECK(cross_origin.status == 403);
+}
+
+TEST_CASE("Live explorer emits restrictive security headers") {
+  Fixture fixture;
+  RunningServer server(graph_provider_for(fixture.db));
+  const auto response = http_get(server.port, "/?token=" + server.token);
+  CHECK(response.status == 200);
+  CHECK(response.headers.find("X-Content-Type-Options: nosniff") !=
+        std::string::npos);
+  CHECK(response.headers.find("Referrer-Policy: no-referrer") !=
+        std::string::npos);
+  CHECK(response.headers.find("frame-ancestors 'none'") != std::string::npos);
+  CHECK(response.headers.find("style-src 'nonce-cidx-static'") !=
+        std::string::npos);
+}
+
+TEST_CASE("Live explorer bounds transport requests and provider responses") {
+  const ui::GraphProvider oversized_provider = [](std::string_view,
+                                                  const ui::CancelToken &) {
+    return std::optional<std::string>(std::string(1024, 'x'));
+  };
+  ui::ServerOptions options{.port = 0,
+                            .launch_browser = false,
+                            .max_request_bytes = 256,
+                            .max_response_bytes = 128};
+  RunningServer server(oversized_provider, {}, {}, options);
+  const auto oversized_response =
+      http_get(server.port, "/api/graph?token=" + server.token);
+  CHECK(oversized_response.status == 413);
+  const auto oversized_request =
+      http_get(server.port,
+               "/?token=" + server.token + "&padding=" + std::string(300, 'x'));
+  CHECK(oversized_request.status == 400);
 }
 
 TEST_CASE(

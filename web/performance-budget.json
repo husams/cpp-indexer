@@ -1,0 +1,21 @@
+{
+  "format": "cidx.browser-budgets.v1",
+  "browser": {
+    "max_nodes": 2500,
+    "max_edges": 5000,
+    "max_sites": 10000,
+    "max_label_chars": 250000,
+    "max_json_bytes": 8388608
+  },
+  "assets": {
+    "app.js": 131072,
+    "styles.css": 32768,
+    "vendor/cytoscape.min.js": 524288
+  },
+  "rationale": {
+    "load": "Keep the self-contained explorer under a 512 KiB Cytoscape asset plus small application shell.",
+    "layout": "Refuse before layout when a slice exceeds 2500 nodes or 5000 edges.",
+    "evidence": "Keep source-site rendering bounded even when a relation has high degree.",
+    "interaction": "Reduced-motion users receive zero-duration camera transitions."
+  }
+}

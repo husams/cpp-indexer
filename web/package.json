@@ -7,13 +7,16 @@
     "build": "node scripts/build-assets.mjs",
     "check-assets": "node scripts/build-assets.mjs --check",
     "test": "node graph_state_test.js && node grouping_dom_test.js && node freshness_monitor_test.js && node continuation_history_test.js && node filter_preservation_test.js && node evidence_pagination_test.js && node continuation_leak_test.js && node depth_direction_leak_test.js && node overlay_state_test.js",
+    "check-budget": "node scripts/check-performance-budget.mjs",
+    "qualify": "node scripts/qualify.mjs",
+    "test": "node graph_state_test.js && node grouping_dom_test.js && node freshness_monitor_test.js && node continuation_history_test.js && node filter_preservation_test.js && node evidence_pagination_test.js && node continuation_leak_test.js && node depth_direction_leak_test.js && node overlay_state_test.js && node security_accessibility_test.js",
     "smoke": "node scripts/offline-smoke.mjs",
-    "check": "npm run check-assets && npm run test && npm run smoke"
+    "check": "npm run check-assets && npm run check-budget && npm run test && npm run smoke && npm run qualify"
   },
   "dependencies": {
     "cytoscape": "3.31.2"
   },
   "devDependencies": {
-    "playwright": "1.55.0"
+    "playwright": "1.55.1"
   }
 }

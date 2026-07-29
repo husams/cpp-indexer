@@ -1,11 +1,13 @@
 #include "ui/server.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cctype>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -60,19 +62,33 @@ std::string token() {
   return out.str();
 }
 
+bool constant_time_equal(std::string_view left, std::string_view right) {
+  const std::size_t length = std::max(left.size(), right.size());
+  auto difference = static_cast<std::uint8_t>(left.size() ^ right.size());
+  for (std::size_t index = 0; index < length; ++index) {
+    const auto left_byte =
+        index < left.size() ? static_cast<unsigned char>(left[index]) : 0U;
+    const auto right_byte =
+        index < right.size() ? static_cast<unsigned char>(right[index]) : 0U;
+    difference =
+        static_cast<std::uint8_t>(difference | (left_byte ^ right_byte));
+  }
+  return difference == 0;
+}
+
 bool has_token(std::string_view target, std::string_view expected) {
   const std::size_t question = target.find('?');
   if (question == std::string_view::npos) {
     return false;
   }
-  const std::string expected_field = "token=" + std::string(expected);
   std::size_t start = question + 1;
   while (start <= target.size()) {
     const std::size_t end = target.find('&', start);
     const std::string_view field = target.substr(
         start,
         end == std::string_view::npos ? target.size() - start : end - start);
-    if (field == expected_field) {
+    if (field.starts_with("token=") &&
+        constant_time_equal(field.substr(6), expected)) {
       return true;
     }
     if (end == std::string_view::npos) {
@@ -169,14 +185,65 @@ bool send_response(int fd, int code, std::string_view type,
     reason = "Not Found";
   } else if (code == 503) {
     reason = "Service Unavailable";
+  } else if (code == 413) {
+    reason = "Payload Too Large";
   }
   std::ostringstream head;
   head << "HTTP/1.1 " << code << " " << reason << "\r\n"
        << "Content-Type: " << type << "\r\n"
        << "Content-Length: " << body.size() << "\r\n"
-       << "Cache-Control: no-store\r\nConnection: close\r\n\r\n";
+       << "Cache-Control: no-store\r\n"
+       << "X-Content-Type-Options: nosniff\r\n"
+       << "Referrer-Policy: no-referrer\r\n"
+       << "Permissions-Policy: camera=(), geolocation=(), microphone=()\r\n"
+       << "Cross-Origin-Resource-Policy: same-origin\r\n"
+       << "Content-Security-Policy: default-src 'none'; "
+          "script-src 'nonce-cidx-static'; style-src 'nonce-cidx-static'; "
+          "connect-src 'self'; img-src data:; base-uri 'none'; "
+          "form-action 'none'; frame-ancestors 'none'\r\n"
+       << "Connection: close\r\n\r\n";
   const std::string header = head.str();
   return send_all(fd, header) && send_all(fd, body);
+}
+
+bool send_bounded_response(int fd, int code, std::string_view type,
+                           std::string_view body, std::size_t max_body_bytes) {
+  if (body.size() > max_body_bytes) {
+    return send_response(fd, 413, "text/plain; charset=utf-8",
+                         "response exceeds the local explorer limit\n");
+  }
+  return send_response(fd, code, type, body);
+}
+
+bool read_request(int client, std::string &request, std::size_t max_bytes,
+                  int timeout_ms) {
+  if (max_bytes == 0) {
+    return false;
+  }
+  request.clear();
+  request.reserve(std::min<std::size_t>(max_bytes, 4096));
+  const int wait_ms = std::max(0, timeout_ms);
+  std::array<char, 4096> buffer{};
+  while (!request.contains("\r\n\r\n")) {
+    if (request.size() == max_bytes) {
+      return false;
+    }
+    pollfd ready{};
+    ready.fd = client;
+    ready.events = POLLIN;
+    const int polled = ::poll(&ready, 1, wait_ms);
+    if (polled <= 0 || (ready.revents & (POLLERR | POLLNVAL)) != 0) {
+      return false;
+    }
+    const std::size_t capacity =
+        std::min(buffer.size(), max_bytes - request.size());
+    const ssize_t received = ::recv(client, buffer.data(), capacity, 0);
+    if (received <= 0) {
+      return false;
+    }
+    request.append(buffer.data(), static_cast<std::size_t>(received));
+  }
+  return true;
 }
 
 struct StaticGraphProvider {
@@ -269,7 +336,8 @@ void run_provider_route(
     int client, GraphProvider provider, const std::string &target,
     std::string_view empty_message, std::atomic<bool> &shutting_down,
     const std::shared_ptr<std::atomic<bool>> &route_finished,
-    const std::shared_ptr<std::atomic<int>> &active_work) {
+    const std::shared_ptr<std::atomic<int>> &active_work,
+    std::size_t max_response_bytes) {
   // This whole body runs as a std::thread entry function (see serve_live()'s
   // connection_threads): an uncaught exception anywhere in it -- even one as
   // unlikely as `target`'s copy-construction into the worker lambda's
@@ -343,7 +411,8 @@ void run_provider_route(
     }
     worker.join();
     if (*value) {
-      (void)send_response(client, 200, "application/json", **value);
+      (void)send_bounded_response(client, 200, "application/json", **value,
+                                  max_response_bytes);
     } else {
       (void)send_response(client, 400, "text/plain", empty_message);
     }
@@ -444,7 +513,6 @@ int serve_live(const std::string &html, const GraphProvider &graph_provider,
       return true;
     });
   };
-  std::array<char, 8192> buffer{};
   bool shutdown_requested = false;
   while (!shutdown_requested) {
     reap_finished_connections();
@@ -455,14 +523,19 @@ int serve_live(const std::string &html, const GraphProvider &graph_provider,
       }
       break;
     }
-    const ssize_t read = ::recv(client, buffer.data(), buffer.size() - 1, 0);
-    const std::string request =
-        read > 0 ? std::string(buffer.data(), static_cast<std::size_t>(read))
-                 : std::string();
+    std::string request;
+    if (!read_request(client, request, options.max_request_bytes,
+                      options.request_timeout_ms)) {
+      (void)send_bounded_response(client, 400, "text/plain; charset=utf-8",
+                                  "bad request\n", options.max_response_bytes);
+      ::close(client);
+      continue;
+    }
     const std::size_t line_end = request.find("\r\n");
     if (line_end == std::string::npos || line_end > 4096 ||
         !request.starts_with("GET ")) {
-      (void)send_response(client, 400, "text/plain", "bad request\n");
+      (void)send_bounded_response(client, 400, "text/plain; charset=utf-8",
+                                  "bad request\n", options.max_response_bytes);
       ::close(client);
       continue;
     }
@@ -470,25 +543,29 @@ int serve_live(const std::string &html, const GraphProvider &graph_provider,
     const std::string_view target(
         request.data() + 4,
         target_end == std::string::npos ? 0 : target_end - 4);
-    if (target_end == std::string::npos || !has_token(target, access_token)) {
-      (void)send_response(client, 404, "text/plain", "not found\n");
+    if (target_end == std::string::npos || !target.starts_with("/") ||
+        !has_token(target, access_token)) {
+      (void)send_bounded_response(client, 404, "text/plain; charset=utf-8",
+                                  "not found\n", options.max_response_bytes);
       ::close(client);
       continue;
     }
     if (const auto origin = find_header(request, "Origin");
         origin && *origin != expected_origin) {
-      (void)send_response(client, 403, "text/plain",
-                          "forbidden: origin mismatch\n");
+      (void)send_bounded_response(client, 403, "text/plain; charset=utf-8",
+                                  "forbidden: origin mismatch\n",
+                                  options.max_response_bytes);
       ::close(client);
       continue;
     }
     if (target.starts_with("/?") || target.starts_with("/index.html?")) {
-      (void)send_response(client, 200, "text/html; charset=utf-8", html);
+      (void)send_bounded_response(client, 200, "text/html; charset=utf-8", html,
+                                  options.max_response_bytes);
       ::close(client);
     } else if (target.starts_with("/api/graph?")) {
-      // `target` is a view into `buffer`, which the NEXT loop iteration
-      // reuses for a different connection's bytes -- copy it before handing
-      // off to a thread that will outlive this iteration.
+      // `target` is a view into `request`, which this accept-loop iteration
+      // owns -- copy it before handing the route off to a thread that will
+      // outlive this iteration.
       // `graph_provider` (this function's own reference parameter) is passed
       // BY VALUE here -- std::thread copies it into its own storage right
       // now, on THIS (accept-loop) thread, while it is still definitely
@@ -498,54 +575,62 @@ int serve_live(const std::string &html, const GraphProvider &graph_provider,
       // chases a reference back to state this function -- or its caller --
       // may have already destroyed.
       if (!try_admit(*active_work, max_concurrent)) {
-        (void)send_response(client, 503, "text/plain",
-                            "server busy: too many concurrent requests\n");
+        (void)send_bounded_response(
+            client, 503, "text/plain; charset=utf-8",
+            "server busy: too many concurrent requests\n",
+            options.max_response_bytes);
         ::close(client);
       } else {
         auto finished = std::make_shared<std::atomic<bool>>(false);
         connection_threads.push_back(ConnectionThread{
-            .thread =
-                std::thread(run_provider_route, client, graph_provider,
-                            std::string(target), "bad graph request\n",
-                            std::ref(shutting_down), finished, active_work),
+            .thread = std::thread(run_provider_route, client, graph_provider,
+                                  std::string(target), "bad graph request\n",
+                                  std::ref(shutting_down), finished,
+                                  active_work, options.max_response_bytes),
             .finished = finished});
       }
     } else if (target.starts_with("/api/search?")) {
       if (!try_admit(*active_work, max_concurrent)) {
-        (void)send_response(client, 503, "text/plain",
-                            "server busy: too many concurrent requests\n");
+        (void)send_bounded_response(
+            client, 503, "text/plain; charset=utf-8",
+            "server busy: too many concurrent requests\n",
+            options.max_response_bytes);
         ::close(client);
       } else {
         auto finished = std::make_shared<std::atomic<bool>>(false);
         connection_threads.push_back(ConnectionThread{
-            .thread =
-                std::thread(run_provider_route, client, search_provider,
-                            std::string(target), "bad search request\n",
-                            std::ref(shutting_down), finished, active_work),
+            .thread = std::thread(run_provider_route, client, search_provider,
+                                  std::string(target), "bad search request\n",
+                                  std::ref(shutting_down), finished,
+                                  active_work, options.max_response_bytes),
             .finished = finished});
       }
     } else if (target.starts_with("/api/evidence?")) {
       if (!try_admit(*active_work, max_concurrent)) {
-        (void)send_response(client, 503, "text/plain",
-                            "server busy: too many concurrent requests\n");
+        (void)send_bounded_response(
+            client, 503, "text/plain; charset=utf-8",
+            "server busy: too many concurrent requests\n",
+            options.max_response_bytes);
         ::close(client);
       } else {
         auto finished = std::make_shared<std::atomic<bool>>(false);
         connection_threads.push_back(ConnectionThread{
-            .thread =
-                std::thread(run_provider_route, client, evidence_provider,
-                            std::string(target), "bad evidence request\n",
-                            std::ref(shutting_down), finished, active_work),
+            .thread = std::thread(run_provider_route, client, evidence_provider,
+                                  std::string(target), "bad evidence request\n",
+                                  std::ref(shutting_down), finished,
+                                  active_work, options.max_response_bytes),
             .finished = finished});
       }
     } else if (target.starts_with("/api/shutdown?")) {
-      (void)send_response(client, 200, "application/json",
-                          "{\"stopped\": true}\n");
+      (void)send_bounded_response(client, 200, "application/json",
+                                  "{\"stopped\": true}\n",
+                                  options.max_response_bytes);
       ::close(client);
       shutting_down.store(true, std::memory_order_release);
       shutdown_requested = true;
     } else {
-      (void)send_response(client, 404, "text/plain", "not found\n");
+      (void)send_bounded_response(client, 404, "text/plain; charset=utf-8",
+                                  "not found\n", options.max_response_bytes);
       ::close(client);
     }
   }

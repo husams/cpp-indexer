@@ -297,14 +297,26 @@ if (typeof document !== 'undefined') {
   const overlayKind = document.getElementById('overlay-kind');
   const overlayExport = document.getElementById('overlay-export');
   let overlayStep = 0;
+  // These are browser budgets, deliberately stricter than the transport's
+  // maximums. A provider or a malformed saved snapshot must be refused
+  // before Cytoscape allocates a large layout graph on the main thread.
+  const BROWSER_BUDGET = Object.freeze({
+    maxNodes: 2500, maxEdges: 5000, maxSites: 10000,
+    maxLabelChars: 250000, maxJsonBytes: 8 * 1024 * 1024,
+  });
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const badge = (name, cls) => `<span class="badge ${cls || ''}">${esc(name)}</span>`;
-  const statusBadges = (s = {}) => Object.entries(s)
+  const safeClass = (value) => String(value ?? '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32);
+  const badge = (name, cls) => `<span class="badge ${safeClass(cls)}">${esc(name)}</span>`;
+  const statusBadges = (s = {}) => Object.entries(s && typeof s === 'object' ? s : {})
     .filter(([k, v]) => v === true || v === 'partial' || v === 'unknown' || v === 'stale' || v === 'truncated' || v === 'external')
+    .slice(0, 16)
     .map(([k, v]) => badge(`${k}${v === true ? '' : `: ${v}`}`, k === 'external' ? 'external' : k))
     .join('');
   const overlayCue = (state) => ({added: '+', removed: '−', changed: '↔', invalidated: '!', unchanged: '=', known: '●', unknown: '?', conditional: '◇', proved: '✓', open: '○', refuted: '×', assumed: '◇', inferred: '≈'}[state] || '·');
   const renderOverlayItems = (items) => (items || []).map((item) => `<li><div class="overlay-item-title"><strong>${esc(item.label || item.name || `step ${item.index ?? ''}`)}</strong>${item.state || item.strength || item.relation ? `<span class="overlay-state">${esc(`${overlayCue(item.state || item.strength || item.relation)} ${item.state || item.strength || item.relation}`)}</span>` : ''}</div><code>${esc(overlayState.identityText(item.identity))}</code></li>`).join('');
+  const prefersReducedMotion = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+  const motionDuration = (duration) => prefersReducedMotion() ? 0 : duration;
+  const focusInspector = () => title?.focus?.({preventScroll: true});
   const sourceLocation = (item) => item?.location || (item?.file ? `${item.file}:${item.line ?? ''}:${item.col ?? ''}` : 'No location');
   const copyButton = (text) => liveToken && text
     ? `<button type="button" class="copy-location" data-copy="${esc(text)}">Copy location</button>`
@@ -323,9 +335,48 @@ if (typeof document !== 'undefined') {
     if (freshness) sessionFreshness = graphState.trackFreshness(sessionFreshness, freshness);
     updateStaleBanner();
   };
+  const browserBudgetViolation = (candidate) => {
+    if (!candidate || !Array.isArray(candidate.nodes) || !Array.isArray(candidate.edges)) return 'malformed GraphView payload';
+    if (candidate.nodes.some((node) => !node || typeof node !== 'object') || candidate.edges.some((edge) => !edge || typeof edge !== 'object' || (edge.sites !== undefined && !Array.isArray(edge.sites))) || (candidate.markers !== undefined && !Array.isArray(candidate.markers)) || (candidate.metadata?.markers !== undefined && !Array.isArray(candidate.metadata.markers))) return 'malformed GraphView payload';
+    if (candidate.nodes.length > BROWSER_BUDGET.maxNodes) return `node budget exceeds ${BROWSER_BUDGET.maxNodes}`;
+    if (candidate.edges.length > BROWSER_BUDGET.maxEdges) return `edge budget exceeds ${BROWSER_BUDGET.maxEdges}`;
+    const sites = candidate.edges.reduce((total, edge) => total + (Array.isArray(edge.sites) ? edge.sites.length : 0), 0);
+    if (sites > BROWSER_BUDGET.maxSites) return `evidence budget exceeds ${BROWSER_BUDGET.maxSites} sites`;
+    const labels = candidate.nodes.reduce((total, node) => total + String(node?.name || node?.usr || '').length, 0);
+    if (labels > BROWSER_BUDGET.maxLabelChars) return `label budget exceeds ${BROWSER_BUDGET.maxLabelChars} characters`;
+    try {
+      const serialized = JSON.stringify(candidate);
+      const bytes = typeof TextEncoder === 'undefined' ? serialized.length : new TextEncoder().encode(serialized).length;
+      if (bytes > BROWSER_BUDGET.maxJsonBytes) return `snapshot exceeds ${BROWSER_BUDGET.maxJsonBytes} bytes`;
+    } catch (_error) {
+      return 'malformed GraphView payload';
+    }
+    return null;
+  };
+  const renderAccessibleAlternative = () => {
+    const alternative = document.getElementById('text-alternative-content');
+    if (!alternative) return;
+    const status = view.status || view.metadata?.status || 'unknown';
+    const markers = [...new Set([...(Array.isArray(view.markers) ? view.markers : []), ...(Array.isArray(view.metadata?.markers) ? view.metadata.markers : [])])];
+    const statusText = `${status}${markers.length ? `; ${markers.join(', ')}` : ''}`;
+    const nodeRows = (view.nodes || []).slice(0, BROWSER_BUDGET.maxNodes).map((node) => `<tr><th scope="row"><button type="button" class="accessible-node" data-node-id="${esc(node.id)}">${esc(node.name || node.usr || 'unnamed')}</button></th><td>${esc(node.kind || 'unknown')}</td><td>${esc(node.status?.completeness || 'unknown')}</td><td>${esc(sourceLocation(node))}</td></tr>`).join('');
+    const edgeRows = (view.edges || []).slice(0, BROWSER_BUDGET.maxEdges).map((edge) => `<tr><th scope="row">${esc(edge.kind || 'relation')}</th><td>${esc(edge.source)}</td><td>${esc(edge.target)}</td><td>${esc((Array.isArray(edge.sites) ? edge.sites : []).map(sourceLocation).join('; ') || 'No bounded evidence')}</td></tr>`).join('');
+    const paths = Array.isArray(view.paths) ? view.paths : [];
+    const pathRows = paths.slice(0, 100).map((path) => `<li>${esc(Array.isArray(path.nodes) ? path.nodes.join(' → ') : path.label || JSON.stringify(path))}</li>`).join('');
+    alternative.innerHTML = `<p><strong>Result status:</strong> ${esc(statusText)}. Visual absence is never proof of nonexistence.</p><table><caption>Selected nodes (${view.nodes?.length || 0})</caption><thead><tr><th scope="col">Name</th><th scope="col">Kind</th><th scope="col">Completeness</th><th scope="col">Location</th></tr></thead><tbody>${nodeRows || '<tr><td colspan="4">No nodes in this bounded slice.</td></tr>'}</tbody></table><table><caption>Edges and evidence (${view.edges?.length || 0})</caption><thead><tr><th scope="col">Relation</th><th scope="col">From</th><th scope="col">To</th><th scope="col">Bounded sites</th></tr></thead><tbody>${edgeRows || '<tr><td colspan="4">No edges in this bounded slice.</td></tr>'}</tbody></table><h3>Paths</h3><ul>${pathRows || '<li>No path records supplied by this result.</li>'}</ul>`;
+    alternative.querySelectorAll('.accessible-node').forEach((button) => {
+      button.onclick = () => {
+        const node = nodeById.get(String(button.dataset.nodeId));
+        if (!node) return;
+        const handle = cy?.$id(String(node.id));
+        handle?.select?.();
+        showNode(node);
+      };
+    });
+  };
   const updateSummary = () => {
     const status = view.status || view.metadata?.status || 'unknown';
-    const markers = view.markers || view.metadata?.markers || [];
+    const markers = Array.isArray(view.markers) ? view.markers : (Array.isArray(view.metadata?.markers) ? view.metadata.markers : []);
     const request = view.request || {};
     const budgets = [request.node_budget, request.edge_budget, request.site_budget, request.byte_budget]
       .map((value) => Number.isFinite(Number(value)) ? Number(value) : null);
@@ -335,6 +386,7 @@ if (typeof document !== 'undefined') {
     document.getElementById('identity').textContent = `${identity.workspace || 'workspace unknown'} · ${identity.index || 'index unknown'} · ${freshness} · query ${view.query_identity || 'unknown'} · result ${view.result_id || 'unknown'}`;
     const canvasStatus = document.getElementById('canvas-status');
     canvasStatus.innerHTML = `${badge(status, status)} ${markers.map((marker) => badge(marker, marker)).join('')} ${budgets.some((value) => value !== null) ? `<span class="budget">budgets ${budgets.filter((value) => value !== null).join(' / ')}</span>` : ''}`;
+    renderAccessibleAlternative();
     const loadMoreButton = document.getElementById('load-more');
     if (loadMoreButton) {
       const continuation = view.metadata?.continuation;
@@ -381,9 +433,11 @@ if (typeof document !== 'undefined') {
     title.textContent = 'Snapshot status';
     const identity = view.identity || view.metadata?.identity || {};
     const request = view.request || {};
-    details.innerHTML = `<dl><dt>Status</dt><dd>${statusBadges({status: view.status, ...(Object.fromEntries((view.markers || []).map((marker) => [marker, true])))}) || 'unknown'}</dd><dt>Query</dt><dd><code>${esc(view.query_identity || 'unknown')}</code></dd><dt>Result</dt><dd><code>${esc(view.result_id || 'unknown')}</code></dd><dt>Input</dt><dd>${esc(request.input_kind || 'unknown')} · <code>${esc(request.input || '')}</code></dd><dt>Fact sets</dt><dd>${esc((identity.fact_sets || []).join(', ') || 'unknown')}</dd><dt>Budgets</dt><dd>${esc(JSON.stringify({nodes: request.node_budget, edges: request.edge_budget, sites: request.site_budget, bytes: request.byte_budget}))}</dd></dl>`;
+    const markers = Array.isArray(view.markers) ? view.markers : [];
+    details.innerHTML = `<dl><dt>Status</dt><dd>${statusBadges({status: view.status, ...Object.fromEntries(markers.map((marker) => [marker, true]))}) || 'unknown'}</dd><dt>Query</dt><dd><code>${esc(view.query_identity || 'unknown')}</code></dd><dt>Result</dt><dd><code>${esc(view.result_id || 'unknown')}</code></dd><dt>Input</dt><dd>${esc(request.input_kind || 'unknown')} · <code>${esc(request.input || '')}</code></dd><dt>Fact sets</dt><dd>${esc((identity.fact_sets || []).join(', ') || 'unknown')}</dd><dt>Budgets</dt><dd>${esc(JSON.stringify({nodes: request.node_budget, edges: request.edge_budget, sites: request.site_budget, bytes: request.byte_budget}))}</dd></dl>`;
   };
   const showNode = (n) => {
+    if (!n) return;
     selectedNode = n;
     expandButton.disabled = !liveToken;
     if (expandOutButton) expandOutButton.disabled = !liveToken;
@@ -392,6 +446,7 @@ if (typeof document !== 'undefined') {
     const evidence = n.evidence?.location || 'No bounded evidence attached';
     details.innerHTML = `<dl><dt>Canonical id</dt><dd><code>${esc(n.id)}</code></dd><dt>USR</dt><dd><code>${esc(n.usr)}</code></dd><dt>Universe/key</dt><dd><code>${esc(`${n.semantic_universe || ''}/${n.identity_key || ''}`)}</code></dd><dt>Kind</dt><dd>${esc(n.kind)}</dd><dt>Component</dt><dd>${esc(n.component || 'unknown')}</dd><dt>Location</dt><dd>${esc(sourceLocation(n))} ${copyButton(sourceLocation(n))}</dd><dt>Status</dt><dd>${statusBadges(n.status) || 'No status flags'}</dd><dt>Evidence</dt><dd>${esc(evidence)}</dd></dl>`;
     wireCopyButtons();
+    focusInspector();
   };
   const showEdge = (e) => {
     selectedNode = undefined;
@@ -425,6 +480,7 @@ if (typeof document !== 'undefined') {
         }
       };
     }
+    focusInspector();
   };
   const elementForNode = (n) => ({data: {...n, id: String(n.id), label: n.name || n.usr}});
   const elementForEdge = (e) => ({data: {...e, id: String(e.id), source: String(e.source), target: String(e.target)}});
@@ -432,13 +488,14 @@ if (typeof document !== 'undefined') {
     accessible.replaceChildren();
     nodeById.forEach((n) => {
       const button = document.createElement('button');
+      button.className = 'accessible-node';
       button.type = 'button';
       button.textContent = `${n.name || n.usr} (${n.kind})`;
       button.setAttribute('aria-label', `${n.name || n.usr}, ${n.status?.completeness || 'unknown'} status`);
       button.onclick = () => {
         const node = cy.$id(String(n.id));
         node.select();
-        cy.animate({center: {eles: node}, duration: 150});
+        cy.animate({center: {eles: node}, duration: motionDuration(150)});
         showNode(n);
       };
       accessible.appendChild(button);
@@ -461,9 +518,33 @@ if (typeof document !== 'undefined') {
       memberIds.forEach((id) => byId.get(id)?.move({parent: groupId}));
     });
   };
+  const renderBudgetRefusal = (candidate, reason) => {
+    const safeCandidate = candidate && typeof candidate === 'object' ? candidate : {nodes: [], edges: [], metadata: {}};
+    view = {
+      ...safeCandidate,
+      nodes: [], edges: [], status: 'partial',
+      markers: [...new Set([...(Array.isArray(safeCandidate.markers) ? safeCandidate.markers : []), 'budget_refusal'])],
+      metadata: {...(safeCandidate.metadata || {}), status: 'partial', truncated: true, budget_refused: true, budget_reason: reason},
+    };
+    selectedNode = undefined;
+    nodeById.clear();
+    edgeIds.clear();
+    cy?.destroy?.();
+    cy = undefined;
+    updateSummary();
+    showSnapshot();
+    document.getElementById('empty').hidden = false;
+    details.insertAdjacentHTML('beforeend', `<p class="muted">Explorer budget refusal: ${esc(reason)}. Narrow the request or load a smaller slice.</p>`);
+  };
   const addView = (next, append, mergeOptions = {}) => {
+    const candidate = append ? graphState.mergeSlices(view, next, mergeOptions) : next;
+    const budgetReason = browserBudgetViolation(candidate);
+    if (budgetReason) {
+      renderBudgetRefusal(candidate, budgetReason);
+      return false;
+    }
     if (append) {
-      const merged = graphState.mergeSlices(view, next, mergeOptions);
+      const merged = candidate;
       const newElements = [];
       merged.nodes.forEach((n) => {
         const id = String(n.id);
