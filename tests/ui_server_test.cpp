@@ -295,7 +295,9 @@ struct RunningServer {
 
   explicit RunningServer(ui::GraphProvider graph, ui::GraphProvider search = {},
                          ui::GraphProvider evidence = {},
-                         ui::ServerOptions server_options = {})
+                         ui::ServerOptions server_options =
+                             ui::ServerOptions{.port = 0,
+                                               .launch_browser = false})
       : graph_provider(std::move(graph)), search_provider(std::move(search)),
         evidence_provider(std::move(evidence)), options(server_options) {
     thread = std::thread([this] {
@@ -493,6 +495,7 @@ TEST_CASE("Live explorer: search resolves a typed candidate list") {
   Fixture fixture;
   RunningServer server(graph_provider_for(fixture.db),
                        search_provider_for(fixture.db));
+  CHECK_FALSE(server.options.launch_browser);
   const auto response =
       http_get(server.port, "/api/search?token=" + server.token + "&q=ns::a");
   CHECK(response.status == 200);
