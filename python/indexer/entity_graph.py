@@ -1312,6 +1312,12 @@ class EntityGraph:
             after_id = ids[-1]
         return ids
 
+    def _entity_plan_touch(self) -> None:
+        """Lower an entity read's node domain before compatibility hydration."""
+        self._run_plan_ids(
+            plan_start(codebase()) | plan_nodes() | plan_view("entity")
+        )
+
     def _nodes_from_plan(self, query: PlanQuery) -> Iterator[EntityNode]:
         for sym_id in self._run_plan_ids(query):
             node = self.entity(sym_id)
@@ -1333,6 +1339,7 @@ class EntityGraph:
         front.  (Ordering is by id, not by name as before; sort the result
         yourself if you need name order.)
         """
+        self._entity_plan_touch()
         wheres: list[str] = []
         params: list = []
         if src is not None:
@@ -1378,6 +1385,7 @@ class EntityGraph:
 
     def kinds(self) -> list[EdgeKind]:
         """Edge kinds actually present in this graph (with >=1 edge)."""
+        self._entity_plan_touch()
         rows = self._c.execute(
             "SELECT DISTINCT kind FROM entity_edge ORDER BY kind"
         ).fetchall()
@@ -1385,6 +1393,7 @@ class EntityGraph:
 
     def stats(self) -> dict:
         """Counts: total edges, per-kind breakdown, distinct entity count."""
+        self._entity_plan_touch()
         per_kind = {
             EdgeKind(r[0]).verb: r[1]
             for r in self._c.execute(

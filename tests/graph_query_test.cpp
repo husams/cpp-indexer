@@ -239,6 +239,84 @@ TEST_CASE("graph_query: executable public operation inventory") {
   CHECK(listed > 0);
 }
 
+TEST_CASE("graph_query: production inventory uses typed selection and legacy "
+          "oracle") {
+  Seeded s;
+  Symbol redefined = make_sym("USR::redefined", "redefined", "function");
+  const auto redefined_id = s.db.add_symbol(redefined);
+  auto multi_def =
+      s.db.raw_db().prepare("UPDATE symbol SET multi_def = 2 WHERE id = ?");
+  multi_def.bind(1, redefined_id);
+  multi_def.step_done();
+  const auto component = s.db.add_component("test", "/tmp/hse27-inventory");
+  const auto directory = s.db.add_directory(component, "");
+  const auto file = s.db.add_file(directory, "fixture.cpp");
+  cidx::EdgeSite site;
+  site.edge_id = s.eid_AB;
+  site.file_id = file;
+  site.line = 10;
+  site.col = 5;
+  s.db.add_edge_site(site);
+  cidx::query::SqliteQueryReadAdapter read(s.db);
+  GraphQuery g(read, ":memory:");
+
+  CHECK_NOTHROW(g.get_by_id(s.id_A));
+  CHECK_NOTHROW(g.get_by_usr("USR::A"));
+  CHECK_NOTHROW(g.find("func"));
+  CHECK_NOTHROW(g.plan_for(s.id_A));
+  CHECK_NOTHROW(g.edge_count());
+  CHECK_NOTHROW(g.require_edges());
+  CHECK_NOTHROW(g.edges(s.id_A, "out", std::nullopt, 10));
+  CHECK_NOTHROW(g.edges_in(s.id_A, std::nullopt));
+  CHECK_NOTHROW(g.edges_out(s.id_A, std::nullopt));
+  CHECK_NOTHROW(g.references(s.id_A));
+  CHECK_NOTHROW(g.aliased_by(s.id_A));
+  CHECK_NOTHROW(g.sites(s.eid_AB));
+  CHECK_NOTHROW(g.sites_page(s.eid_AB, 0, 1));
+  CHECK_NOTHROW(g.edge_conditional(s.eid_AB));
+  CHECK_NOTHROW(g.edge_id_for(s.id_A, s.id_B, 1));
+  CHECK_NOTHROW(g.peers(s.id_A, std::vector<std::string>{"calls"}));
+  CHECK_NOTHROW(g.walk(s.id_A, std::vector<std::string>{"calls"}));
+  CHECK_NOTHROW(g.reaches(s.id_A, s.id_C, std::vector<std::string>{"calls"}));
+  CHECK_NOTHROW(g.bases(s.id_D));
+  CHECK_NOTHROW(g.subclasses(s.id_A));
+  CHECK_NOTHROW(g.members(s.id_A));
+  CHECK_NOTHROW(g.overrides_of(s.id_B));
+  CHECK_NOTHROW(g.overridden_by(s.id_A));
+  CHECK_NOTHROW(g.is_virtual_method(s.id_B));
+  CHECK_NOTHROW(g.dispatch_targets(s.id_A));
+  const auto red = g.redefined(10);
+  REQUIRE(red.size() == 1);
+  CHECK(red.front().id == redefined_id);
+  CHECK_NOTHROW(g.definitions(s.id_A));
+  CHECK_NOTHROW(g.possible_callees(s.id_A));
+  CHECK_NOTHROW(g.type_layers(1));
+  CHECK_NOTHROW(g.type_child(1, 1));
+  CHECK_NOTHROW(g.type_users("USR::A"));
+
+  // The adapter's site page must expose exactly the rows selected by its
+  // QueryPlan-owned key/order/limit stages; GraphReadPort only hydrates them.
+  auto raw_site = s.db.raw_db().prepare(
+      "SELECT edge_id,file_id,line,col FROM edge_site WHERE edge_id = ?");
+  raw_site.bind(1, s.eid_AB);
+  REQUIRE(raw_site.step());
+  CHECK(raw_site.col_int64(0) == s.eid_AB);
+  CHECK(raw_site.col_int64(1) > 0);
+  auto site_plan = cidx::query::start(cidx::query::codebase()) |
+                   cidx::query::view(cidx::query::View::Edge) |
+                   cidx::query::nodes(cidx::query::eq("edge_id", s.eid_AB)) |
+                   cidx::query::sites() |
+                   cidx::query::select({"edge_id", "file_id", "line", "col"}) |
+                   cidx::query::order_by({"file_id", "line", "col"}) |
+                   cidx::query::limit(1);
+  const auto selected = cidx::query::Executor(read).run(site_plan.plan());
+  const auto page = g.sites_page(s.eid_AB, 0, 1);
+  REQUIRE(selected.rows.size() == 1);
+  REQUIRE(page.size() == 1);
+  CHECK(page.front().line == std::get<int64_t>(selected.rows.front()[2]));
+  CHECK(page.front().col == std::get<int64_t>(selected.rows.front()[3]));
+}
+
 // ---------------------------------------------------------------------------
 // G2b: files() resolves a grouped component's CLONE-RELATIVE path (v24/v25
 // regression). A component grouped under a repository stores its `path`
@@ -732,6 +810,21 @@ TEST_CASE("graph_query: sites_page() orders by resolved path, not raw "
   CHECK(spanning[0].file->ends_with("b.cpp"));
   CHECK(spanning[1].file->ends_with("c.cpp"));
   CHECK(spanning[1].line == 1);
+
+  // The page is the exact offset slice of the adapter's ordered QueryPlan
+  // keys. The legacy page's next row (c.cpp:2) is outside that key slice and
+  // must not leak into the hydrated result.
+  const auto selected = cidx::query::Executor(read).run(
+      (cidx::query::start(cidx::query::codebase()) |
+       cidx::query::view(cidx::query::View::Site) |
+       cidx::query::nodes(cidx::query::eq("edge_id", edge_id)) |
+       cidx::query::select({"edge_id", "file_id", "file", "line", "col"}) |
+       cidx::query::order_by({"file", "line", "col"}) | cidx::query::limit(3))
+          .plan());
+  REQUIRE(selected.rows.size() == 3);
+  CHECK(spanning[0].line == std::get<int64_t>(selected.rows[1][3]));
+  CHECK(spanning[1].line == std::get<int64_t>(selected.rows[2][3]));
+  CHECK(spanning[1].line != 2);
 
   // Paging one-at-a-time across all 4 sites must reach every one exactly
   // once -- the delivery-order contract the UI layer's pagination depends

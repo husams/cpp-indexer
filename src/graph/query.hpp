@@ -13,8 +13,10 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -322,6 +324,9 @@ private:
   std::vector<int64_t> adapter_ids(const query::Plan &plan);
   bool adapter_symbol_exists(int64_t sym_id);
   bool adapter_edge_exists(int64_t edge_id);
+  bool adapter_type_exists(int64_t type_id);
+  std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>>
+  adapter_site_keys(int64_t edge_id, int limit);
   // Execute a row-shaped codebase plan to completion and retain its emitted
   // id order. The caller uses the ids only as compatibility-record keys.
   std::vector<int64_t> adapter_ordered_ids(const query::Plan &plan);

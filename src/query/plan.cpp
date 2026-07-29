@@ -243,6 +243,13 @@ const FieldDesc *field_desc(const std::string &name) {
         .name = "file", .filterable = true, .is_string = false};
     return &file_id;
   }
+  if (name == "multi_def" || name == "negative_multi_def") {
+    static const FieldDesc multi_def{
+        .name = "multi_def", .filterable = true, .is_string = false};
+    static const FieldDesc negative_multi_def{
+        .name = "negative_multi_def", .filterable = false, .is_string = false};
+    return name == "multi_def" ? &multi_def : &negative_multi_def;
+  }
   for (const auto &f : field_catalog()) {
     if (name == f.name) {
       return &f;

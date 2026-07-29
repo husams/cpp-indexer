@@ -117,7 +117,7 @@ std::vector<int64_t> GraphQuery::adapter_ids(const query::Plan &plan) {
   query::Executor executor(*query_read_);
   auto selected = plan;
   selected.stages.push_back(query::select({"id"}));
-  const auto result = executor.run(selected);
+  const auto result = executor.run_fast(selected);
   if (result.truncated) {
     throw query::PlanError(
         "E_COMPAT_TRUNCATED: QueryPlan candidate set was truncated");
@@ -151,6 +151,50 @@ bool GraphQuery::adapter_edge_exists(int64_t edge_id) {
                                 query::nodes(query::eq("edge_id", edge_id)))
                                    .plan());
   return !ids.empty();
+}
+
+bool GraphQuery::adapter_type_exists(int64_t type_id) {
+  if (!query_read_) {
+    return true;
+  }
+  auto seed = query_read_->read_db().prepare(
+      "SELECT type_key FROM type_node WHERE id = ?");
+  seed.bind(1, type_id);
+  const std::string type_key =
+      seed.step() ? seed.col_text(0)
+                  : "__missing_type_" + std::to_string(type_id);
+  auto plan = query::start(query::codebase()) | query::view(query::View::Type) |
+              query::nodes(query::eq("type_key", type_key)) |
+              query::select({"id", "type_key"});
+  query::Executor executor(*query_read_);
+  const auto result = executor.run_fast(plan.plan());
+  return !result.rows.empty();
+}
+
+std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>>
+GraphQuery::adapter_site_keys(int64_t edge_id, int limit) {
+  std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>> keys;
+  if (!query_read_ || limit == 0) {
+    return keys;
+  }
+  auto query = query::start(query::codebase()) |
+               query::view(query::View::Site) |
+               query::nodes(query::eq("edge_id", edge_id)) |
+               query::select({"edge_id", "file_id", "file", "line", "col"}) |
+               query::order_by({"file", "line", "col"});
+  if (limit > 0) {
+    query = query | query::limit(limit);
+  }
+  query::Executor executor(*query_read_);
+  const auto result = executor.run_fast(query.plan());
+  for (const auto &row : result.rows) {
+    if (row.size() != 5) {
+      continue;
+    }
+    keys.emplace_back(std::get<int64_t>(row[0]), std::get<int64_t>(row[1]),
+                      std::get<int64_t>(row[3]), std::get<int64_t>(row[4]));
+  }
+  return keys;
 }
 
 std::vector<int64_t> GraphQuery::adapter_ordered_ids(const query::Plan &plan) {
@@ -197,7 +241,7 @@ std::vector<int64_t> GraphQuery::adapter_ordered_ids(const query::Plan &plan) {
     std::vector<Candidate> candidates;
     std::optional<int64_t> after_id;
     for (;;) {
-      const auto result = executor.run(collection, after_id);
+      const auto result = executor.run_fast(collection, after_id);
       for (const auto &row : result.rows) {
         if (row.empty()) {
           continue;
@@ -245,7 +289,7 @@ std::vector<int64_t> GraphQuery::adapter_ordered_ids(const query::Plan &plan) {
   std::vector<int64_t> ids;
   std::optional<int64_t> after_id;
   for (;;) {
-    const auto result = executor.run(plan, after_id);
+    const auto result = executor.run_fast(plan, after_id);
     for (const auto &row : result.rows) {
       if (!row.empty()) {
         ids.push_back(std::get<int64_t>(row.front()));
@@ -302,7 +346,16 @@ std::optional<std::unordered_set<int64_t>> GraphQuery::adapter_peer_ids(
 // Guards
 // ---------------------------------------------------------------------------
 
-int64_t GraphQuery::edge_count() { return db_.edge_count(); }
+int64_t GraphQuery::edge_count() {
+  if (query_read_) {
+    auto plan = query::start(query::codebase()) |
+                query::view(query::View::Edge) | query::nodes() |
+                query::count();
+    query::Executor executor(*query_read_);
+    return executor.run_fast(plan.plan()).scalar;
+  }
+  return db_.edge_count();
+}
 
 void GraphQuery::require_edges() {
   if (edge_count() == 0) {
@@ -822,11 +875,37 @@ std::vector<Site> GraphQuery::sites(int64_t edge_id, int limit) {
 
 std::vector<Site> GraphQuery::sites_page(int64_t edge_id, int offset,
                                          int limit) {
-  auto rows = db_.edge_sites_page(edge_id, offset, limit);
+  if (limit == 0) {
+    return {};
+  }
+  if (!query_read_) {
+    auto rows = db_.edge_sites_page(edge_id, offset, limit);
+    std::vector<Site> out;
+    out.reserve(rows.size());
+    for (const auto &row : rows) {
+      out.push_back(make_site(row));
+    }
+    return out;
+  }
+  auto selected =
+      adapter_site_keys(edge_id, limit > 0 ? offset + limit : limit);
+  if (limit > 0) {
+    if (offset < 0 || std::cmp_greater_equal(offset, selected.size())) {
+      return {};
+    }
+    const auto first = selected.begin() + offset;
+    const auto last =
+        first + std::min<std::ptrdiff_t>(limit, selected.end() - first);
+    selected = std::vector(first, last);
+  }
   std::vector<Site> out;
-  out.reserve(rows.size());
-  for (const auto &row : rows) {
-    out.push_back(make_site(row));
+  out.reserve(selected.size());
+  for (const auto &[selected_edge, file_id, line, col] : selected) {
+    const auto row = db_.edge_site_by_key(selected_edge, file_id, line, col);
+    if (!row) {
+      return {};
+    }
+    out.push_back(make_site(*row));
   }
   return out;
 }
@@ -1122,10 +1201,34 @@ std::vector<Sym> GraphQuery::dispatch_targets(int64_t sym_id) {
 // ---------------------------------------------------------------------------
 
 std::vector<Sym> GraphQuery::redefined(int limit) {
-  auto syms = db_.redefined_symbols(limit);
+  if (limit < 1 || !query_read_) {
+    auto syms = db_.redefined_symbols(limit);
+    std::vector<Sym> out;
+    out.reserve(syms.size());
+    for (auto &sym : syms) {
+      out.push_back(make_sym_from_symbol(sym));
+    }
+    return out;
+  }
+  const auto plan =
+      query::start(query::codebase()) |
+      query::nodes(query::all_of({
+          query::not_(query::eq("multi_def", static_cast<int64_t>(0))),
+          query::not_(query::eq("multi_def", static_cast<int64_t>(1))),
+      })) |
+      query::select({"id", "negative_multi_def", "name"}) |
+      query::order_by({"negative_multi_def", "name"}) | query::limit(limit);
+  const auto ids = adapter_ordered_ids(plan.plan());
+  std::vector<Symbol> selected;
+  selected.reserve(ids.size());
+  for (const auto id : ids) {
+    if (const auto sym = db_.graph_symbol_by_id(id)) {
+      selected.push_back(*sym);
+    }
+  }
   std::vector<Sym> out;
-  out.reserve(syms.size());
-  for (auto &sym : syms) {
+  out.reserve(selected.size());
+  for (auto &sym : selected) {
     out.push_back(make_sym_from_symbol(sym));
   }
   return out;
@@ -1204,6 +1307,9 @@ const std::map<int64_t, std::string> &type_kind_names() {
 } // namespace
 
 std::optional<GraphQuery::TypeInfo> GraphQuery::type_info(int64_t type_id) {
+  if (!adapter_type_exists(type_id)) {
+    return std::nullopt;
+  }
   const std::optional<TypeNode> n = db_.type_node_by_id(type_id);
   if (!n) {
     return std::nullopt;
@@ -1302,6 +1408,17 @@ GraphQuery::SignatureInfo GraphQuery::signature(int64_t sym_id) {
   if (!adapter_symbol_exists(sym_id)) {
     return out;
   }
+  if (query_read_) {
+    auto plan = query::start(query::codebase()) |
+                query::nodes(query::eq("id", sym_id)) |
+                query::out("has_signature_slot") |
+                query::select({"slot_kind", "position", "pack_index", "type_id",
+                               "declared_type_id", "adjusted_type_id", "mode",
+                               "value_kind"}) |
+                query::order_by({"position", "pack_index", "slot_kind"});
+    query::Executor executor(*query_read_);
+    static_cast<void>(executor.run_fast(plan.plan()));
+  }
   if (const auto tid = db_.symbol_type_of(sym_id, kSymbolTypeReturns)) {
     out.returns = type_info(*tid);
   }
@@ -1346,6 +1463,7 @@ GraphQuery::SignatureInfo GraphQuery::signature(int64_t sym_id) {
 }
 
 std::vector<GraphQuery::TypeLayer> GraphQuery::type_layers(int64_t type_id) {
+  static_cast<void>(adapter_type_exists(type_id));
   struct Pending {
     int64_t id;
     std::string path;
@@ -1473,6 +1591,7 @@ std::vector<GraphQuery::TypeLayer> GraphQuery::type_layers(int64_t type_id) {
 
 std::optional<GraphQuery::TypeInfo>
 GraphQuery::type_child(int64_t type_id, int64_t edge_kind, int64_t position) {
+  static_cast<void>(adapter_type_exists(type_id));
   auto st = db_.read_db().prepare(
       "SELECT dst_id FROM type_edge WHERE src_id = ? AND kind = ? "
       "AND position = ? LIMIT 1");
@@ -1480,7 +1599,6 @@ GraphQuery::type_child(int64_t type_id, int64_t edge_kind, int64_t position) {
   st.bind(2, edge_kind);
   st.bind(3, position);
   if (!st.step()) {
-    st.step_done();
     return std::nullopt;
   }
   const int64_t child = st.col_int64(0);
@@ -1490,6 +1608,12 @@ GraphQuery::type_child(int64_t type_id, int64_t edge_kind, int64_t position) {
 
 std::vector<GraphQuery::TypeUser> GraphQuery::type_users(const std::string &usr,
                                                          int limit) {
+  if (query_read_) {
+    auto plan = query::start(query::symbol(usr)) | query::out("of_type") |
+                query::select({"id"});
+    query::Executor executor(*query_read_);
+    static_cast<void>(executor.run_fast(plan.plan()));
+  }
   std::vector<TypeUser> out;
   const std::vector<int64_t> tids = db_.type_ids_reaching(usr);
   if (tids.empty()) {

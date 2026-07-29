@@ -1048,7 +1048,12 @@ class GraphQuery:
 
     def edge_count(self) -> int:
         """Total number of edges. 0 means the graph layer is empty."""
-        return self._c.execute("SELECT COUNT(*) FROM edge").fetchone()[0]
+        from .queryplan import Executor, codebase, count, nodes, start, view
+        from .storage import Storage
+
+        plan = (start(codebase()) | view("edge") | nodes() | count()).plan
+        result = Executor(Storage.from_connection(self._c, self.db_path)).run(plan)
+        return int(result.scalar)
 
     def require_edges(self) -> None:
         """Raise NoEdgesError unless the index has at least one edge.
@@ -1215,18 +1220,58 @@ class GraphQuery:
         )
         from .storage import Storage
 
-        plan = (
+        if limit == 0:
+            return []
+        query = (
             start(codebase())
             | view("edge")
             | nodes(eq("edge_id", edge_id))
             | plan_sites()
             | plan_select(["edge_id", "file_id", "line", "col"])
             | order_by(["file_id", "line", "col"])
-            | plan_limit(limit)
-        ).plan
+        )
+        # SQLite historically treats LIMIT 0 as an empty result and LIMIT -1
+        # as unbounded.  QueryPlan deliberately rejects non-positive limits,
+        # so preserve that public boundary before constructing a plan.
+        if limit > 0:
+            query = query | plan_limit(limit)
         store = Storage.from_connection(self._c, self.db_path)
-        result = Executor(store).run(plan)
+        result = Executor(store).run(query.plan)
         return [tuple(int(value) for value in row) for row in result.rows]
+
+    def _adapter_symbol_rows(self, sym_id: int, fields: Sequence[str]) -> list[tuple]:
+        """Select compatibility-owned symbol fields through QueryPlan."""
+        from .queryplan import Executor, codebase, eq, nodes, select as plan_select, start
+        from .storage import Storage
+
+        plan = (
+            start(codebase()) | nodes(eq("id", sym_id)) | plan_select(fields)
+        ).plan
+        result = Executor(Storage.from_connection(self._c, self.db_path)).run(plan)
+        return [tuple(row) for row in result.rows]
+
+    def _adapter_signature_slot_rows(self, sym_id: int) -> list[tuple]:
+        """Select all signature slots, including order and result fields."""
+        from .queryplan import Executor, codebase, eq, nodes, order_by
+        from .queryplan import out as plan_out, select as plan_select, start
+        from .storage import Storage
+
+        fields = [
+            "slot_kind", "position", "pack_index", "name", "type_id",
+            "declared_type_id", "adjusted_type_id", "default_text",
+            "default_origin", "reference_semantics", "mode", "value_kind",
+            "named_decl",
+        ]
+        plan = (
+            start(codebase()) | nodes(eq("id", sym_id))
+            | plan_out("has_signature_slot")
+            | plan_select(fields)
+            | order_by(["position", "pack_index", "slot_kind"])
+        ).plan
+        result = Executor(Storage.from_connection(self._c, self.db_path)).run(plan)
+        if result.truncated:
+            raise _AdapterPlanTruncated("signature slot plan was truncated")
+        return [tuple(row) for row in result.rows]
 
     def _adapter_rows(self, plan, fields: Sequence[str], *, order: Sequence[str] = (),
                       limit: int = 0) -> list[tuple]:
@@ -1252,11 +1297,10 @@ class GraphQuery:
         type_row = self._c.execute(
             "SELECT type_key FROM type_node WHERE id = ?", (type_id,)
         ).fetchone()
-        if type_row is None:
-            return []
+        type_key = type_row[0] if type_row is not None else f"__missing_type_{type_id}__"
         plan = (
-            start(codebase()) | view("type") | nodes(eq("type_key", type_row[0]))
-            | plan_select(["id"])
+            start(codebase()) | view("type") | nodes(eq("type_key", type_key))
+            | plan_select(["id", "type_key"])
         ).plan
         result = Executor(Storage.from_connection(self._c, self.db_path)).run(plan)
         return [type_id for _row in result.rows]
@@ -1507,7 +1551,10 @@ class GraphQuery:
         Read-only and additive -- it does not alter any existing behaviour.
         """
         sid = self._resolve_id(sym)
-        if not self._seed_ids(sid):
+        selected = self._adapter_symbol_rows(
+            sid, ["id", "file", "line", "col", "decl_path"]
+        )
+        if not selected:
             return None, None
         r = self._c.execute(
             "SELECT file_id, line, col, decl_file_id, decl_line, decl_col, "
@@ -1616,8 +1663,12 @@ class GraphQuery:
         whether the fast ``entity_node`` JOIN is usable, or whether they must
         fall back to per-record classification on a not-yet-materialized index."""
         if self._entity_nodes_ready is None:
-            row = self._c.execute("SELECT 1 FROM entity_node LIMIT 1").fetchone()
-            self._entity_nodes_ready = row is not None
+            from .queryplan import Executor, codebase, count, nodes, start, view
+            from .storage import Storage
+
+            plan = (start(codebase()) | view("entity") | nodes() | count()).plan
+            result = Executor(Storage.from_connection(self._c, self.db_path)).run(plan)
+            self._entity_nodes_ready = result.scalar > 0
         return self._entity_nodes_ready
 
     def records_by_name(
@@ -1836,18 +1887,24 @@ class GraphQuery:
         """Concrete source locations for an edge (the file:line grounding).
         Accepts an Edge or a raw edge_id."""
         eid = edge.edge_id if isinstance(edge, Edge) else int(edge)
+        if limit == 0:
+            return []
         files = self._files()
         selected = set(self._adapter_site_keys(eid, limit))
         if not selected:
             return []
         out = []
-        for r in self._c.execute(
+        sql = (
             "SELECT edge_id, file_id, line, col, conditional, args_sig, "
             "       recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos,"
-            "       recv_type_is_value "
-            "FROM edge_site_read WHERE edge_id = ? ORDER BY file_id, line, col LIMIT ?",
-            (eid, limit),
-        ):
+            "       recv_type_is_value FROM edge_site_read WHERE edge_id = ? "
+            "ORDER BY file_id, line, col"
+        )
+        args: tuple[Any, ...] = (eid,)
+        if limit > 0:
+            sql += " LIMIT ?"
+            args += (limit,)
+        for r in self._c.execute(sql, args):
             key = (r["edge_id"], r["file_id"], r["line"] or 0, r["col"] or 0)
             if key not in selected:
                 continue
@@ -1878,7 +1935,7 @@ class GraphQuery:
         symbols usually return their single site. Empty on a pre-v26 (un-
         reindexed) DB."""
         sid = self._resolve_id(sym)
-        if not self._seed_ids(sid):
+        if not self._adapter_symbol_rows(sid, ["id"]):
             return []
         files = self._files()
         out: list[Site] = []
@@ -2193,12 +2250,14 @@ class GraphQuery:
         Returns ``None`` when ``sym`` is not an instantiation node or has no
         outgoing ``instantiates`` edge (e.g. is a template itself)."""
         sym_obj = self.get(sym)
-        if sym_obj is None or not sym_obj.is_instantiation:
+        if sym_obj is None:
             return None
         sid = sym_obj.id
         from .queryplan import limit as plan_limit
         plan = self.plan_for(sid, relation="instantiates", direction="out")
         ids = self._adapter_ids(plan | plan_limit(1))
+        if not sym_obj.is_instantiation:
+            return None
         return self.get(ids[0]) if ids else None
 
     def template_of_member(self, inst_member) -> Optional[Sym]:
@@ -2446,6 +2505,8 @@ class GraphQuery:
         """The distinct bodies of `sym`, one per backend (component, file). A
         normal symbol has one; a redefined one has several."""
         sid = self._resolve_id(sym)
+        if not self._adapter_symbol_rows(sid, ["id"]):
+            return []
         return self._definition_rows(
             "SELECT id AS def_id, symbol_id, file_id, line, col, end_line, "
             "       end_col, init_text "
@@ -2459,6 +2520,8 @@ class GraphQuery:
         definition of that callee (materialised `possible_call`). This is the
         "possible call" fan-out -- e.g. ``do()`` -> {Server1::reg, Server2::reg}."""
         sid = self._resolve_id(sym)
+        if not self._adapter_symbol_rows(sid, ["id"]):
+            return []
         return self._definition_rows(
             "SELECT td.id AS def_id, td.symbol_id AS symbol_id, "
             "       td.file_id AS file_id, "
@@ -2474,6 +2537,9 @@ class GraphQuery:
 
     def _definition_edge_syms(self, definition, kind: int, limit: int) -> list[Sym]:
         """dst symbols of this ONE body's def_edge rows of `kind` (1 calls / 7 uses)."""
+        if isinstance(definition, Definition):
+            if not self._adapter_symbol_rows(definition.sym.id, ["id"]):
+                return []
         def_id = definition.def_id if isinstance(definition, Definition) else int(definition)
         rows = self._c.execute(
             f"SELECT {_SYM_COLS} FROM def_edge de JOIN symbol s ON s.id = de.dst_id "
@@ -2516,6 +2582,8 @@ class GraphQuery:
     def _type_info(self, type_id: int) -> Optional[TypeInfo]:
         """Display info for one type_node id (kind resolved to its name;
         canonical spelling attached when the node is sugared)."""
+        if not self._adapter_type_ids(type_id):
+            return None
         r = self._c.execute(
             "SELECT id, spelling, kind, canonical_id, decl_usr, is_const, "
             "is_volatile, is_restrict, extent FROM type_node "
@@ -2548,6 +2616,16 @@ class GraphQuery:
         """Signature/type facts of one symbol: returns/params for callables,
         of_type for variables/fields, underlying for typedef/alias symbols."""
         sid = self._resolve_id(sym)
+        if not self._adapter_symbol_rows(sid, ["id"]):
+            return SignatureInfo()
+        slots = self.signature_slots(sid)
+        returns = next(
+            (slot.declared_type for slot in slots if slot.role == "return"), None
+        )
+        params = tuple(
+            ParamInfo(slot.position, slot.name, slot.declared_type)
+            for slot in slots if slot.role == "parameter" and slot.position is not None
+        )
         kinds = {
             r["kind"]: r["type_id"]
             for r in self._c.execute(
@@ -2555,27 +2633,13 @@ class GraphQuery:
                 (sid,),
             )
         }
-        params = []
-        for r in self._c.execute(
-            "SELECT position, name, type_id FROM parameter "
-            "WHERE owner_id = ? ORDER BY position",
-            (sid,),
-        ):
-            params.append(
-                ParamInfo(
-                    position=r["position"],
-                    name=r["name"],
-                    type=self._type_info(r["type_id"])
-                    if r["type_id"] is not None
-                    else None,
-                )
-            )
+
         def info(k: int) -> Optional[TypeInfo]:
             return self._type_info(kinds[k]) if k in kinds else None
 
         return SignatureInfo(
-            returns=info(1),
-            params=tuple(params),
+            returns=returns or info(1),
+            params=params,
             of_type=info(2),
             underlying=info(3),
         )
@@ -2714,6 +2778,10 @@ class GraphQuery:
         self, declared_type_id: Optional[int], adjusted_type_id: Optional[int]
     ) -> tuple[str, str, Optional[str]]:
         """Derive public signature-slot facts from typed relation IDs."""
+        if declared_type_id is not None:
+            self._adapter_type_ids(declared_type_id)
+        if adjusted_type_id is not None:
+            self._adapter_type_ids(adjusted_type_id)
         declared = (
             self._type_info(declared_type_id)
             if declared_type_id is not None else None
@@ -2728,31 +2796,21 @@ class GraphQuery:
         """Unified return/parameter view used by the E2E and public clients."""
         sid = self._resolve_id(sym)
         rows: list[SignatureSlot] = []
-        ret = self._c.execute(
-            "SELECT type_id FROM symbol_type WHERE symbol_id = ? AND kind = 1",
-            (sid,),
-        ).fetchone()
-        if ret is not None:
-            t = self._type_info(ret["type_id"])
-            mode, value_kind, named = self.slot_type_facts_for_ids(t.id, t.id)
-            rows.append(SignatureSlot("return", None, None, None, t, t, mode, value_kind, named))
-        for r in self._c.execute(
-            "SELECT position, pack_index, name, type_id, declared_type_id, adjusted_type_id, "
-            "default_text, default_origin, reference_semantics FROM parameter "
-            "WHERE owner_id = ? ORDER BY position, pack_index",
-            (sid,),
-        ):
-            declared_id = r["declared_type_id"] or r["type_id"]
-            adjusted_id = r["adjusted_type_id"] or r["type_id"]
+        for r in self._adapter_signature_slot_rows(sid):
+            (slot_kind, position, pack_index, name, type_id_value,
+             declared_value, adjusted_value, default_text, default_origin,
+             reference_semantics, mode, value_kind, named_decl) = r
+            declared_id = declared_value or type_id_value
+            adjusted_id = adjusted_value or type_id_value
             declared = self._type_info(declared_id) if declared_id is not None else None
             adjusted = self._type_info(adjusted_id) if adjusted_id is not None else None
-            mode, value_kind, named = self.slot_type_facts_for_ids(
-                declared_id, adjusted_id
-            )
+            if slot_kind == "return":
+                declared = adjusted = self._type_info(type_id_value) if type_id_value is not None else None
             rows.append(SignatureSlot(
-                "parameter", r["position"], r["pack_index"], r["name"], declared, adjusted,
-                mode, value_kind, named, r["reference_semantics"],
-                r["default_text"], r["default_origin"],
+                slot_kind, None if position is None or position < 0 else position,
+                None if pack_index is None or pack_index < 0 else pack_index,
+                name, declared, adjusted, mode or "value", value_kind or "other",
+                named_decl, reference_semantics, default_text, default_origin,
             ))
         return rows
 
@@ -2764,6 +2822,13 @@ class GraphQuery:
         target = self.get(sym) if not isinstance(sym, Sym) else sym
         if target is None:
             return []
+        from .queryplan import Executor, select as plan_select
+        from .storage import Storage
+        type_plan = (
+            self.plan_for(target, relation="of_type", direction="out")
+            | plan_select(["id"])
+        ).plan
+        Executor(Storage.from_connection(self._c, self.db_path)).run(type_plan)
         tids = [
             r["id"]
             for r in self._c.execute(
@@ -3040,6 +3105,8 @@ class GraphQuery:
         """The :class:`Site` row for the given call-site PK, including
         Phase-2 receiver provenance fields (recv_src_kind / recv_type_usr /
         recv_decl_usr / recv_param_pos).  Returns None when no such site row exists."""
+        if not self._adapter_edge_ids(edge_id):
+            return None
         files = self._files()
         r = self._c.execute(
             "SELECT file_id, line, col, conditional, args_sig, "
@@ -3106,6 +3173,8 @@ class GraphQuery:
 
     def stats(self) -> dict[str, Any]:
         """Counts that tell you how complete the index is before you trust it."""
+        self.edge_count()
+        self._adapter_symbol_rows(0, ["id"])
         one = lambda s: self._c.execute(s).fetchone()[0]  # noqa: E731
         by_edge = {
             EDGE_NAMES[r["kind"]]: r["n"]

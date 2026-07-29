@@ -96,6 +96,12 @@ def test_sym_carries_grounding(g):
     assert s.loc == "lib.c:20"
 
 
+def test_sites_zero_and_negative_limits_preserve_sqlite_boundary(g):
+    edge = g.edges_out(g.get("c:@F@main"), ("calls",))[0]
+    assert g.sites(edge, limit=0) == []
+    assert len(g.sites(edge, limit=-1)) == 1
+
+
 # --------------------------------------------------------------------------- #
 # Lookup references
 # --------------------------------------------------------------------------- #

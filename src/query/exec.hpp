@@ -65,6 +65,9 @@ public:
   std::vector<EdgeSiteRow> edge_sites_one(int64_t edge_id, int limit) override;
   std::vector<EdgeSiteRow> edge_sites_page(int64_t edge_id, int offset,
                                            int limit) override;
+  std::optional<EdgeSiteRow> edge_site_by_key(int64_t edge_id, int64_t file_id,
+                                              int64_t line,
+                                              int64_t col) override;
   bool edge_has_conditional_site(int64_t edge_id) override;
   std::optional<int64_t> edge_id_for(int64_t src_id, int64_t dst_id,
                                      int64_t kind) override;
@@ -182,6 +185,12 @@ public:
   // `after_id` pages the first nodes() enumeration from ids strictly greater
   // than the cursor. It is execution state, not part of the immutable Plan IR.
   Result run(const Plan &plan, std::optional<int64_t> after_id = std::nullopt);
+
+  // Internal compatibility adapters already hydrate from the same read port;
+  // they do not need to recompute the workspace-wide identity for each small
+  // candidate probe.
+  Result run_fast(const Plan &plan,
+                  std::optional<int64_t> after_id = std::nullopt);
 
   // Explain a plan without executing its row-producing stages. The returned
   // object contains the normalized plan, the same index identity reported by
