@@ -298,53 +298,146 @@ TEST_CASE("graph_query: production adapters use executable plans and legacy "
   cidx::query::SqliteQueryReadAdapter read(s.db);
   GraphQuery g(read, ":memory:");
 
-  require_production_plan("get_by_id", [&] { g.get_by_id(s.id_A); });
-  require_production_plan("get_by_usr", [&] { g.get_by_usr("USR::A"); });
-  require_production_plan("find", [&] { g.find("func", std::nullopt, 50); });
-  require_production_plan("edge_count", [&] { g.edge_count(); });
-  require_production_plan("require_edges", [&] { g.require_edges(); });
-  require_production_plan("edges", [&] {
-    g.edges(s.id_A, "out", std::vector<int64_t>{1}, 50, true);
+  require_production_plan("get_by_id", [&] -> void {
+    const auto result = g.get_by_id(s.id_A);
+    REQUIRE(result);
+    CHECK(result->id == s.id_A);
   });
-  require_production_plan("edges_in", [&] {
-    g.edges_in(s.id_B, std::vector<std::string>{"calls"});
+  require_production_plan("get_by_usr", [&] -> void {
+    const auto result = g.get_by_usr("USR::A");
+    REQUIRE(result);
+    CHECK(result->id == s.id_A);
   });
-  require_production_plan("edges_out", [&] {
-    g.edges_out(s.id_A, std::vector<std::string>{"calls"});
+  require_production_plan("find", [&] -> void {
+    const auto result = g.find("func", std::nullopt, 50);
+    REQUIRE(result.size() == 2);
+    CHECK(result[0].id == s.id_B);
+    CHECK(result[1].id == s.id_C);
   });
-  require_production_plan("references", [&] { g.references(s.id_C); });
-  require_production_plan("aliased_by", [&] { g.aliased_by(s.id_A); });
-  require_production_plan("sites", [&] { g.sites(s.eid_AB); });
-  require_production_plan("sites_page", [&] { g.sites_page(s.eid_AB, 0, 1); });
+  require_production_plan("edge_count", [&] -> void {
+    auto expected = s.db.raw_db().prepare("SELECT COUNT(*) FROM edge");
+    REQUIRE(expected.step());
+    CHECK(g.edge_count() == expected.col_int64(0));
+  });
+  require_production_plan("require_edges", [&] -> void { g.require_edges(); });
+  require_production_plan("edges", [&] -> void {
+    const auto result =
+        g.edges(s.id_A, "out", std::vector<int64_t>{1}, 50, true);
+    REQUIRE(result.size() == 1);
+    CHECK(result.front().edge_id == s.eid_AB);
+    CHECK(result.front().peer.id == s.id_B);
+  });
+  require_production_plan("edges_in", [&] -> void {
+    const auto result = g.edges_in(s.id_B, std::vector<std::string>{"calls"});
+    REQUIRE(result.size() == 1);
+    CHECK(result.front().edge_id == s.eid_AB);
+    CHECK(result.front().peer.id == s.id_A);
+  });
+  require_production_plan("edges_out", [&] -> void {
+    const auto result = g.edges_out(s.id_A, std::vector<std::string>{"calls"});
+    REQUIRE(result.size() == 1);
+    CHECK(result.front().edge_id == s.eid_AB);
+    CHECK(result.front().peer.id == s.id_B);
+  });
+  require_production_plan("references", [&] -> void {
+    const auto result = g.references(s.id_C);
+    REQUIRE(result.size() == 2);
+    CHECK(result[0].edge_id == s.eid_BC);
+    CHECK(result[1].edge_id == s.eid_AC);
+  });
+  require_production_plan("aliased_by",
+                          [&] -> void { CHECK(g.aliased_by(s.id_A).empty()); });
+  require_production_plan("sites", [&] -> void {
+    const auto result = g.sites(s.eid_AB);
+    REQUIRE(result.size() == 1);
+    CHECK(result[0].line == 10);
+    CHECK(result[0].col == 5);
+  });
+  require_production_plan("sites_page", [&] -> void {
+    const auto result = g.sites_page(s.eid_AB, 0, 1);
+    REQUIRE(result.size() == 1);
+    CHECK(result.front().line == 10);
+    CHECK(result.front().col == 5);
+  });
   require_production_plan("edge_conditional",
-                          [&] { g.edge_conditional(s.eid_AB); });
-  require_production_plan("edge_id_for",
-                          [&] { g.edge_id_for(s.id_A, s.id_B, 1); });
-  require_production_plan(
-      "peers", [&] { g.peers(s.id_A, std::vector<std::string>{"calls"}); });
-  require_production_plan("walk", [&] {
-    g.walk(s.id_A, std::vector<std::string>{"calls"}, "out", 3, 50);
+                          [&] -> void { CHECK(g.edge_conditional(s.eid_AB)); });
+  require_production_plan("edge_id_for", [&] -> void {
+    CHECK(g.edge_id_for(s.id_A, s.id_B, 1) == s.eid_AB);
   });
-  require_production_plan("reaches", [&] {
-    g.reaches(s.id_A, s.id_C, std::vector<std::string>{"calls"});
+  require_production_plan("peers", [&] -> void {
+    const auto result = g.peers(s.id_A, std::vector<std::string>{"calls"});
+    REQUIRE(result.size() == 1);
+    CHECK(result.front().id == s.id_B);
   });
-  require_production_plan("bases", [&] { g.bases(s.id_D); });
-  require_production_plan("subclasses", [&] { g.subclasses(s.id_A); });
-  require_production_plan("members", [&] { g.members(s.id_A); });
-  require_production_plan("overrides_of", [&] { g.overrides_of(s.id_B); });
-  require_production_plan("overridden_by", [&] { g.overridden_by(s.id_B); });
+  require_production_plan("walk", [&] -> void {
+    const auto result =
+        g.walk(s.id_A, std::vector<std::string>{"calls"}, "out", 3, 50);
+    CHECK(result.nodes_by_id.size() == 3);
+    CHECK(result.nodes_by_id.contains(s.id_A));
+    CHECK(result.nodes_by_id.contains(s.id_B));
+    CHECK(result.nodes_by_id.contains(s.id_C));
+  });
+  require_production_plan("reaches", [&] -> void {
+    const auto result =
+        g.reaches(s.id_A, s.id_C, std::vector<std::string>{"calls"});
+    REQUIRE(result);
+    REQUIRE(result->size() == 3);
+    CHECK((*result)[0].id == s.id_A);
+    CHECK((*result)[1].id == s.id_B);
+    CHECK((*result)[2].id == s.id_C);
+  });
+  require_production_plan("bases", [&] -> void {
+    const auto result = g.bases(s.id_D);
+    REQUIRE(result.size() == 1);
+    CHECK(result.front().id == s.id_A);
+  });
+  require_production_plan("subclasses", [&] -> void {
+    const auto result = g.subclasses(s.id_A);
+    REQUIRE(result.size() == 1);
+    CHECK(result.front().id == s.id_D);
+  });
+  require_production_plan("members", [&] -> void {
+    const auto result = g.members(s.id_A);
+    REQUIRE(result.size() == 1);
+    CHECK(result.front().id == s.id_E);
+  });
+  require_production_plan("overrides_of", [&] -> void {
+    const auto result = g.overrides_of(s.id_B);
+    REQUIRE(result.size() == 1);
+    CHECK(result.front().id == s.id_A);
+  });
+  require_production_plan("overridden_by", [&] -> void {
+    const auto result = g.overridden_by(s.id_A);
+    REQUIRE(result.size() == 1);
+    CHECK(result.front().id == s.id_B);
+  });
   require_production_plan("is_virtual_method",
-                          [&] { g.is_virtual_method(s.id_B); });
-  require_production_plan("dispatch_targets",
-                          [&] { g.dispatch_targets(s.id_B); });
-  require_production_plan("redefined", [&] { g.redefined(10); });
-  require_production_plan("definitions", [&] { g.definitions(s.id_A); });
-  require_production_plan("possible_callees",
-                          [&] { g.possible_callees(s.id_A); });
-  require_production_plan("signature", [&] { g.signature(s.id_A); });
-  require_production_plan("type_layers", [&] { g.type_layers(-1); });
-  require_production_plan("type_child", [&] { g.type_child(-1, 1); });
-  require_production_plan("type_users", [&] { g.type_users("missing", 50); });
+                          [&] -> void { CHECK(g.is_virtual_method(s.id_B)); });
+  require_production_plan("dispatch_targets", [&] -> void {
+    CHECK(g.dispatch_targets(s.id_B).empty());
+  });
+  require_production_plan("redefined", [&] -> void {
+    const auto result = g.redefined(10);
+    REQUIRE(result.size() == 1);
+    CHECK(result.front().id == redefined_id);
+  });
+  require_production_plan(
+      "definitions", [&] -> void { CHECK(g.definitions(s.id_A).empty()); });
+  require_production_plan("possible_callees", [&] -> void {
+    CHECK(g.possible_callees(s.id_A).empty());
+  });
+  require_production_plan("signature",
+                          [&] -> void { CHECK(g.signature(s.id_A).empty()); });
+  require_production_plan("type_layers", [&] -> void {
+    const auto result = g.type_layers(-1);
+    REQUIRE(result.size() == 1);
+    CHECK(result.front().status == "unknown");
+  });
+  require_production_plan("type_child",
+                          [&] -> void { CHECK(!g.type_child(-1, 1)); });
+  require_production_plan("type_users", [&] -> void {
+    CHECK(g.type_users("missing", 50).empty());
+  });
   auto legacy_conditional = s.db.raw_db().prepare(
       "SELECT EXISTS(SELECT 1 FROM edge_site WHERE edge_id = ? "
       "AND conditional = 1)");

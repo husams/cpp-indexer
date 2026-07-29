@@ -47,7 +47,6 @@ from .queryplan import (
     Query as PlanQuery,
     Executor,
     all_of,
-    any_of,
     codebase,
     entity,
     eq,
@@ -1642,29 +1641,44 @@ class EntityQuery:
             planned_nodes_src = None
             if transitive and max_depth is None:
                 def planned_nodes_src() -> Iterator[EntityNode]:
-                    frontier = self._g._run_plan_ids(previous_plan)
-                    seen = set(frontier)
-                    while frontier:
-                        seed = (
-                            plan_start(codebase())
-                            | plan_nodes(any_of([eq("id", item) for item in frontier]))
-                            | plan_view("entity")
-                        )
-                        if direction == "out":
-                            step = seed | plan_out(kind.name.lower(), 1, 32)
-                        elif direction == "in":
-                            step = seed | plan_in(kind.name.lower(), 1, 32)
-                        else:
-                            outgoing = seed | plan_out(kind.name.lower(), 1, 32)
-                            incoming = seed | plan_in(kind.name.lower(), 1, 32)
-                            step = outgoing | plan_union(incoming)
-                        reached = self._g._run_plan_ids(step)
-                        frontier = [item for item in reached if item not in seen]
-                        seen.update(frontier)
-                        for item in frontier:
-                            node = self._g.entity(item)
-                            if node is not None:
-                                yield node
+                    emitted: set[int] = set()
+                    for root_id in self._g._run_plan_ids(previous_plan):
+                        root_seen: set[int] = set()
+                        frontier = [root_id]
+                        while frontier:
+                            next_frontier: list[int] = []
+                            for current_id in frontier:
+                                seed = (
+                                    plan_start(codebase())
+                                    | plan_nodes(eq("id", current_id))
+                                    | plan_view("entity")
+                                )
+                                if direction == "out":
+                                    steps = (seed | plan_out(
+                                        kind.name.lower(), 1, 1
+                                    ),)
+                                elif direction == "in":
+                                    steps = (seed | plan_in(
+                                        kind.name.lower(), 1, 1
+                                    ),)
+                                else:
+                                    steps = (
+                                        seed | plan_out(kind.name.lower(), 1, 1),
+                                        seed | plan_in(kind.name.lower(), 1, 1),
+                                    )
+                                for step in steps:
+                                    for item in self._g._run_plan_ids(step):
+                                        if item == root_id or item in root_seen:
+                                            continue
+                                        root_seen.add(item)
+                                        next_frontier.append(item)
+                                        if item in emitted:
+                                            continue
+                                        emitted.add(item)
+                                        node = self._g.entity(item)
+                                        if node is not None:
+                                            yield node
+                            frontier = next_frontier
 
             def edge_keys_src() -> Iterator[EntityEdge]:
                 if transitive:

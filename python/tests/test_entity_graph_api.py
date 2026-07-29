@@ -228,6 +228,62 @@ def test_default_transitive_relation_is_plan_backed(eg):
     assert {node.name for node in query.nodes()} == {"app::Mid", "app::Leaf"}
 
 
+def test_default_transitive_relation_preserves_legacy_bfs_past_plan_window(eg):
+    store = Storage.from_connection(eg._c, eg._q.db_path)
+
+    def add_node(name: str) -> int:
+        node_id = store.add_symbol(Symbol(
+            usr=f"USR::{name}", spelling=name, kind="class", resolved=True,
+        ))
+        eg._c.execute(
+            "INSERT INTO entity_node(id, kind) VALUES (?, ?)",
+            (node_id, int(EntityKind.CLASS)),
+        )
+        return node_id
+
+    root = add_node("bfs_root")
+    child_low = add_node("bfs_child_low")
+    child_high = add_node("bfs_child_high")
+    grandchild_for_high = add_node("bfs_grandchild_for_high")
+    grandchild_for_low = add_node("bfs_grandchild_for_low")
+    for src_id, dst_id in (
+        (child_low, root),
+        (child_high, root),
+        (grandchild_for_low, child_low),
+        (grandchild_for_high, child_high),
+    ):
+        eg._c.execute(
+            "INSERT INTO entity_edge(src_id, dst_id, kind) VALUES (?, ?, ?)",
+            (src_id, dst_id, int(EdgeKind.GENERALIZES)),
+        )
+
+    chain_root = add_node("long_chain_0")
+    chain_ids: list[int] = []
+    previous = chain_root
+    for depth in range(1, 36):
+        current = add_node(f"long_chain_{depth}")
+        eg._c.execute(
+            "INSERT INTO entity_edge(src_id, dst_id, kind) VALUES (?, ?, ?)",
+            (current, previous, int(EdgeKind.GENERALIZES)),
+        )
+        chain_ids.append(current)
+        previous = current
+    eg._c.commit()
+
+    branch_result = [
+        node.id for node in eg.query(root).derived(transitive=True).nodes()
+    ]
+    assert branch_result == [
+        child_low,
+        child_high,
+        grandchild_for_low,
+        grandchild_for_high,
+    ]
+    assert [
+        node.id for node in eg.query(chain_root).derived(transitive=True).nodes()
+    ] == chain_ids
+
+
 def test_neighbors_direction(eg):
     mid = eg.find("app::Mid")[0]
     out = {n.name for n in mid.neighbors(EdgeKind.GENERALIZES, "out")}

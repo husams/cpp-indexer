@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from indexer.entity_graph import ClassKind, EdgeKind, EntityGraph, EntityKind, EntityQuery
-from indexer.query import EDGE_KINDS, Definition, GraphQuery
+from indexer.query import EDGE_KINDS, EDGE_NAMES, Definition, GraphQuery
 from indexer.queryplan import Executor, canonical_json, select as plan_select
 from indexer.storage import SYMBOL_KIND_IDS, Storage
 
@@ -96,6 +96,59 @@ def _legacy_ids(conn, sql, params=()):
     return [row[0] for row in conn.execute(sql, params)]
 
 
+def _stable_site(value):
+    return {
+        **value,
+        "file": Path(value["file"]).name if value.get("file") else None,
+    }
+
+
+_GRAPH_FIXTURE_ORACLES = {
+    "aliased_by": [],
+    "bases": [],
+    "by_name": [],
+    "by_qual_or_spelling": [("symbol", 7)],
+    "call_args": [],
+    "call_args_at": [],
+    "call_sites_into": [("edge_context", 1, 1)],
+    "callees": [("symbol", 2)],
+    "callees_of_definition": [],
+    "callers": [],
+    "definitions": [],
+    "dispatch_targets": [("symbol", 12), ("symbol", 14)],
+    "edges_in": [],
+    "entity_nodes_ready": True,
+    "find": [],
+    "instantiations": [],
+    "members": [],
+    "overridden_by": [("symbol", 12)],
+    "overrides": [],
+    "possible_callees": [],
+    "records_by_name": [],
+    "redefined": [],
+    "references": [],
+    "referencing_definitions": [],
+    "require_edges": None,
+    "signature": "SignatureInfo(returns=None, params=(), of_type=None, underlying=None)",
+    "signature_slots": [],
+    "slot_type_facts_for_ids": ["value", "other", None],
+    "subclasses": [],
+    "symbols_in_file": [("symbol", 1)],
+    "template_args": [],
+    "template_of": None,
+    "template_of_member": None,
+    "template_params": [],
+    "type_layers": [{
+        "path": "root", "relation": "root", "position": 0,
+        "depth": 0, "status": "unknown",
+    }],
+    "type_users": [],
+    "uses_of_definition": [],
+    "virtual_call_sites": [],
+    "virtual_callees": [],
+}
+
+
 def _assert_graph_legacy_parity(operation, args, value, graph):
     """Compare each terminal's selection/cardinality to an independent SQL oracle.
 
@@ -157,7 +210,7 @@ def _assert_graph_legacy_parity(operation, args, value, graph):
             (sid, EDGE_KINDS[kind]),
         )
         actual_ids = [item[1] for item in actual if isinstance(item, tuple) and item[0] == "symbol"]
-        assert actual_ids == expected[:len(actual_ids)]
+        assert actual_ids == expected
         return
     if operation == "dispatch_targets":
         expected = _legacy_ids(
@@ -184,17 +237,60 @@ def _assert_graph_legacy_parity(operation, args, value, graph):
             (sid, *(EDGE_KINDS[name] for name in kind_names)),
         )
         actual_ids = [item[1] for item in actual if item[0] == "symbol"]
-        assert actual_ids == expected[:len(actual_ids)]
+        assert actual_ids == expected
         return
     if operation in {"edges_in", "edges_out", "references"}:
-        assert all(item[0] == "edge" for item in actual)
-        assert all(
-            conn.execute("SELECT 1 FROM edge WHERE id = ?", (item[1],)).fetchone()
-            for item in actual
+        if operation == "edges_out":
+            direction, kinds = "out", ("calls",)
+        elif operation == "edges_in":
+            direction, kinds = "in", ("calls",)
+        else:
+            direction, kinds = "in", ("calls", "uses", "alias_of", "of_type")
+        source_column = "src_id" if direction == "out" else "dst_id"
+        marks = ",".join("?" * len(kinds))
+        rows = conn.execute(
+            "SELECT e.id, e.src_id, e.dst_id, e.kind, "
+            "CASE WHEN e.count <> 0 THEN e.count ELSE 1 END AS effective_count "
+            f"FROM edge e WHERE e.{source_column} = ? "
+            f"AND e.kind IN ({marks}) "
+            "ORDER BY -effective_count, e.kind, e.id",
+            (sid, *(EDGE_KINDS[kind] for kind in kinds)),
         )
+        expected = [
+            ("edge", row[0], row[1], row[2], EDGE_NAMES[row[3]], row[4])
+            for row in rows
+        ]
+        assert actual == expected
         return
     if operation in {"sites", "declaration_sites"}:
         assert all(isinstance(item, dict) for item in actual)
+        if operation == "sites":
+            edge_id = args[0].edge_id
+            rows = conn.execute(
+                "SELECT es.file_id, es.line, es.col, es.conditional, es.args_sig "
+                "FROM edge_site_read es WHERE es.edge_id = ? "
+                "ORDER BY es.file_id, es.line, es.col",
+                (edge_id,),
+            )
+        else:
+            rows = conn.execute(
+                "SELECT ds.file_id, ds.line, ds.col, 0, NULL "
+                "FROM decl_site ds WHERE ds.symbol_id = ? "
+                "ORDER BY ds.file_id, ds.line, ds.col",
+                (sid,),
+            )
+        files = graph._files()
+        expected = [
+            {
+                "file": files.get(row[0], (None, None))[0] if row[0] else None,
+                "line": row[1],
+                "col": row[2],
+                "conditional": bool(row[3]),
+                "args_sig": row[4],
+            }
+            for row in rows
+        ]
+        assert actual == expected
         return
     if operation == "edge_count":
         assert actual == conn.execute("SELECT COUNT(*) FROM edge").fetchone()[0]
@@ -203,16 +299,119 @@ def _assert_graph_legacy_parity(operation, args, value, graph):
         assert actual["edges"] == conn.execute("SELECT COUNT(*) FROM edge").fetchone()[0]
         assert actual["symbols"] == conn.execute("SELECT COUNT(*) FROM symbol").fetchone()[0]
         return
-    # Every remaining public terminal still gets an independent storage
-    # invariant: hydrated identities must exist in the legacy table they claim.
-    for item in actual if isinstance(actual, list) else []:
-        if isinstance(item, tuple) and item and item[0] == "symbol":
-            assert conn.execute("SELECT 1 FROM symbol WHERE id = ?", (item[1],)).fetchone()
-        if isinstance(item, tuple) and item and item[0] == "definition":
-            assert conn.execute("SELECT 1 FROM definition WHERE id = ?", (item[2],)).fetchone()
+    if operation == "def_decl_locations":
+        definition, declaration = actual
+        assert Path(definition[0]).name == "main.c"
+        assert definition[1:] == [10, 1]
+        assert declaration is None
+        return
+    if operation == "dispatch_selection":
+        assert actual["receiver_static_type"]["id"] == 7
+        assert actual["declared_target"]["id"] == 8
+        assert [
+            (
+                candidate["selecting_type"]["id"],
+                candidate["target"]["id"],
+                candidate["inherited"],
+            )
+            for candidate in actual["candidates"]
+        ] == [(11, 12, False), (13, 14, False)]
+        assert actual["prunable"] is True
+        assert actual["unprunable_reasons"] == []
+        return
+    if operation == "is_virtual_method":
+        expected = conn.execute(
+            "SELECT is_pure OR EXISTS("
+            "SELECT 1 FROM edge WHERE kind = ? AND (src_id = ? OR dst_id = ?)"
+            ") FROM symbol WHERE id = ?",
+            (EDGE_KINDS["overrides"], sid, sid, sid),
+        ).fetchone()[0]
+        assert actual is bool(expected)
+        return
+    if operation in {"receiver_provenance"}:
+        assert _stable_site(actual) == {
+            "file": "main.c", "line": 12, "col": 5,
+            "conditional": False, "args_sig": None,
+        }
+        return
+    if operation == "reaches":
+        assert actual == [("symbol", 1), ("symbol", 2)]
+        return
+    if operation == "walk":
+        assert actual == ("traversal", (1, 2, 3, 6))
+        return
+    if operation not in _GRAPH_FIXTURE_ORACLES:
+        pytest.fail(f"missing exact legacy oracle for GraphQuery.{operation}")
+    assert actual == _GRAPH_FIXTURE_ORACLES[operation]
 
 
-def _assert_entity_legacy_parity(operation, value, graph):
+_ENTITY_FIXTURE_ORACLES = {
+    "abstract_class": [("symbol", 7)],
+    "by_kind": [],
+    "edges": [
+        ("Derived", "generalizes", "Base", 1, "protected"),
+        ("Derived2", "generalizes", "Derived", 1, "protected"),
+    ],
+    "entities": [("symbol", 7), ("symbol", 10), ("symbol", 11), ("symbol", 13)],
+    "entity": ("symbol", 1),
+    "find": [("symbol", 7)],
+    "instance": [],
+    "interface": [],
+    "klass": [],
+    "kinds": [1],
+    "query": [("symbol", 7), ("symbol", 10), ("symbol", 11), ("symbol", 13)],
+    "record": [("symbol", 7)],
+    "struct": [],
+    "template": [],
+    "abstract": [("symbol", 7)],
+    "aggregated_in": [],
+    "aggregates": [],
+    "associated_with": [],
+    "associates": [],
+    "bases": [("symbol", 7), ("symbol", 11)],
+    "befriended_by": [],
+    "composed_in": [],
+    "composes": [],
+    "concrete": [("symbol", 10), ("symbol", 11), ("symbol", 13)],
+    "count": 4,
+    "created_by": [],
+    "creates": [],
+    "derived": [("symbol", 11), ("symbol", 13)],
+    "destroyed_by": [],
+    "destroys": [],
+    "displays": ["Base", "Base::Nested", "Derived", "Derived2"],
+    "exclude": [("symbol", 10), ("symbol", 11), ("symbol", 13)],
+    "first": ("symbol", 7),
+    "friends": [],
+    "implemented_by": [],
+    "implementors": [],
+    "implements": [],
+    "instances": [],
+    "instantiates": [],
+    "interfaces": [],
+    "named": [("symbol", 7), ("symbol", 10)],
+    "names": ["Base", "Base::Nested", "Derived", "Derived2"],
+    "nodes": [("symbol", 7), ("symbol", 10), ("symbol", 11), ("symbol", 13)],
+    "of_class_kind": [("symbol", 10), ("symbol", 11), ("symbol", 13)],
+    "of_kind": [("symbol", 7), ("symbol", 11), ("symbol", 13)],
+    "relation": [("symbol", 7), ("symbol", 11)],
+    "specialized_by": [],
+    "specializes": [],
+    "step": [("symbol", 7), ("symbol", 11)],
+    "then": [("symbol", 7), ("symbol", 11)],
+    "to_dict": [
+        (7, "Base", "class", "abstract_class", "abstract"),
+        (10, "Base::Nested", "struct", "class", "concrete"),
+        (11, "Derived", "class", "class", "concrete"),
+        (13, "Derived2", "class", "class", "concrete"),
+    ],
+    "used_by": [],
+    "uses": [],
+    "where": [("symbol", 7), ("symbol", 10), ("symbol", 11), ("symbol", 13)],
+}
+
+
+def _assert_entity_legacy_parity(owner, operation, value, graph):
     """Check EntityGraph/EntityQuery terminals against raw entity tables."""
     actual = _semantic(value)
     conn = graph._c
@@ -233,13 +432,30 @@ def _assert_entity_legacy_parity(operation, value, graph):
             },
         }
         return
-    for item in actual if isinstance(actual, list) else []:
-        if isinstance(item, tuple) and item and item[0] == "symbol":
-            assert item[1] in valid_nodes
-        if isinstance(item, tuple) and item and item[0] == "edge":
-            assert conn.execute(
-                "SELECT 1 FROM entity_edge WHERE id = ?", (item[1],)
-            ).fetchone()
+    if operation == "edges":
+        if owner == "EntityQuery":
+            assert actual == []
+            return
+        actual = [
+            (
+                item["src"], item["kind"], item["dst"], item["count"],
+                item.get("access", "public"),
+            )
+            for item in actual
+        ]
+    elif operation == "kinds":
+        actual = [int(item) for item in actual]
+    elif operation == "to_dict":
+        actual = [
+            (
+                item["id"], item["name"], item["kind"],
+                item["entity_type"], item["class_kind"],
+            )
+            for item in actual
+        ]
+    if operation not in _ENTITY_FIXTURE_ORACLES:
+        pytest.fail(f"missing exact legacy oracle for entity operation {operation}")
+    assert actual == _ENTITY_FIXTURE_ORACLES[operation]
 
 
 def _assert_operation_plan(
@@ -410,7 +626,7 @@ def test_entity_inventory_executes_production_plans(g, monkeypatch):
                 value = method()
             if isinstance(value, EntityQuery):
                 value = list(value.nodes())
-            _assert_entity_legacy_parity(operation, value, graph)
+            _assert_entity_legacy_parity(owner, operation, value, graph)
             _consume(value)
             _assert_operation_plan(
                 calls, truncated, before, f"{owner}.{operation}",
@@ -441,7 +657,7 @@ def test_entity_inventory_executes_production_plans(g, monkeypatch):
                 value = method()
             if isinstance(value, EntityQuery):
                 value = list(value.nodes())
-            _assert_entity_legacy_parity(operation, value, graph)
+            _assert_entity_legacy_parity(owner, operation, value, graph)
             _consume(value)
             _assert_operation_plan(
                 calls, truncated, before, f"{owner}.{operation}",

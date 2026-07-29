@@ -1118,11 +1118,23 @@ private:
                  const std::optional<int64_t> &after_id = std::nullopt,
                  const std::optional<int64_t> &node_limit = std::nullopt) {
     if (st.view == View::Edge && pred && pred->op == PredOp::Eq &&
-        pred->field == "edge_id" && pred->int_value && !after_id) {
-      auto edge = read_.read_db().prepare("SELECT id FROM edge WHERE id = ?");
-      edge.bind(1, *pred->int_value);
-      if (edge.step()) {
-        st.keys.push_back({.a = edge.col_int64(0)});
+        pred->int_value &&
+        (pred->field == "edge_id" || pred->field == "src_id" ||
+         pred->field == "dst_id")) {
+      const std::string column = pred->field == "edge_id" ? "id" : pred->field;
+      std::string sql = "SELECT id FROM edge WHERE " + column + " = ?";
+      std::vector<SqlValue> args{SqlValue(*pred->int_value)};
+      if (after_id) {
+        sql += " AND id > ?";
+        args.emplace_back(*after_id);
+      }
+      sql += " ORDER BY id LIMIT ?";
+      const int64_t cap = node_limit.value_or(kEnumerateBudget);
+      args.emplace_back(cap + 1);
+      st.keys = logical_rows(View::Edge, sql, args);
+      if (st.keys.size() > static_cast<std::size_t>(cap)) {
+        st.keys.resize(static_cast<std::size_t>(cap));
+        st.truncated = true;
       }
       st.view = View::Edge;
       return;
