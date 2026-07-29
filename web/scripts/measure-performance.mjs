@@ -29,6 +29,7 @@ const makeView = (fixture) => {
     identity: {workspace: 'performance', index: 'pinned-fixture', fact_sets: ['symbols', 'edges'], freshness: 'current'},
     request: {input_kind: 'symbol', input: 'Node 0', node_budget: 2500, edge_budget: 5000, site_budget: 10000, byte_budget: 8388608},
     metadata: {status: 'complete', identity: {workspace: 'performance', freshness: 'current'}},
+    overlays: {proof: {kind: 'proof', claims: [{label: 'fixture claim', state: 'proved'}]}},
     nodes, edges, view_state: {},
   };
 };
@@ -45,6 +46,13 @@ try {
   for (const fixture of measurement.cases) {
     const view = makeView(fixture);
     const page = await browser.newPage({viewport: {width: 1280, height: 900}});
+    await page.addInitScript(() => {
+      window.__cidxPerformanceEvents = [];
+      window.CIDX_PERFORMANCE_TEST = {};
+      window.CIDX_PERFORMANCE_OBSERVER = (name, detail) => {
+        window.__cidxPerformanceEvents.push({name, detail});
+      };
+    });
     await page.route('**/*', (route) => route.request().url().startsWith('file://') ? route.continue() : route.abort());
     const snapshot = html.replace('__CIDX_STYLES__', () => styles)
       .replace('__CIDX_GRAPH_VIEW__', () => JSON.stringify(view))
@@ -58,25 +66,34 @@ try {
     await page.goto(`file://${file}`);
     await page.waitForSelector('#accessible-nodes button', {state: 'attached'});
     const load_ms = Date.now() - start;
-    const layoutStart = Date.now();
-    await page.waitForSelector('#cy canvas, #cy svg', {state: 'attached'});
-    const layout_ms = Date.now() - layoutStart;
+    await page.waitForFunction(() => window.__cidxPerformanceEvents.some((event) => event.name === 'layout-complete'));
+    const layout_ms = Date.now() - start;
+    const clearEvents = () => page.evaluate(() => { window.__cidxPerformanceEvents = []; });
+    const waitForEvent = (name) => page.waitForFunction((expected) =>
+      window.__cidxPerformanceEvents.some((event) => event.name === expected), name);
     const panZoomStart = Date.now();
+    await clearEvents();
     await page.locator('#fit').evaluate((button) => button.click());
-    await page.mouse.move(640, 450);
-    await page.mouse.wheel(0, -120);
-    await page.mouse.wheel(0, 120);
+    await waitForEvent('viewport-complete');
     const pan_zoom_ms = Date.now() - panZoomStart;
     const selectionStart = Date.now();
     await page.locator('#accessible-nodes button').first().evaluate((button) => button.click());
     await page.waitForFunction(() => document.querySelector('#details')?.textContent?.includes('Canonical id'));
     const selection_ms = Date.now() - selectionStart;
     const updateStart = Date.now();
-    await page.locator('#search').fill('Node 0');
-    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
+    await clearEvents();
+    await page.evaluate((next) => window.CIDX_PERFORMANCE_TEST.appendView(next), {
+      nodes: [{id: `update-${fixture.id}`, name: 'Progressive update', usr: 'update', kind: 'function', location: 'fixture.cpp:9999', status: {completeness: 'complete'}, color: '#65d6c3', border: '#65d6c3'}],
+      edges: [], metadata: {status: 'complete'}, request: view.request,
+    });
+    await waitForEvent('graph-update-complete');
     const progressive_update_ms = Date.now() - updateStart;
     const memory_mb = await page.evaluate(() => (performance.memory?.usedJSHeapSize || 0) / 1024 / 1024);
-    const export_bytes = Buffer.byteLength(await page.content());
+    await clearEvents();
+    await page.locator('#overlay-kind').selectOption('proof');
+    await page.locator('#overlay-export').evaluate((button) => button.click());
+    await waitForEvent('overlay-export-complete');
+    const export_bytes = await page.evaluate(() => window.__cidxPerformanceEvents.find((event) => event.name === 'overlay-export-complete')?.detail || 0);
     if (memory_mb === 0) throw new Error(`${fixture.id}: Chromium memory measurement unavailable`);
     const result = {id: fixture.id, nodes: fixture.nodes, edges: fixture.edges, load_ms, layout_ms, pan_zoom_ms, selection_ms, progressive_update_ms, memory_mb: Number(memory_mb.toFixed(2)), export_bytes};
     for (const [name, limit] of Object.entries(budget.runtime)) {

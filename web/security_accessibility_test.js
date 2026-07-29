@@ -53,7 +53,7 @@ global.cytoscape = () => {
   return {
     add() {}, nodes() { return {forEach() {}, map() { return []; }, length: 0, reduce: (_fn, init) => init, positions() {}}; },
     $: () => ({length: 0, remove() {}}), $id: () => ({length: 0}), on() {}, fit() {}, animate() {},
-    layout: () => ({run() {}}), zoom: () => 1, pan: () => ({x: 0, y: 0}), elements: () => ({removeClass() {}}),
+    layout: () => ({one() {}, run() {}}), zoom: () => 1, pan: () => ({x: 0, y: 0}), elements: () => ({removeClass() {}}),
   };
 };
 

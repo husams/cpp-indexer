@@ -304,6 +304,7 @@ if (typeof document !== 'undefined') {
     maxNodes: 2500, maxEdges: 5000, maxSites: 10000,
     maxLabelChars: 250000, maxJsonBytes: 8 * 1024 * 1024,
   });
+  const performanceEvent = (name, detail) => window.CIDX_PERFORMANCE_OBSERVER?.(name, detail);
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const safeClass = (value) => String(value ?? '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32);
   const badge = (name, cls) => `<span class="badge ${safeClass(cls)}">${esc(name)}</span>`;
@@ -518,6 +519,12 @@ if (typeof document !== 'undefined') {
       memberIds.forEach((id) => byId.get(id)?.move({parent: groupId}));
     });
   };
+  const runLayout = () => {
+    if (typeof cy?.layout !== 'function') return;
+    const layout = cy.layout({name:'cose',animate:false,padding:40});
+    if (typeof layout.one === 'function') layout.one('layoutstop', () => performanceEvent('layout-complete'));
+    layout.run();
+  };
   const renderBudgetRefusal = (candidate, reason) => {
     const safeCandidate = candidate && typeof candidate === 'object' ? candidate : {nodes: [], edges: [], metadata: {}};
     view = {
@@ -560,6 +567,7 @@ if (typeof document !== 'undefined') {
       });
       cy.add(newElements);
       view = merged;
+      performanceEvent('graph-update-complete');
     } else {
       view = next;
       nodeById.clear();
@@ -567,7 +575,8 @@ if (typeof document !== 'undefined') {
       (view.nodes || []).forEach((n) => nodeById.set(String(n.id), n));
       (view.edges || []).forEach((e) => edgeIds.add(String(e.id)));
       const elements = [...(view.nodes || []).map(elementForNode), ...(view.edges || []).map(elementForEdge)];
-      cy = cytoscape({container: document.getElementById('cy'), elements, style: [{selector:'node',style:{'background-color':'data(color)','label':'data(label)','color':'#e7edf4','font-size':10,'text-wrap':'wrap','text-max-width':120,'text-valign':'bottom','text-margin-y':7,'width':18,'height':18,'border-width':2,'border-color':'data(border)'}},{selector:'.cidx-group',style:{'background-opacity':.08,'border-width':1,'border-color':'#3a4a5c','label':'data(label)','text-valign':'top','font-size':10,'color':'#8fa0b3'}},{selector:'edge',style:{'width':1.5,'line-color':'data(color)','target-arrow-color':'data(color)','target-arrow-shape':'triangle','curve-style':'bezier','label':'data(kind)','font-size':8,'color':'#9fb0c0','text-background-color':'#0c1117','text-background-opacity':.8}},{selector:'.filtered',style:{display:'none'}},{selector:':selected',style:{'overlay-color':'#fff','overlay-opacity':.12}}], layout:{name:'cose',animate:false,padding:40}, wheelSensitivity:.25});
+      cy = cytoscape({container: document.getElementById('cy'), elements, style: [{selector:'node',style:{'background-color':'data(color)','label':'data(label)','color':'#e7edf4','font-size':10,'text-wrap':'wrap','text-max-width':120,'text-valign':'bottom','text-margin-y':7,'width':18,'height':18,'border-width':2,'border-color':'data(border)'}},{selector:'.cidx-group',style:{'background-opacity':.08,'border-width':1,'border-color':'#3a4a5c','label':'data(label)','text-valign':'top','font-size':10,'color':'#8fa0b3'}},{selector:'edge',style:{'width':1.5,'line-color':'data(color)','target-arrow-color':'data(color)','target-arrow-shape':'triangle','curve-style':'bezier','label':'data(kind)','font-size':8,'color':'#9fb0c0','text-background-color':'#0c1117','text-background-opacity':.8}},{selector:'.filtered',style:{display:'none'}},{selector:':selected',style:{'overlay-color':'#fff','overlay-opacity':.12}}], layout:{name:'preset'}, wheelSensitivity:.25});
+      runLayout();
       cy.on('tap', 'node,edge', (event) => event.target.group() === 'nodes' ? (event.target.data().cidxGroup ? undefined : showNode(nodeById.get(event.target.id()))) : showEdge(event.target.data()));
       applyGrouping();
     }
@@ -577,6 +586,9 @@ if (typeof document !== 'undefined') {
     if (!selectedNode) showSnapshot();
     document.getElementById('empty').hidden = nodeById.size !== 0;
   };
+  if (window.CIDX_PERFORMANCE_TEST) {
+    window.CIDX_PERFORMANCE_TEST.appendView = (next) => addView(next, true);
+  }
   // ---- HSE-92: typed live operations -------------------------------------
   const fetchGraph = async (params) => {
     const query = new URLSearchParams({token: liveToken, ...params});
@@ -876,9 +888,9 @@ if (typeof document !== 'undefined') {
       if (liveControls) liveControls.hidden = false;
       startFreshnessMonitor();
     }
-    document.getElementById('fit').onclick = () => cy.fit(undefined, 40);
+    document.getElementById('fit').onclick = () => { if (typeof cy.one === 'function') cy.one('viewport', () => performanceEvent('viewport-complete')); cy.fit(undefined, 40); };
     document.getElementById('expand').onclick = () => expandDirection('out');
-    document.getElementById('reset').onclick = () => { cy.elements().removeClass('filtered'); cy.layout({name:'cose',animate:false,padding:40}).run(); };
+    document.getElementById('reset').onclick = () => { cy.elements().removeClass('filtered'); runLayout(); };
     const viewKey = `cidx-view:${view.schema || 'unknown'}:${view.request?.root || view.request?.query || 'empty'}`;
     document.getElementById('save').onclick = () => { localStorage.setItem(viewKey, JSON.stringify({positions: cy.nodes().reduce((p, n) => ({...p, [n.id()]: n.position()}), {}), zoom: cy.zoom(), pan: cy.pan()})); };
     document.getElementById('restore').onclick = () => { try { const saved = JSON.parse(localStorage.getItem(viewKey) || 'null'); if (!saved) return; cy.nodes().positions((n) => saved.positions?.[n.id()] || n.position()); if (saved.zoom) cy.zoom(saved.zoom); if (saved.pan) cy.pan(saved.pan); } catch (_error) {} };
@@ -894,6 +906,7 @@ if (typeof document !== 'undefined') {
         link.href = URL.createObjectURL(new Blob([payload], {type: 'application/json'}));
         link.download = `cidx-${overlay.kind || 'overlay'}-snapshot.json`;
         link.click();
+        performanceEvent('overlay-export-complete', payload.length);
         URL.revokeObjectURL(link.href);
       } catch (error) {
         reportError(error);

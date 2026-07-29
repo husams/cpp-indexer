@@ -19,14 +19,14 @@ origin.
 ## M4 qualification gates
 
 `npm run check` verifies the pinned offline asset, dependency inventory, browser
-budgets, executable qualification scenarios, DOM-level regressions, and
+budgets, production `cidx ui export` qualification scenarios, DOM-level regressions, and
 headless Chromium measurements over small, mixed-degree, and high-degree graph
 fixtures. The Playwright `file://` smoke test and performance measurement block
 network access. The
 published limits are in `performance-budget.json`; an incoming view that
 exceeds them is refused before Cytoscape layout starts. The
-`qualification-manifest.json` records the frontend, Cytoscape, catalog, schema,
-workspace, and corpus identifiers used by the M4 qualification.
+`qualification-manifest.json` records the frontend, CIDX/schema, catalog,
+committed index, and corpus identifiers used by the M4 qualification.
 
 The live server binds to IPv4 loopback, requires its ephemeral session token,
 rejects a non-matching Origin, caps request/response sizes, times out incomplete

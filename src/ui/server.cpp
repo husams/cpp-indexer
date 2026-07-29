@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <netinet/in.h>
 #include <poll.h>
@@ -64,14 +65,13 @@ std::string token() {
 
 bool constant_time_equal(std::string_view left, std::string_view right) {
   const std::size_t length = std::max(left.size(), right.size());
-  auto difference = static_cast<std::uint8_t>(left.size() ^ right.size());
+  std::size_t difference = left.size() ^ right.size();
   for (std::size_t index = 0; index < length; ++index) {
     const auto left_byte =
         index < left.size() ? static_cast<unsigned char>(left[index]) : 0U;
     const auto right_byte =
         index < right.size() ? static_cast<unsigned char>(right[index]) : 0U;
-    difference =
-        static_cast<std::uint8_t>(difference | (left_byte ^ right_byte));
+    difference |= static_cast<std::size_t>(left_byte ^ right_byte);
   }
   return difference == 0;
 }
@@ -222,12 +222,21 @@ bool read_request(int client, std::string &request, std::size_t max_bytes,
   }
   request.clear();
   request.reserve(std::min<std::size_t>(max_bytes, 4096));
-  const int wait_ms = std::max(0, timeout_ms);
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(std::max(0, timeout_ms));
   std::array<char, 4096> buffer{};
   while (!request.contains("\r\n\r\n")) {
     if (request.size() == max_bytes) {
       return false;
     }
+    const auto remaining =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now());
+    if (remaining <= std::chrono::milliseconds::zero()) {
+      return false;
+    }
+    const auto wait_ms = static_cast<int>(std::min<std::int64_t>(
+        remaining.count(), std::numeric_limits<int>::max()));
     pollfd ready{};
     ready.fd = client;
     ready.events = POLLIN;
