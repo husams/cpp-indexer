@@ -248,6 +248,9 @@ try {
   await execute(['import', '--db', bankingSource, '--name', 'banking',
     '--repo', 'banking', '--universe', 'qualification:banking'],
     {env: {...process.env, INDEXER_CACHE: bankingCache}});
+  await sqlite(join(bankingCache, 'index.db'),
+    "UPDATE repository SET remote_url='https://qualification.invalid/banking.git' " +
+    "WHERE name='banking';");
   await execute(['index'], {env: {...process.env, INDEXER_CACHE: bankingCache}});
   await execute(['resolve'], {env: {...process.env, INDEXER_CACHE: bankingCache}});
   const bankingDb = join(bankingCache, 'index.db');
@@ -261,6 +264,9 @@ try {
       '--name', 'banking-peer', '--repo', 'banking-peer',
       '--universe', 'qualification:banking-peer'],
       {env: {...process.env, INDEXER_CACHE: multiCache}});
+    await sqlite(join(multiCache, 'index.db'),
+      "UPDATE repository SET remote_url='https://qualification.invalid/banking-peer.git' " +
+      "WHERE name='banking-peer';");
     await execute(['index', peerFile], {env: {...process.env, INDEXER_CACHE: multiCache}});
     await execute(['resolve'], {env: {...process.env, INDEXER_CACHE: multiCache}});
     scenarioDbs.set(`${workspace}:multi-repository`, join(multiCache, 'index.db'));
