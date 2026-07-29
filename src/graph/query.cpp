@@ -5,9 +5,9 @@
 // count-fallback logic (R2/R3) are copied exactly.
 #include "graph/query.hpp"
 
+#include "query/exec.hpp"
 #include "storage/sqlite_read_adapter.hpp"
 #include "storage/storage.hpp"
-#include "query/exec.hpp"
 
 #include <algorithm>
 #include <filesystem>
@@ -29,8 +29,7 @@ namespace cidx::graph {
 // ---------------------------------------------------------------------------
 
 GraphQuery::GraphQuery(storage::GraphReadPort &db, std::string db_path)
-    : db_(db),
-      query_read_(dynamic_cast<query::QueryReadPort *>(&db)),
+    : db_(db), query_read_(dynamic_cast<query::QueryReadPort *>(&db)),
       db_path_(std::move(db_path)) {}
 
 GraphQuery GraphQuery::open(const std::string &db_path) {
@@ -52,9 +51,10 @@ GraphQuery GraphQuery::open(const std::string &db_path) {
                          "handlers");
 }
 
-query::Plan GraphQuery::plan_for(
-    int64_t sym_id, const std::optional<std::string> &relation,
-    const std::string &direction, int min_depth, int max_depth) {
+query::Plan GraphQuery::plan_for(int64_t sym_id,
+                                 const std::optional<std::string> &relation,
+                                 const std::string &direction, int min_depth,
+                                 int max_depth) {
   const auto sym = get_by_id(sym_id);
   if (!sym) {
     return (query::start(query::codebase()) |
@@ -99,8 +99,7 @@ std::vector<int64_t> GraphQuery::adapter_ids(const query::Plan &plan) {
   return ids;
 }
 
-std::optional<std::unordered_set<int64_t>>
-GraphQuery::adapter_peer_ids(
+std::optional<std::unordered_set<int64_t>> GraphQuery::adapter_peer_ids(
     int64_t sym_id, const std::string &direction,
     const std::optional<std::vector<int64_t>> &kind_ids_opt) {
   std::unordered_set<int64_t> ids;
@@ -122,8 +121,8 @@ GraphQuery::adapter_peer_ids(
       continue;
     }
     try {
-      const auto rows = adapter_ids(plan_for(
-          sym_id, name->second, direction, /*min_depth=*/1, /*max_depth=*/1));
+      const auto rows = adapter_ids(plan_for(sym_id, name->second, direction,
+                                             /*min_depth=*/1, /*max_depth=*/1));
       ids.insert(rows.begin(), rows.end());
     } catch (const query::PlanError &) {
       // Cross-view typed relations (for example symbol.of_type) remain
@@ -336,8 +335,7 @@ Site GraphQuery::make_site(const EdgeSiteRow &row) {
 std::optional<Sym> GraphQuery::get_by_id(int64_t id) {
   if (query_read_) {
     const auto ids = adapter_ids(
-        (query::start(query::codebase()) |
-         query::nodes(query::eq("id", id)))
+        (query::start(query::codebase()) | query::nodes(query::eq("id", id)))
             .plan());
     if (std::ranges::find(ids, id) == ids.end()) {
       return std::nullopt;
@@ -354,8 +352,7 @@ std::optional<Sym> GraphQuery::get_by_usr(const std::string &usr) {
   std::vector<Symbol> matches;
   if (query_read_) {
     const auto ids = adapter_ids(
-        (query::start(query::codebase()) |
-         query::nodes(query::eq("usr", usr)))
+        (query::start(query::codebase()) | query::nodes(query::eq("usr", usr)))
             .plan());
     for (const auto id : ids) {
       if (auto sym = db_.graph_symbol_by_id(id)) {
@@ -399,10 +396,10 @@ std::vector<Sym> GraphQuery::find(const std::string &pattern,
     }
     glob_pattern.push_back('*');
     try {
-      const auto ids = adapter_ids(
-          (query::start(query::codebase()) |
-           query::nodes(query::glob("name", glob_pattern)))
-              .plan());
+      const auto ids =
+          adapter_ids((query::start(query::codebase()) |
+                       query::nodes(query::glob("name", glob_pattern)))
+                          .plan());
       candidate_ids.emplace(ids.begin(), ids.end());
     } catch (const query::PlanError &) {
       // A capped plan result is not a complete compatibility filter. Keep

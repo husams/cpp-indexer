@@ -237,12 +237,12 @@ TEST_CASE("graph query adapter lowers through the shared legacy plan fixture") {
 
   const auto plan = graph.plan_for(id, "calls", "out", 1, 2);
   const std::string fixture = read_file(CIDX_LEGACY_GRAPH_PLAN_GOLDEN);
-  const std::string expected = fixture.substr(
-      fixture.find("== symbol_calls_depth_two ==\n") +
-      std::string("== symbol_calls_depth_two ==\n").size(),
-      fixture.find("\n== entity_inherits ==") -
-          fixture.find("== symbol_calls_depth_two ==\n") -
-          std::string("== symbol_calls_depth_two ==\n").size());
+  const std::string expected =
+      fixture.substr(fixture.find("== symbol_calls_depth_two ==\n") +
+                         std::string("== symbol_calls_depth_two ==\n").size(),
+                     fixture.find("\n== entity_inherits ==") -
+                         fixture.find("== symbol_calls_depth_two ==\n") -
+                         std::string("== symbol_calls_depth_two ==\n").size());
   CHECK(canonical_json(plan) ==
         expected.substr(0, expected.find_last_not_of("\n") + 1));
 }
