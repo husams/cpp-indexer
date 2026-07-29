@@ -169,6 +169,9 @@ _FIELDS = {name: (filterable, is_string) for name, filterable, is_string in _GEN
 # It is intentionally not filterable and does not change the persisted catalog;
 # it expresses the historical shortest-name ordering in the shared plan.
 _FIELDS["name_length"] = (False, False)
+_FIELDS["multi_def"] = (True, False)
+_FIELDS["negative_multi_def"] = (False, False)
+_FIELDS["is_instantiation"] = (True, False)
 # The compatibility adapter uses the persisted file id to narrow a symbol
 # stream after resolving a path substring through the read-only file catalog.
 _FIELDS["file"] = (True, False)
@@ -246,7 +249,11 @@ def eq(field_name: str, value: Any) -> Pred:
     return Pred(op="eq", field=field_name, str_values=(value,))
 
 
-def ne(field_name: str, value: str) -> Pred:
+def ne(field_name: str, value: Any) -> Pred:
+    if isinstance(value, bool):
+        return Pred(op="ne", field=field_name, int_value=1 if value else 0)
+    if isinstance(value, int):
+        return Pred(op="ne", field=field_name, int_value=value)
     return Pred(op="ne", field=field_name, str_values=(value,))
 
 
@@ -1460,6 +1467,12 @@ def _col_expr(field_name: str, symbol_alias: str = "s",
         return f"COALESCE({symbol_alias}.qual_name, {symbol_alias}.spelling)"
     if field_name == "name_length":
         return f"LENGTH(COALESCE({symbol_alias}.qual_name, {symbol_alias}.spelling))"
+    if field_name == "multi_def":
+        return f"{symbol_alias}.multi_def"
+    if field_name == "negative_multi_def":
+        return f"-{symbol_alias}.multi_def"
+    if field_name == "is_instantiation":
+        return f"{symbol_alias}.is_instantiation"
     if field_name == "spelling":
         return f"{symbol_alias}.spelling"
     if field_name == "qual_name":

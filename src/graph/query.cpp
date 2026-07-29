@@ -24,6 +24,39 @@
 
 namespace cidx::graph {
 
+namespace {
+
+int adapter_cell_rank(const query::Cell &cell) {
+  if (std::holds_alternative<std::nullptr_t>(cell)) {
+    return 2;
+  }
+  if (std::holds_alternative<int64_t>(cell)) {
+    return 0;
+  }
+  return 1;
+}
+
+bool adapter_cell_less(const query::Cell &lhs, const query::Cell &rhs) {
+  const int lhs_rank = adapter_cell_rank(lhs);
+  const int rhs_rank = adapter_cell_rank(rhs);
+  if (lhs_rank != rhs_rank) {
+    return lhs_rank < rhs_rank;
+  }
+  if (lhs_rank == 0) {
+    return std::get<int64_t>(lhs) < std::get<int64_t>(rhs);
+  }
+  if (lhs_rank == 1) {
+    return std::get<std::string>(lhs) < std::get<std::string>(rhs);
+  }
+  return false;
+}
+
+bool adapter_cell_equal(const query::Cell &lhs, const query::Cell &rhs) {
+  return !adapter_cell_less(lhs, rhs) && !adapter_cell_less(rhs, lhs);
+}
+
+} // namespace
+
 // ---------------------------------------------------------------------------
 // Construction
 // ---------------------------------------------------------------------------
@@ -99,11 +132,116 @@ std::vector<int64_t> GraphQuery::adapter_ids(const query::Plan &plan) {
   return ids;
 }
 
+bool GraphQuery::adapter_symbol_exists(int64_t sym_id) {
+  if (!query_read_) {
+    return true;
+  }
+  const auto ids = adapter_ids(
+      (query::start(query::codebase()) | query::nodes(query::eq("id", sym_id)))
+          .plan());
+  return std::ranges::find(ids, sym_id) != ids.end();
+}
+
+bool GraphQuery::adapter_edge_exists(int64_t edge_id) {
+  if (!query_read_) {
+    return true;
+  }
+  const auto ids = adapter_ids((query::start(query::codebase()) |
+                                query::view(query::View::Edge) |
+                                query::nodes(query::eq("edge_id", edge_id)))
+                                   .plan());
+  return !ids.empty();
+}
+
 std::vector<int64_t> GraphQuery::adapter_ordered_ids(const query::Plan &plan) {
   if (!query_read_) {
     return {};
   }
   query::Executor executor(*query_read_);
+
+  const auto normalized = query::validate(plan);
+  std::vector<std::string> order_fields;
+  std::optional<int64_t> result_limit;
+  for (const auto &stage : normalized.stages) {
+    if (stage.op == query::StageOp::OrderBy) {
+      order_fields = stage.fields;
+    } else if (stage.op == query::StageOp::Limit) {
+      result_limit = stage.n;
+    }
+  }
+
+  if (!order_fields.empty()) {
+    query::Plan collection = normalized;
+    std::vector<query::Stage> stages;
+    stages.reserve(collection.stages.size() + 1);
+    for (const auto &stage : collection.stages) {
+      if (stage.op != query::StageOp::Select &&
+          stage.op != query::StageOp::OrderBy &&
+          stage.op != query::StageOp::Limit) {
+        stages.push_back(stage);
+      }
+    }
+    std::vector<std::string> fields{"id"};
+    for (const auto &field : order_fields) {
+      if (std::ranges::find(fields, field) == fields.end()) {
+        fields.push_back(field);
+      }
+    }
+    stages.push_back(query::select(std::move(fields)));
+    collection.stages = std::move(stages);
+
+    struct Candidate {
+      int64_t id;
+      std::vector<query::Cell> order_values;
+    };
+    std::vector<Candidate> candidates;
+    std::optional<int64_t> after_id;
+    for (;;) {
+      const auto result = executor.run(collection, after_id);
+      for (const auto &row : result.rows) {
+        if (row.empty()) {
+          continue;
+        }
+        candidates.push_back({.id = std::get<int64_t>(row.front()),
+                              .order_values = {row.begin() + 1, row.end()}});
+      }
+      if (!result.truncated || result.rows.empty()) {
+        break;
+      }
+      after_id = std::get<int64_t>(result.rows.front().front());
+      // The collection plan is physically ordered by id. Use the maximum id
+      // from the page rather than its final row so the cursor remains correct
+      // even if a future executor changes row materialization order.
+      for (const auto &row : result.rows) {
+        after_id = std::max(*after_id, std::get<int64_t>(row.front()));
+      }
+    }
+
+    std::ranges::stable_sort(
+        candidates, [](const Candidate &lhs, const Candidate &rhs) {
+          const size_t count =
+              std::min(lhs.order_values.size(), rhs.order_values.size());
+          for (size_t index = 0; index < count; ++index) {
+            if (!adapter_cell_equal(lhs.order_values[index],
+                                    rhs.order_values[index])) {
+              return adapter_cell_less(lhs.order_values[index],
+                                       rhs.order_values[index]);
+            }
+          }
+          return lhs.id < rhs.id;
+        });
+    if (result_limit &&
+        candidates.size() > static_cast<size_t>(*result_limit)) {
+      candidates.resize(static_cast<size_t>(*result_limit));
+    }
+    std::vector<int64_t> ids;
+    ids.reserve(candidates.size());
+    for (const auto &candidate : candidates) {
+      ids.push_back(candidate.id);
+    }
+    return ids;
+  }
+
   std::vector<int64_t> ids;
   std::optional<int64_t> after_id;
   for (;;) {
@@ -116,7 +254,10 @@ std::vector<int64_t> GraphQuery::adapter_ordered_ids(const query::Plan &plan) {
     if (!result.truncated || result.rows.empty()) {
       break;
     }
-    after_id = ids.back();
+    after_id = std::get<int64_t>(result.rows.front().front());
+    for (const auto &row : result.rows) {
+      after_id = std::max(*after_id, std::get<int64_t>(row.front()));
+    }
   }
   return ids;
 }
@@ -470,6 +611,12 @@ std::vector<Sym> GraphQuery::find(const std::string &pattern,
                 query::order_by({"name_length", "name"}) | query::limit(limit);
     return adapter_ordered_ids(plan.plan());
   };
+  const auto plan_all_ids = [&]() {
+    auto plan = query::start(query::codebase()) | query::nodes() |
+                query::select({"id", "name_length", "name"}) |
+                query::order_by({"name_length", "name"}) | query::limit(limit);
+    return adapter_ordered_ids(plan.plan());
+  };
 
   std::vector<int64_t> ids;
   if (!pattern.empty()) {
@@ -482,7 +629,7 @@ std::vector<Sym> GraphQuery::find(const std::string &pattern,
       ids = plan_ids(query::glob("name", make_glob(false)));
     }
   } else {
-    ids = plan_ids(query::all_of({}));
+    ids = plan_all_ids();
   }
   std::vector<Sym> out;
   out.reserve(ids.size());
@@ -538,6 +685,9 @@ std::vector<Edge>
 GraphQuery::edges(int64_t sym_id, const std::string &direction,
                   const std::optional<std::vector<int64_t>> &kind_ids_opt,
                   int limit, bool with_sites) {
+  if (!adapter_symbol_exists(sym_id)) {
+    return {};
+  }
   const std::vector<int64_t> kv =
       kind_ids_opt ? *kind_ids_opt : std::vector<int64_t>{};
   const auto candidate_ids = adapter_peer_ids(sym_id, direction, kind_ids_opt);
@@ -658,6 +808,9 @@ std::vector<Sym> GraphQuery::aliased_by(int64_t sym_id, int limit) {
 }
 
 std::vector<Site> GraphQuery::sites(int64_t edge_id, int limit) {
+  if (!adapter_edge_exists(edge_id)) {
+    return {};
+  }
   auto rows = db_.edge_sites_one(edge_id, limit);
   std::vector<Site> out;
   out.reserve(rows.size());
@@ -679,11 +832,17 @@ std::vector<Site> GraphQuery::sites_page(int64_t edge_id, int offset,
 }
 
 bool GraphQuery::edge_conditional(int64_t edge_id) {
+  if (!adapter_edge_exists(edge_id)) {
+    return false;
+  }
   return db_.edge_has_conditional_site(edge_id);
 }
 
 std::optional<int64_t> GraphQuery::edge_id_for(int64_t src_id, int64_t dst_id,
                                                int64_t kind) {
+  if (!adapter_symbol_exists(src_id) || !adapter_symbol_exists(dst_id)) {
+    return std::nullopt;
+  }
   return db_.edge_id_for(src_id, dst_id, kind);
 }
 
@@ -1005,10 +1164,16 @@ static std::vector<Definition> defs_from_rows(
 }
 
 std::vector<Definition> GraphQuery::definitions(int64_t sym_id) {
+  if (!adapter_symbol_exists(sym_id)) {
+    return {};
+  }
   return defs_from_rows(*this, db_.definitions_of(sym_id), files());
 }
 
 std::vector<Definition> GraphQuery::possible_callees(int64_t sym_id) {
+  if (!adapter_symbol_exists(sym_id)) {
+    return {};
+  }
   return defs_from_rows(*this, db_.possible_callees_of(sym_id), files());
 }
 
@@ -1134,6 +1299,9 @@ GraphQuery::slot_facts(const std::optional<TypeInfo> &declared,
 
 GraphQuery::SignatureInfo GraphQuery::signature(int64_t sym_id) {
   SignatureInfo out;
+  if (!adapter_symbol_exists(sym_id)) {
+    return out;
+  }
   if (const auto tid = db_.symbol_type_of(sym_id, kSymbolTypeReturns)) {
     out.returns = type_info(*tid);
   }

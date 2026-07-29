@@ -23,10 +23,13 @@
 #include "doctest/doctest.h"
 #include <sqlite3.h>
 
+#include <algorithm>
+#include <fstream>
 #include <optional>
 #include <set>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "graph/emit.hpp"
@@ -179,6 +182,61 @@ TEST_CASE("graph_query: get_by_id / get_by_usr on seeded DB") {
 
   CHECK(!g.get_by_id(9999));
   CHECK(!g.get_by_usr("USR::NONE"));
+}
+
+TEST_CASE("graph_query: find preserves exact order above executor cap") {
+  Storage db(":memory:");
+  std::vector<std::tuple<int, std::string, int64_t>> expected;
+  for (int index = 0; index < 1205; ++index) {
+    const std::string spelling =
+        "symbol" + std::to_string((index * 37) % 10000);
+    const auto id = db.add_symbol(
+        make_sym("USR::ordered-" + std::to_string(index), spelling));
+    expected.emplace_back(static_cast<int>(spelling.size()), spelling, id);
+  }
+  std::ranges::sort(expected, [](const auto &lhs, const auto &rhs) {
+    if (std::get<0>(lhs) != std::get<0>(rhs)) {
+      return std::get<0>(lhs) < std::get<0>(rhs);
+    }
+    if (std::get<1>(lhs) != std::get<1>(rhs)) {
+      return std::get<1>(lhs) < std::get<1>(rhs);
+    }
+    return std::get<2>(lhs) < std::get<2>(rhs);
+  });
+
+  cidx::query::SqliteQueryReadAdapter read(db);
+  GraphQuery graph(read, ":memory:");
+  const auto actual = graph.find("", std::nullopt, 1205);
+  REQUIRE(actual.size() == expected.size());
+  std::set<int64_t> unique_ids;
+  for (std::size_t index = 0; index < actual.size(); ++index) {
+    unique_ids.insert(actual[index].id);
+    CHECK(actual[index].id == std::get<2>(expected[index]));
+  }
+  CHECK(unique_ids.size() == expected.size());
+}
+
+TEST_CASE("graph_query: executable public operation inventory") {
+  std::ifstream inventory(CIDX_LEGACY_QUERY_INVENTORY);
+  REQUIRE(inventory.good());
+  std::ifstream header(CIDX_GRAPH_QUERY_HEADER);
+  REQUIRE(header.good());
+  const std::string header_text((std::istreambuf_iterator<char>(header)),
+                                std::istreambuf_iterator<char>());
+  std::string line;
+  int listed = 0;
+  while (std::getline(inventory, line)) {
+    if (!line.starts_with("cpp_graph:GraphQuery.")) {
+      continue;
+    }
+    const auto begin = std::string("cpp_graph:GraphQuery.").size();
+    const auto end = line.find('(', begin);
+    const auto operation = line.substr(begin, end - begin);
+    REQUIRE(!operation.empty());
+    CHECK(header_text.find(operation) != std::string::npos);
+    ++listed;
+  }
+  CHECK(listed > 0);
 }
 
 // ---------------------------------------------------------------------------

@@ -320,6 +320,8 @@ private:
   Site make_site(const EdgeSiteRow &row);
 
   std::vector<int64_t> adapter_ids(const query::Plan &plan);
+  bool adapter_symbol_exists(int64_t sym_id);
+  bool adapter_edge_exists(int64_t edge_id);
   // Execute a row-shaped codebase plan to completion and retain its emitted
   // id order. The caller uses the ids only as compatibility-record keys.
   std::vector<int64_t> adapter_ordered_ids(const query::Plan &plan);

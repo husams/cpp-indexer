@@ -1118,29 +1118,81 @@ class GraphQuery:
         ]
 
     def _adapter_ids_complete(self, plan) -> list[int]:
-        """Execute a codebase plan to completion using the shared cursor.
+        """Execute an adapter plan completely without corrupting its order.
 
-        A compatibility adapter must not treat the executor's bounded prefix
-        as the answer.  Codebase enumerations can be continued with the
-        executor cursor; relation plans remain deliberately fail-closed in
-        ``_adapter_ids`` because their traversal budget has no equivalent
-        compatibility cursor.
+        The executor cursor advances the physical symbol-id enumeration.  It
+        cannot be used directly on a plan that orders by another field: each
+        page would be independently sorted and a cursor based on the last
+        emitted row could skip or repeat rows.  Such plans are collected in
+        physical-id pages, then globally ordered and limited using the same
+        plan field values before compatibility hydration.
         """
-        from .queryplan import Executor
+        from .queryplan import Executor, Plan, select as plan_select, validate
         from .storage import Storage
 
         store = Storage.from_connection(self._c, self.db_path)
+        normalized = validate(plan.plan if hasattr(plan, "plan") else plan)
+        order_fields = tuple(
+            field
+            for stage in normalized.stages
+            if stage.op == "order_by"
+            for field in stage.fields
+        )
+        if order_fields:
+            limit_values = [
+                stage.n for stage in normalized.stages if stage.op == "limit"
+            ]
+            collection_stages = tuple(
+                stage for stage in normalized.stages
+                if stage.op not in ("select", "order_by", "limit")
+            )
+            fields = tuple(dict.fromkeys(("id", *order_fields)))
+            collection_plan = Plan(
+                source=normalized.source,
+                stages=collection_stages + (plan_select(fields),),
+            )
+            collected: list[tuple[int, tuple[object, ...]]] = []
+            after_id: Optional[int] = None
+            while True:
+                result = Executor(store).run(collection_plan, after_id=after_id)
+                for row in result.rows:
+                    values = tuple(row)
+                    if values:
+                        collected.append((int(values[0]), values[1:]))
+                if not result.truncated or not result.rows:
+                    break
+                after_id = max(int(row[0]) for row in result.rows)
+
+            def cell_key(value: object) -> tuple[int, object]:
+                if value is None:
+                    return (2, "")
+                if isinstance(value, (int, float)):
+                    return (0, value)
+                return (1, str(value))
+
+            collected.sort(
+                key=lambda item: (
+                    tuple(cell_key(value) for value in item[1]), item[0]
+                )
+            )
+            if limit_values:
+                del collected[limit_values[-1]:]
+            return [sid for sid, _values in collected]
+
         ids: list[int] = []
         after_id: Optional[int] = None
         while True:
-            result = Executor(store).run(plan, after_id=after_id)
+            result = Executor(store).run(normalized, after_id=after_id)
             ids.extend(
                 int(row[0] if not isinstance(row, dict) else row["id"])
                 for row in result.rows
             )
             if not result.truncated or not result.rows:
                 return ids
-            after_id = ids[-1]
+            after_id = max(
+                int(row[0] if not isinstance(row, dict) else row["id"])
+                for row in result.rows
+            )
 
     def _adapter_symbols(self, plan) -> list[Sym]:
         """Hydrate symbols in the exact order emitted by a QueryPlan."""
@@ -1154,6 +1206,71 @@ class GraphQuery:
             if row is not None:
                 out.append(self._sym(row))
         return out
+
+    def _adapter_site_keys(self, edge_id: int, limit: int) -> list[tuple[int, int, int, int]]:
+        """Select site identities through the typed QueryPlan edge view."""
+        from .queryplan import (
+            Executor, codebase, eq, limit as plan_limit, nodes, order_by,
+            select as plan_select, sites as plan_sites, start, view,
+        )
+        from .storage import Storage
+
+        plan = (
+            start(codebase())
+            | view("edge")
+            | nodes(eq("edge_id", edge_id))
+            | plan_sites()
+            | plan_select(["edge_id", "file_id", "line", "col"])
+            | order_by(["file_id", "line", "col"])
+            | plan_limit(limit)
+        ).plan
+        store = Storage.from_connection(self._c, self.db_path)
+        result = Executor(store).run(plan)
+        return [tuple(int(value) for value in row) for row in result.rows]
+
+    def _adapter_rows(self, plan, fields: Sequence[str], *, order: Sequence[str] = (),
+                      limit: int = 0) -> list[tuple]:
+        """Run a typed compatibility selection before legacy row hydration."""
+        from .queryplan import Executor, limit as plan_limit, order_by, select as plan_select, validate
+        from .storage import Storage
+
+        query = plan | plan_select(fields)
+        if order:
+            query = query | order_by(order)
+        if limit:
+            query = query | plan_limit(limit)
+        store = Storage.from_connection(self._c, self.db_path)
+        result = Executor(store).run(validate(query.plan))
+        if result.truncated:
+            raise _AdapterPlanTruncated("typed QueryPlan candidate set was truncated")
+        return [tuple(row) for row in result.rows]
+
+    def _adapter_type_ids(self, type_id: int) -> list[int]:
+        from .queryplan import Executor, codebase, eq, nodes, select as plan_select, start, view
+        from .storage import Storage
+
+        type_row = self._c.execute(
+            "SELECT type_key FROM type_node WHERE id = ?", (type_id,)
+        ).fetchone()
+        if type_row is None:
+            return []
+        plan = (
+            start(codebase()) | view("type") | nodes(eq("type_key", type_row[0]))
+            | plan_select(["id"])
+        ).plan
+        result = Executor(Storage.from_connection(self._c, self.db_path)).run(plan)
+        return [type_id for _row in result.rows]
+
+    def _adapter_edge_ids(self, edge_id: int) -> list[int]:
+        from .queryplan import Executor, codebase, eq, nodes, select as plan_select, start, view
+        from .storage import Storage
+
+        plan = (
+            start(codebase()) | view("edge") | nodes(eq("edge_id", edge_id))
+            | plan_select(["edge_id"])
+        ).plan
+        result = Executor(Storage.from_connection(self._c, self.db_path)).run(plan)
+        return [int(row[0]) for row in result.rows]
 
     @staticmethod
     def _symbol_plan(pred, *, kind: Optional[str] = None, limit: int = 0,
@@ -1328,9 +1445,14 @@ class GraphQuery:
             const_value=(r["const_value"] if "const_value" in r.keys() else None),
         )
 
-    @staticmethod
-    def _resolve_id(sym) -> int:
-        return sym.id if isinstance(sym, Sym) else int(sym)
+    def _resolve_id(self, sym) -> int:
+        """Resolve a compatibility symbol only after plan-owned selection."""
+        sid = sym.id if isinstance(sym, Sym) else int(sym)
+        # Every symbol-domain public read enters through this adapter gate.
+        # The legacy operation may still hydrate richer rows below, but it
+        # cannot select an unvalidated symbol id directly from SQLite.
+        self._seed_ids(sid)
+        return sid
 
     def _kind_ids(self, kinds: Optional[Iterable[str]]) -> Optional[list[int]]:
         if kinds is None:
@@ -1385,6 +1507,8 @@ class GraphQuery:
         Read-only and additive -- it does not alter any existing behaviour.
         """
         sid = self._resolve_id(sym)
+        if not self._seed_ids(sid):
+            return None, None
         r = self._c.execute(
             "SELECT file_id, line, col, decl_file_id, decl_line, decl_col, "
             "decl_path FROM symbol s WHERE s.id = ?",
@@ -1713,14 +1837,20 @@ class GraphQuery:
         Accepts an Edge or a raw edge_id."""
         eid = edge.edge_id if isinstance(edge, Edge) else int(edge)
         files = self._files()
+        selected = set(self._adapter_site_keys(eid, limit))
+        if not selected:
+            return []
         out = []
         for r in self._c.execute(
-            "SELECT file_id, line, col, conditional, args_sig, "
+            "SELECT edge_id, file_id, line, col, conditional, args_sig, "
             "       recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos,"
             "       recv_type_is_value "
             "FROM edge_site_read WHERE edge_id = ? ORDER BY file_id, line, col LIMIT ?",
             (eid, limit),
         ):
+            key = (r["edge_id"], r["file_id"], r["line"] or 0, r["col"] or 0)
+            if key not in selected:
+                continue
             p = files.get(r["file_id"], (None, None))[0] if r["file_id"] else None
             out.append(
                 Site(
@@ -1748,6 +1878,8 @@ class GraphQuery:
         symbols usually return their single site. Empty on a pre-v26 (un-
         reindexed) DB."""
         sid = self._resolve_id(sym)
+        if not self._seed_ids(sid):
+            return []
         files = self._files()
         out: list[Site] = []
         for r in self._c.execute(
@@ -1974,21 +2106,34 @@ class GraphQuery:
         """The formal template parameters declared by `sym` (a class/function
         template), in declaration order. Empty for non-templates."""
         sid = self._resolve_id(sym)
+        from .queryplan import out as plan_out
+        keys = self._adapter_rows(
+            self.plan_for(sid) | plan_out("has_template_parameter"),
+            ["owner_id", "position"], order=("owner_id", "position"),
+        )
+        allowed = set(keys)
         rows = self._c.execute(
             "SELECT position, param_kind, name, default_txt, type_id, "
             "default_type_id, default_ref_id FROM template_param "
             "WHERE owner_id = ? ORDER BY position",
             (sid,),
         ).fetchall()
+        by_key = {(sid, r["position"]): r for r in rows if (sid, r["position"]) in allowed}
         return [
             TemplateParam(
-                r["position"], r["param_kind"], r["name"], r["default_txt"],
-                self._type_info(r["type_id"]) if r["type_id"] is not None else None,
-                self._type_info(r["default_type_id"])
-                if r["default_type_id"] is not None else None,
-                self.get(r["default_ref_id"]) if r["default_ref_id"] is not None else None,
+                by_key[(sid, position)]["position"],
+                by_key[(sid, position)]["param_kind"],
+                by_key[(sid, position)]["name"],
+                by_key[(sid, position)]["default_txt"],
+                self._type_info(by_key[(sid, position)]["type_id"])
+                if by_key[(sid, position)]["type_id"] is not None else None,
+                self._type_info(by_key[(sid, position)]["default_type_id"])
+                if by_key[(sid, position)]["default_type_id"] is not None else None,
+                self.get(by_key[(sid, position)]["default_ref_id"])
+                if by_key[(sid, position)]["default_ref_id"] is not None else None,
             )
-            for r in rows
+            for _owner, position in keys
+            if (sid, position) in by_key
         ]
 
     def template_args(self, sym) -> list[TemplateArg]:
@@ -1996,6 +2141,13 @@ class GraphQuery:
         explicit instantiation, or a function that instantiates a template), in
         position order. Empty when `sym` binds no template arguments."""
         sid = self._resolve_id(sym)
+        from .queryplan import out as plan_out
+        keys = self._adapter_rows(
+            self.plan_for(sid) | plan_out("has_template_argument"),
+            ["owner_id", "position", "pack_index"],
+            order=("owner_id", "position", "pack_index"),
+        )
+        allowed = set(keys)
         rows = self._c.execute(
             "SELECT position, pack_index, arg_kind, ref_id, literal, type_id "
             "FROM template_arg "
@@ -2009,6 +2161,7 @@ class GraphQuery:
                 self._type_info(r["type_id"]) if r["type_id"] is not None else None,
             )
             for r in rows
+            if (sid, r["position"], r["pack_index"]) in allowed
         ]
 
     def instantiations(self, sym, limit: int = 500) -> list[Sym]:
@@ -2026,14 +2179,12 @@ class GraphQuery:
         Returns only sources with ``is_instantiation=1`` so the result is
         precisely the set of implicit-instantiation type and member nodes."""
         sid = self._resolve_id(sym)
-        rows = self._c.execute(
-            f"SELECT {_SYM_COLS} FROM symbol s "
-            "JOIN edge e ON e.src_id = s.id "
-            "WHERE e.dst_id = ? AND e.kind = 5 AND s.is_instantiation = 1 "
-            "ORDER BY s.id LIMIT ?",
-            (sid, limit),
-        ).fetchall()
-        return [self._sym(r) for r in rows]
+        from .queryplan import eq, limit as plan_limit, select as plan_select
+        from .queryplan import where as plan_where
+        plan = self.plan_for(sid, relation="instantiates", direction="in")
+        plan = plan | plan_where(eq("is_instantiation", 1))
+        plan = plan | plan_select(["id"]) | plan_limit(limit)
+        return self._adapter_symbols(plan)
 
     def template_of(self, sym) -> Optional[Sym]:
         """The primary template that `sym` is an instantiation of -- the outgoing
@@ -2045,14 +2196,10 @@ class GraphQuery:
         if sym_obj is None or not sym_obj.is_instantiation:
             return None
         sid = sym_obj.id
-        row = self._c.execute(
-            f"SELECT {_SYM_COLS} FROM symbol s "
-            "JOIN edge e ON e.dst_id = s.id "
-            "WHERE e.src_id = ? AND e.kind = 5 "
-            "ORDER BY s.id LIMIT 1",
-            (sid,),
-        ).fetchone()
-        return self._sym(row) if row else None
+        from .queryplan import limit as plan_limit
+        plan = self.plan_for(sid, relation="instantiates", direction="out")
+        ids = self._adapter_ids(plan | plan_limit(1))
+        return self.get(ids[0]) if ids else None
 
     def template_of_member(self, inst_member) -> Optional[Sym]:
         """The instantiation TYPE node that owns ``inst_member`` via
@@ -2064,15 +2211,15 @@ class GraphQuery:
         edge exists (e.g. free-function instantiation or member without a
         method_of edge)."""
         sid = self._resolve_id(inst_member)
-        # Prefer method_of (9) then field_of (8); pick the first hit.
-        row = self._c.execute(
-            f"SELECT {_SYM_COLS} FROM symbol s "
-            "JOIN edge e ON e.dst_id = s.id "
-            "WHERE e.src_id = ? AND e.kind IN (9, 8) AND s.is_instantiation = 1 "
-            "ORDER BY e.kind LIMIT 1",
-            (sid,),
-        ).fetchone()
-        return self._sym(row) if row else None
+        from .queryplan import limit as plan_limit
+        from .queryplan import where as plan_where, eq
+        for relation in ("method_of", "field_of"):
+            plan = self.plan_for(sid, relation=relation, direction="out")
+            plan = plan | plan_where(eq("is_instantiation", 1))
+            ids = self._adapter_ids(plan | plan_limit(1))
+            if ids:
+                return self.get(ids[0])
+        return None
 
     def _instantiation_template_args(self, inst_member: Sym) -> list[TemplateArg]:
         """Concrete args for an instantiation/specialization member.
@@ -2256,12 +2403,20 @@ class GraphQuery:
     def redefined(self, limit: int = 500) -> list[Sym]:
         """Every symbol defined in more than one backend (multi_def > 1) -- the
         answer to "list all re-defined". Most-redefined first."""
-        rows = self._c.execute(
-            "SELECT * FROM symbol WHERE multi_def > 1 "
-            "ORDER BY multi_def DESC, qual_name, spelling LIMIT ?",
-            (limit,),
-        ).fetchall()
-        return [self._sym(r) for r in rows]
+        if limit < 1:
+            return []
+        from .queryplan import all_of, ne
+        # multi_def is an integer counter; excluding 0 and 1 expresses > 1 in
+        # the portable predicate vocabulary, while the derived negative field
+        # preserves the legacy descending order in the plan itself.
+        pred = all_of([ne("multi_def", 0), ne("multi_def", 1)])
+        return self._adapter_symbols(
+            self._symbol_plan(
+                pred,
+                limit=limit,
+                order=("negative_multi_def", "name"),
+            )
+        )
 
     def _definition_rows(self, sql: str, params: Sequence[Any]) -> list[Definition]:
         files = self._files()
@@ -2437,6 +2592,9 @@ class GraphQuery:
         tid = type_or_id if isinstance(type_or_id, int) else getattr(type_or_id, "id", None)
         if tid is None:
             return []
+        # Preserve the legacy unknown-type record; existing types are
+        # validated through the typed plan before the recursive hydrator runs.
+        self._adapter_type_ids(tid)
         out: list[dict[str, Any]] = []
         pending = [(tid, "root", "root", 0, 0, (tid,))]
         relations = {1: "pointee", 2: "element_type", 3: "alias_of",
@@ -2811,6 +2969,8 @@ class GraphQuery:
 
         Returns one row per non-literal positional argument at any call site
         of this edge, ordered by (file_id, line, col, position)."""
+        if not self._adapter_edge_ids(edge_id):
+            return []
         rows = self._c.execute(
             "SELECT position, src_kind, type_usr, decl_usr, callee_usr, type_is_value "
             "FROM call_arg_read WHERE edge_id = ? "
@@ -2836,6 +2996,8 @@ class GraphQuery:
 
         Returns args for the given (edge_id, file_id, line, col) site in
         position order."""
+        if not self._adapter_edge_ids(edge_id):
+            return []
         rows = self._c.execute(
             "SELECT position, src_kind, type_usr, decl_usr, callee_usr, type_is_value "
             "FROM call_arg_read WHERE edge_id = ? AND file_id = ? "

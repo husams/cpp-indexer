@@ -40,6 +40,33 @@ def test_find_kind_filter(g):
     assert g.find("Derived", kind="function") == []
 
 
+def test_find_adapter_preserves_exact_order_above_executor_cap(tmp_path):
+    """The production adapter must page and globally order >1,000 rows."""
+    db_path = str(tmp_path / "ordered-find.db")
+    with Storage(db_path) as db:
+        expected = []
+        for index in range(1205):
+            spelling = f"symbol{(index * 37) % 10000}"
+            sid = db.add_symbol(
+                Symbol(
+                    usr=f"USR::ordered-{index}",
+                    spelling=spelling,
+                    kind="function",
+                )
+            )
+            expected.append((len(spelling), spelling, sid))
+
+    expected_ids = [sid for _length, _name, sid in sorted(expected)]
+    g = GraphQuery(db_path)
+    try:
+        actual = g.find("", limit=1205)
+        assert len(actual) == 1205
+        assert len({sym.id for sym in actual}) == 1205
+        assert [sym.id for sym in actual] == expected_ids
+    finally:
+        g.close()
+
+
 def test_by_name_exact(g):
     # three classes define a method spelled 'draw'
     draws = g.by_name("draw")

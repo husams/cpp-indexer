@@ -77,6 +77,10 @@ target_compile_definitions(query_plan_test PRIVATE
   CIDX_CXQ_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/golden/cxq_plans.txt"
   CIDX_LEGACY_GRAPH_PLAN_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/golden/legacy_graph_query_plans.txt")
 
+target_compile_definitions(graph_query_test PRIVATE
+  CIDX_LEGACY_QUERY_INVENTORY="${CMAKE_CURRENT_SOURCE_DIR}/golden/legacy_query_operations.txt"
+  CIDX_GRAPH_QUERY_HEADER="${CMAKE_CURRENT_SOURCE_DIR}/../src/graph/query.hpp")
+
 # S02: the migration suite opens committed Python-generated fixture DBs
 # (copied to a temp dir first — the fixtures themselves stay read-only).
 target_compile_definitions(storage_migration_test PRIVATE
