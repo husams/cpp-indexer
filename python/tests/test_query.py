@@ -91,6 +91,64 @@ def test_references_includes_calls_and_uses(g):
     assert {e.kind for e in refs} == {"uses"}
 
 
+def test_legacy_references_keep_typed_rows_when_plan_is_partial(tmp_path):
+    """A failed of_type lowering must not filter successful call lowering."""
+    db_path = str(tmp_path / "mixed-references.db")
+    with Storage(db_path) as db:
+        target = db.add_symbol(
+            Symbol(usr="USR::mixed-target", spelling="target", kind="function")
+        )
+        caller = db.add_symbol(
+            Symbol(usr="USR::mixed-caller", spelling="caller", kind="function")
+        )
+        typed = db.add_symbol(
+            Symbol(usr="USR::mixed-typed", spelling="typed", kind="member")
+        )
+        db.add_edge(caller, target, 1)  # calls, handled by QueryPlan
+        db.add_edge(typed, target, 20)  # of_type, legacy cross-view fallback
+        db.set_meta("graph_resolved_at", "test")
+
+    g = GraphQuery(db_path)
+    try:
+        refs = g.references(target)
+        assert {(edge.peer.id, edge.kind) for edge in refs} == {
+            (caller, "calls"),
+            (typed, "of_type"),
+        }
+    finally:
+        g.close()
+
+
+def test_legacy_edges_fall_back_when_queryplan_candidates_are_truncated(tmp_path):
+    """High-degree legacy ordering/limits remain authoritative past the cap."""
+    db_path = str(tmp_path / "high-degree.db")
+    with Storage(db_path) as db:
+        target = db.add_symbol(
+            Symbol(
+                usr="USR::degree-target", spelling="target", kind="function"
+            )
+        )
+        for index in range(1005):
+            caller = db.add_symbol(
+                Symbol(
+                    usr=f"USR::degree-caller-{index}",
+                    spelling=f"caller{index}",
+                    kind="function",
+                )
+            )
+            db.add_edge(caller, target, 1, count=999 if index == 1004 else 1)
+        db.set_meta("graph_resolved_at", "test")
+
+    g = GraphQuery(db_path)
+    try:
+        edges = g.edges_in(target, ("calls",), limit=1)
+        assert len(edges) == 1
+        assert edges[0].peer.spelling == "caller1004"
+        assert edges[0].count == 999
+    finally:
+        g.close()
+
+
 def test_edges_in_out_typed(g):
     base = g.get("c:@S@Base")
     inbound = g.edges_in(base)

@@ -85,6 +85,10 @@ class NoEdgesError(RuntimeError):
     """
 
 
+class _AdapterPlanTruncated(RuntimeError):
+    """The QueryPlan candidate set was capped and is not complete."""
+
+
 def default_db_path() -> str:
     """The standard cidx index path: $INDEXER_CACHE/index.db else ~/.cache/cidx/index.db.
 
@@ -1079,6 +1083,10 @@ class GraphQuery:
 
         store = Storage.from_connection(self._c, self.db_path)
         result = Executor(store).run((plan | plan_select(["id"])).plan)
+        if result.truncated:
+            raise _AdapterPlanTruncated(
+                "QueryPlan candidate set was truncated; use the legacy read"
+            )
         return [
             int(row[0] if not isinstance(row, dict) else row["id"])
             for row in result.rows
@@ -1108,11 +1116,13 @@ class GraphQuery:
                         self.plan_for(sym, relation=relation, direction=direction)
                     )
                 )
-            except PlanError:
+            except (PlanError, _AdapterPlanTruncated):
                 # Typed cross-view legacy relations (notably symbol.of_type)
                 # retain their historical SQL/evidence adapter until the
-                # typed-view executor exposes that transition.
-                continue
+                # typed-view executor exposes that transition.  Do not apply
+                # the successful relations' partial candidate set: doing so
+                # would silently drop the failed relation's legacy rows.
+                return None
         return ids
 
     def _is_resolved(self) -> bool:
@@ -1348,11 +1358,16 @@ class GraphQuery:
             from .queryplan import codebase, glob, nodes, start
 
             escaped = pattern.replace("*", "[*]").replace("?", "[?]")
-            adapter_ids = set(
-                self._adapter_ids(
-                    start(codebase()) | nodes(glob("name", f"*{escaped}*"))
+            try:
+                adapter_ids = set(
+                    self._adapter_ids(
+                        start(codebase()) | nodes(glob("name", f"*{escaped}*"))
+                    )
                 )
-            )
+            except _AdapterPlanTruncated:
+                # The legacy SQL scan is ordered and limited independently;
+                # a capped plan result is not a safe compatibility filter.
+                adapter_ids = None
 
         def run(where: str, params: tuple) -> list[Sym]:
             sql = f"SELECT {_SYM_COLS} FROM symbol s WHERE {where}"

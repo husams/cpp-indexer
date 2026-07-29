@@ -280,6 +280,50 @@ TEST_CASE("graph_query: references() = calls + uses inbound") {
   CHECK(found_A);
 }
 
+TEST_CASE("graph_query: mixed references retain legacy typed rows") {
+  Storage db(":memory:");
+  const int64_t target = db.add_symbol(
+      make_sym("USR::mixed-target", "target", "function"));
+  const int64_t caller = db.add_symbol(
+      make_sym("USR::mixed-caller", "caller", "function"));
+  const int64_t typed =
+      db.add_symbol(make_sym("USR::mixed-typed", "typed", "member"));
+  db.add_edge(make_edge(caller, target, 1));  // calls: QueryPlan-supported
+  db.add_edge(make_edge(typed, target, 20)); // of_type: legacy fallback
+
+  cidx::query::SqliteQueryReadAdapter read(db);
+  GraphQuery g(read, ":memory:");
+  const auto refs = g.references(target);
+  REQUIRE(refs.size() == 2);
+  std::set<std::pair<int64_t, std::string>> found;
+  for (const auto &edge : refs) {
+    found.emplace(edge.peer.id, edge.kind);
+  }
+  CHECK(found == std::set<std::pair<int64_t, std::string>>{
+                     {caller, "calls"}, {typed, "of_type"}});
+}
+
+TEST_CASE("graph_query: truncated plan candidates preserve legacy edge order") {
+  Storage db(":memory:");
+  const int64_t target =
+      db.add_symbol(make_sym("USR::degree-target", "target", "function"));
+  for (int index = 0; index < 1005; ++index) {
+    const auto caller = db.add_symbol(make_sym(
+        "USR::degree-caller-" + std::to_string(index),
+        "caller" + std::to_string(index), "function"));
+    db.add_edge(make_edge(caller, target, 1, index == 1004 ? 999 : 1));
+  }
+  db.stamp_graph_resolved();
+
+  cidx::query::SqliteQueryReadAdapter read(db);
+  GraphQuery g(read, ":memory:");
+  const auto edges =
+      g.edges_in(target, std::vector<std::string>{"calls"}, 1);
+  REQUIRE(edges.size() == 1);
+  CHECK(edges.front().peer.spelling == "caller1004");
+  CHECK(edges.front().count == 999);
+}
+
 TEST_CASE(
     "graph_query: aliased_by() returns typedef and type-alias users only") {
   Storage db(":memory:");

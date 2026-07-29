@@ -85,6 +85,10 @@ std::vector<int64_t> GraphQuery::adapter_ids(const query::Plan &plan) {
   auto selected = plan;
   selected.stages.push_back(query::select({"id"}));
   const auto result = executor.run(selected);
+  if (result.truncated) {
+    throw query::PlanError(
+        "E_COMPAT_TRUNCATED: QueryPlan candidate set was truncated");
+  }
   std::vector<int64_t> ids;
   ids.reserve(result.rows.size());
   for (const auto &row : result.rows) {
@@ -124,7 +128,9 @@ GraphQuery::adapter_peer_ids(
     } catch (const query::PlanError &) {
       // Cross-view typed relations (for example symbol.of_type) remain
       // evidence-backed legacy reads until the typed executor owns that
-      // transition. Other graph relations still lower through QueryPlan.
+      // transition. Do not apply a partial candidate set: the historical
+      // query must retain rows from every requested relation.
+      return std::nullopt;
     }
   }
   return ids;
@@ -392,11 +398,16 @@ std::vector<Sym> GraphQuery::find(const std::string &pattern,
       }
     }
     glob_pattern.push_back('*');
-    const auto ids = adapter_ids(
-        (query::start(query::codebase()) |
-         query::nodes(query::glob("name", glob_pattern)))
-            .plan());
-    candidate_ids.emplace(ids.begin(), ids.end());
+    try {
+      const auto ids = adapter_ids(
+          (query::start(query::codebase()) |
+           query::nodes(query::glob("name", glob_pattern)))
+              .plan());
+      candidate_ids.emplace(ids.begin(), ids.end());
+    } catch (const query::PlanError &) {
+      // A capped plan result is not a complete compatibility filter. Keep
+      // the legacy ordered/limited lookup authoritative for this read.
+    }
   }
   auto syms = db_.find_symbols(pattern, kind, limit);
   std::vector<Sym> out;
