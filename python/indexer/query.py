@@ -89,9 +89,14 @@ class _AdapterPlanTruncated(RuntimeError):
     """The QueryPlan candidate set was capped and is not complete."""
 
 
-def _legacy_find_glob(pattern: str) -> str:
-    """Build a GLOB that preserves legacy ASCII case-insensitive matching."""
-    out = ["*"]
+def _legacy_find_glob(pattern: str, *, prefix: bool = False) -> str:
+    """Build a GLOB that preserves legacy ASCII case-insensitive matching.
+
+    QueryPlan owns the match operation for compatibility reads.  The optional
+    prefix form is the middle tier of the historical ``find`` lookup; the
+    default form is the segmented fuzzy tier.
+    """
+    out = [] if prefix else ["*"]
     segments = [segment for segment in pattern.split("::") if segment]
     for segment_index, segment in enumerate(segments):
         if segment_index:
@@ -1112,6 +1117,60 @@ class GraphQuery:
             for row in result.rows
         ]
 
+    def _adapter_ids_complete(self, plan) -> list[int]:
+        """Execute a codebase plan to completion using the shared cursor.
+
+        A compatibility adapter must not treat the executor's bounded prefix
+        as the answer.  Codebase enumerations can be continued with the
+        executor cursor; relation plans remain deliberately fail-closed in
+        ``_adapter_ids`` because their traversal budget has no equivalent
+        compatibility cursor.
+        """
+        from .queryplan import Executor
+        from .storage import Storage
+
+        store = Storage.from_connection(self._c, self.db_path)
+        ids: list[int] = []
+        after_id: Optional[int] = None
+        while True:
+            result = Executor(store).run(plan, after_id=after_id)
+            ids.extend(
+                int(row[0] if not isinstance(row, dict) else row["id"])
+                for row in result.rows
+            )
+            if not result.truncated or not result.rows:
+                return ids
+            after_id = ids[-1]
+
+    def _adapter_symbols(self, plan) -> list[Sym]:
+        """Hydrate symbols in the exact order emitted by a QueryPlan."""
+        plan = plan.plan if hasattr(plan, "plan") else plan
+        ids = self._adapter_ids_complete(plan)
+        out: list[Sym] = []
+        for sid in ids:
+            row = self._c.execute(
+                f"SELECT {_SYM_COLS} FROM symbol s WHERE s.id = ?", (sid,)
+            ).fetchone()
+            if row is not None:
+                out.append(self._sym(row))
+        return out
+
+    @staticmethod
+    def _symbol_plan(pred, *, kind: Optional[str] = None, limit: int = 0,
+                     order: Sequence[str] = ("name_length", "name")):
+        from .queryplan import all_of, codebase, eq, limit as plan_limit
+        from .queryplan import nodes, order_by, select as plan_select, start
+
+        predicates = [] if pred is None else [pred]
+        if kind is not None:
+            predicates.append(eq("kind", kind))
+        stage = nodes(all_of(predicates)) if predicates else nodes()
+        plan = start(codebase()) | stage
+        # Selecting id before ordering makes the plan's row shape explicit;
+        # the compatibility layer never reorders or applies a second limit.
+        plan = plan | plan_select(["id", *order]) | order_by(order)
+        return plan | plan_limit(limit) if limit else plan
+
     def _seed_ids(self, ident) -> list[int]:
         from .queryplan import codebase, eq, nodes, start
 
@@ -1368,74 +1427,41 @@ class GraphQuery:
              when neither exact nor prefix matched (or the pattern is empty).
 
         Mirrors storage.search_symbols (the fuzzy tier is identical)."""
-        order = (
-            " ORDER BY LENGTH(COALESCE(s.qual_name, s.spelling)), "
-            "COALESCE(s.qual_name, s.spelling) LIMIT ?"
-        )
-        kind_id = SYMBOL_KIND_IDS.get(kind, -1) if kind else None
-        adapter_ids: Optional[set[int]] = None
-        if pattern:
-            from .queryplan import codebase, glob, nodes, start
+        if limit < 1:
+            return []
+        from .queryplan import any_of, eq, glob
 
-            try:
-                adapter_ids = set(
-                    self._adapter_ids(
-                        start(codebase())
-                        | nodes(glob("name", _legacy_find_glob(pattern)))
-                    )
-                )
-            except _AdapterPlanTruncated:
-                # The legacy SQL scan is ordered and limited independently;
-                # a capped plan result is not a safe compatibility filter.
-                adapter_ids = None
+        if kind is not None and kind not in SYMBOL_KIND_IDS:
+            return []
 
-        def run(where: str, params: tuple) -> list[Sym]:
-            sql = f"SELECT {_SYM_COLS} FROM symbol s WHERE {where}"
-            args: list = list(params)
-            if kind_id is not None:
-                sql += " AND s.kind = ?"
-                args.append(kind_id)
-            if adapter_ids:
-                sql += f" AND s.id IN ({','.join('?' * len(adapter_ids))})"
-                args.extend(sorted(adapter_ids))
-            sql += order
-            args.append(limit)
-            return [self._sym(r) for r in self._c.execute(sql, args)]
+        def run(pred) -> list[Sym]:
+            return self._adapter_symbols(
+                self._symbol_plan(pred, kind=kind, limit=limit)
+            )
 
         if pattern:
-            # 1) exact -- case-sensitive equality, indexed point lookup.
-            hits = run("(s.qual_name = ? OR s.spelling = ?)", (pattern, pattern))
+            # Each historical tier is a complete plan. The first non-empty
+            # plan wins; compatibility code only hydrates those selected ids.
+            hits = run(any_of([eq("qual_name", pattern), eq("spelling", pattern)]))
             if hits:
                 return hits
-            # 2) prefix -- NOCASE range SEARCH (case-insensitive, like the scan).
-            pref = pattern.replace("%", r"\%").replace("_", r"\_") + "%"
-            hits = run(
-                r"(s.qual_name LIKE ? ESCAPE '\' OR s.spelling LIKE ? ESCAPE '\')",
-                (pref, pref),
-            )
+            hits = run(glob("name", _legacy_find_glob(pattern, prefix=True)))
             if hits:
                 return hits
-        # 3) fuzzy fallback -- the original infix scan (also handles '' = all).
-        like = (
-            "%"
-            + "%".join(
-                seg.replace("%", r"\%").replace("_", r"\_")
-                for seg in pattern.split("::")
-                if seg
-            )
-            + "%"
+            return run(glob("name", _legacy_find_glob(pattern)))
+
+        return self._adapter_symbols(
+            self._symbol_plan(None, kind=kind, limit=limit)
         )
-        return run(r"COALESCE(s.qual_name, s.spelling) LIKE ? ESCAPE '\'", (like,))
 
     def by_name(self, spelling: str, kind: Optional[str] = None) -> list[Sym]:
         """Exact-spelling lookup (overloads/statics yield several rows)."""
-        sql = f"SELECT {_SYM_COLS} FROM symbol s WHERE s.spelling = ?"
-        args: list = [spelling]
-        if kind:
-            sql += " AND s.kind = ?"
-            args.append(SYMBOL_KIND_IDS.get(kind, -1))
-        sql += " ORDER BY s.usr"
-        return [self._sym(r) for r in self._c.execute(sql, args)]
+        from .queryplan import eq
+        if kind is not None and kind not in SYMBOL_KIND_IDS:
+            return []
+        return self._adapter_symbols(
+            self._symbol_plan(eq("spelling", spelling), kind=kind, order=("usr",))
+        )
 
     def by_qual_or_spelling(self, *names: str, limit: int = 200) -> list[Sym]:
         """Exact, INDEX-backed lookup over qual_name and spelling for any of
@@ -1445,19 +1471,18 @@ class GraphQuery:
         ``find`` so callers can swap one for the other. Empty / falsy names are
         dropped; returns [] when none remain."""
         uniq = list(dict.fromkeys(n for n in names if n))
-        if not uniq:
+        if not uniq or limit < 1:
             return []
-        ph = ",".join("?" * len(uniq))
-        sql = (
-            f"SELECT {_SYM_COLS} FROM symbol s "
-            f"WHERE s.qual_name IN ({ph}) OR s.spelling IN ({ph}) "
-            "ORDER BY LENGTH(COALESCE(s.qual_name, s.spelling)), "
-            "COALESCE(s.qual_name, s.spelling) LIMIT ?"
+        from .queryplan import any_of, eq
+        return self._adapter_symbols(
+            self._symbol_plan(
+                any_of(
+                    [eq("qual_name", name) for name in uniq]
+                    + [eq("spelling", name) for name in uniq]
+                ),
+                limit=limit,
+            )
         )
-        return [
-            self._sym(r)
-            for r in self._c.execute(sql, [*uniq, *uniq, limit])
-        ]
 
     def entity_nodes_ready(self) -> bool:
         """True once the materialized ``entity_node`` classification table holds
@@ -1493,40 +1518,48 @@ class GraphQuery:
         uniq = list(dict.fromkeys(n for n in names if n))
         skids = [SYMBOL_KIND_IDS[k] for k in symbol_kinds if k in SYMBOL_KIND_IDS]
         eks = list(entity_kinds)
-        if not uniq or not skids or not eks:
+        if not uniq or not skids or not eks or limit < 1:
             return []
-        nph = ",".join("?" * len(uniq))
-        skph = ",".join("?" * len(skids))
-        ekph = ",".join("?" * len(eks))
-        sql = (
-            f"SELECT {_SYM_COLS} FROM symbol s "
-            "JOIN entity_node en ON en.id = s.id "
-            f"WHERE (s.qual_name IN ({nph}) OR s.spelling IN ({nph})) "
-            f"AND s.kind IN ({skph}) AND en.kind IN ({ekph}) "
-            # exclude template instantiations (Box<int>, stored under the
-            # template's own spelling) -- mirrors model._is_instance.
-            "AND s.is_instantiation = 0 "
-            "ORDER BY LENGTH(COALESCE(s.qual_name, s.spelling)), "
-            "COALESCE(s.qual_name, s.spelling) LIMIT ?"
+        from .queryplan import all_of, any_of, eq, in_list
+        entity_names = (
+            "other", "class", "abstract_class", "interface", "union",
+            "enum", "class_template", "abstract_class_template",
+            "interface_template", "namespace",
         )
-        args = [*uniq, *uniq, *skids, *eks, limit]
-        return [self._sym(r) for r in self._c.execute(sql, args)]
+        pred = all_of([
+            any_of(
+                [eq("qual_name", name) for name in uniq]
+                + [eq("spelling", name) for name in uniq]
+            ),
+            in_list("kind", [
+                name for name, value in SYMBOL_KIND_IDS.items()
+                if value in skids
+            ]),
+            in_list("entity_type", [
+                entity_names[value] if 0 <= value < len(entity_names) else "other"
+                for value in eks
+            ]),
+        ])
+        return [
+            sym for sym in self._adapter_symbols(
+                self._symbol_plan(pred, limit=limit)
+            ) if not sym.is_instantiation
+        ]
 
     def symbols_in_file(self, path_substr: str, limit: int = 500) -> list[Sym]:
         """Symbols whose definition file path contains `path_substr`. Useful to
         enumerate a file's API without opening it."""
-        ids = [fid for fid, (p, _) in self._files().items() if path_substr in p]
-        if not ids:
+        file_ids = [fid for fid, (p, _) in self._files().items() if path_substr in p]
+        if not file_ids or limit < 1:
             return []
-        q = ",".join("?" * len(ids))
-        return [
-            self._sym(r)
-            for r in self._c.execute(
-                f"SELECT {_SYM_COLS} FROM symbol s WHERE s.file_id IN ({q}) "
-                f"ORDER BY s.line, s.col LIMIT ?",
-                (*ids, limit),
+        from .queryplan import any_of, eq
+        return self._adapter_symbols(
+            self._symbol_plan(
+                any_of([eq("file", fid) for fid in file_ids]),
+                limit=limit,
+                order=("line", "col"),
             )
-        ]
+        )
 
     # ===================================================================== #
     # 2. LOOKUP REFERENCES
@@ -1664,24 +1697,16 @@ class GraphQuery:
         The relationship is direct by design: an alias-of-alias is returned for
         the intermediate alias entity, not for the final record it eventually
         resolves to."""
-        sid = self._resolve_id(sym)
-        peer_ids = self._peer_ids(sid, "in", ("alias_of",))
-        if not peer_ids:
+        if limit < 1:
             return []
-        alias_kinds = (
-            SYMBOL_KIND_IDS["typedef"],
-            SYMBOL_KIND_IDS["type-alias"],
-        )
-        rows = self._c.execute(
-            f"SELECT {_SYM_COLS} FROM symbol s "
-            "JOIN edge e ON e.src_id = s.id "
-            "WHERE e.dst_id = ? AND e.src_id IN ("
-            + ",".join("?" for _ in peer_ids)
-            + ") AND e.kind = ? AND s.kind IN (?, ?) "
-            "ORDER BY COALESCE(s.qual_name, s.spelling), s.id LIMIT ?",
-            (sid, *sorted(peer_ids), EDGE_KINDS["alias_of"], *alias_kinds, limit),
-        ).fetchall()
-        return [self._sym(r) for r in rows]
+        from .queryplan import in_list, select as plan_select, order_by, where as plan_where
+
+        plan = self.plan_for(sym, relation="alias_of", direction="in")
+        plan = plan | plan_where(in_list("kind", ["typedef", "type-alias"]))
+        plan = plan | plan_select(["id", "name_length", "name"])
+        plan = plan | order_by(["name_length", "name"])
+        from .queryplan import limit as plan_limit
+        return self._adapter_symbols(plan | plan_limit(limit))
 
     def sites(self, edge, limit: int = 200) -> list[Site]:
         """Concrete source locations for an edge (the file:line grounding).

@@ -250,6 +250,10 @@ std::string col_expr(const std::string &field, const std::string &symbol_alias,
     return "COALESCE(" + symbol_alias + ".qual_name, " + symbol_alias +
            ".spelling)";
   }
+  if (field == "name_length") {
+    return "LENGTH(COALESCE(" + symbol_alias + ".qual_name, " + symbol_alias +
+           ".spelling))";
+  }
   if (field == "spelling") {
     return symbol_alias + ".spelling";
   }

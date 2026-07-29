@@ -165,6 +165,13 @@ def resolve_qualified_relation(qualified: str) -> Optional[tuple[str, str, int]]
 # `kind in [class, struct]` keeps its declaration-kind meaning (PR #20 review).
 
 _FIELDS = {name: (filterable, is_string) for name, filterable, is_string in _GENERATED_FIELD_CATALOG}
+# Compatibility-only derived selector used by the legacy GraphQuery adapters.
+# It is intentionally not filterable and does not change the persisted catalog;
+# it expresses the historical shortest-name ordering in the shared plan.
+_FIELDS["name_length"] = (False, False)
+# The compatibility adapter uses the persisted file id to narrow a symbol
+# stream after resolving a path substring through the read-only file catalog.
+_FIELDS["file"] = (True, False)
 
 _TYPED_FIELDS = {
     "parameter": {"id", "identity_key", "owner_id", "position", "pack_index", "name", "type_id", "declared_type_id", "adjusted_type_id", "default_text", "default_origin", "reference_semantics", "file_id", "line", "col"},
@@ -1451,6 +1458,8 @@ def _col_expr(field_name: str, symbol_alias: str = "s",
         return f"{symbol_alias}.identity_key"
     if field_name == "name":
         return f"COALESCE({symbol_alias}.qual_name, {symbol_alias}.spelling)"
+    if field_name == "name_length":
+        return f"LENGTH(COALESCE({symbol_alias}.qual_name, {symbol_alias}.spelling))"
     if field_name == "spelling":
         return f"{symbol_alias}.spelling"
     if field_name == "qual_name":

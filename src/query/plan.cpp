@@ -233,6 +233,16 @@ const std::vector<FieldDesc> &field_catalog() {
 }
 
 const FieldDesc *field_desc(const std::string &name) {
+  if (name == "name_length") {
+    static const FieldDesc derived{
+        .name = "name_length", .filterable = false, .is_string = false};
+    return &derived;
+  }
+  if (name == "file") {
+    static const FieldDesc file_id{
+        .name = "file", .filterable = true, .is_string = false};
+    return &file_id;
+  }
   for (const auto &f : field_catalog()) {
     if (name == f.name) {
       return &f;

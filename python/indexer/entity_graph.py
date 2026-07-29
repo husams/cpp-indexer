@@ -41,7 +41,7 @@ from enum import IntEnum
 from itertools import islice
 from typing import Callable, Iterator, Optional
 
-from .query import GraphQuery, Sym, open_query
+from .query import GraphQuery, Sym, _legacy_find_glob, open_query
 from .queryplan import (
     Pred,
     Query as PlanQuery,
@@ -53,6 +53,7 @@ from .queryplan import (
     except_ as plan_except,
     in_ as plan_in,
     in_list,
+    glob as plan_glob,
     not_ as plan_not,
     nodes as plan_nodes,
     out as plan_out,
@@ -1856,17 +1857,12 @@ class EntityQuery:
     def named(self, substring: str) -> "EntityQuery":
         """Keep only nodes whose name contains ``substring`` (case-insensitive)."""
         if self._plan is not None:
-            # QueryPlan glob uses SQLite GLOB, whose case behavior differs from
-            # the legacy EntityQuery contract. Keep that compatibility rule at
-            # the adapter boundary while the node set still comes from the plan.
-            needle = substring.lower()
             return EntityQuery(
                 self._g,
-                plan=self._plan,
-                post_filters=(
-                    *self._post_filters,
-                    lambda node: needle in node.name.lower(),
+                plan=self._plan | plan_where(
+                    plan_glob("name", _legacy_find_glob(substring))
                 ),
+                post_filters=self._post_filters,
             )
         needle = substring.lower()
         return self.where(lambda n: needle in n.name.lower())

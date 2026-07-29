@@ -99,6 +99,28 @@ std::vector<int64_t> GraphQuery::adapter_ids(const query::Plan &plan) {
   return ids;
 }
 
+std::vector<int64_t> GraphQuery::adapter_ordered_ids(const query::Plan &plan) {
+  if (!query_read_) {
+    return {};
+  }
+  query::Executor executor(*query_read_);
+  std::vector<int64_t> ids;
+  std::optional<int64_t> after_id;
+  for (;;) {
+    const auto result = executor.run(plan, after_id);
+    for (const auto &row : result.rows) {
+      if (!row.empty()) {
+        ids.push_back(std::get<int64_t>(row.front()));
+      }
+    }
+    if (!result.truncated || result.rows.empty()) {
+      break;
+    }
+    after_id = ids.back();
+  }
+  return ids;
+}
+
 std::optional<std::unordered_set<int64_t>> GraphQuery::adapter_peer_ids(
     int64_t sym_id, const std::string &direction,
     const std::optional<std::vector<int64_t>> &kind_ids_opt) {
@@ -381,9 +403,21 @@ std::optional<Sym> GraphQuery::get_by_usr(const std::string &usr) {
 std::vector<Sym> GraphQuery::find(const std::string &pattern,
                                   const std::optional<std::string> &kind,
                                   int limit) {
-  std::optional<std::unordered_set<int64_t>> candidate_ids;
-  if (query_read_ && !pattern.empty()) {
-    std::string glob_pattern = "*";
+  if (limit < 1) {
+    return {};
+  }
+  if (!query_read_) {
+    auto syms = db_.find_symbols(pattern, kind, limit);
+    std::vector<Sym> out;
+    out.reserve(syms.size());
+    for (auto &sym : syms) {
+      out.push_back(make_sym_from_symbol(sym));
+    }
+    return out;
+  }
+
+  const auto make_glob = [&](bool prefix) {
+    std::string glob_pattern = prefix ? "" : "*";
     bool first_segment = true;
     std::size_t segment_start = 0;
     while (segment_start <= pattern.size()) {
@@ -397,9 +431,7 @@ std::vector<Sym> GraphQuery::find(const std::string &pattern,
         for (std::size_t at = segment_start; at < segment_end; ++at) {
           const char ch = pattern[at];
           if (ch == '*' || ch == '?') {
-            glob_pattern.push_back('[');
-            glob_pattern.push_back(ch);
-            glob_pattern.push_back(']');
+            glob_pattern += std::string("[") + ch + "]";
           } else if (ch == '[') {
             glob_pattern += "[[]";
           } else if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')) {
@@ -424,26 +456,40 @@ std::vector<Sym> GraphQuery::find(const std::string &pattern,
       segment_start = separator + 2;
     }
     glob_pattern.push_back('*');
-    try {
-      const auto ids =
-          adapter_ids((query::start(query::codebase()) |
-                       query::nodes(query::glob("name", glob_pattern)))
-                          .plan());
-      candidate_ids.emplace(ids.begin(), ids.end());
-    } catch (const query::PlanError &) {
-      // A capped plan result is not a complete compatibility filter. Keep
-      // the legacy ordered/limited lookup authoritative for this read.
+    return glob_pattern;
+  };
+
+  const auto plan_ids = [&](const query::Pred &pred) {
+    std::vector<query::Pred> predicates{pred};
+    if (kind) {
+      predicates.push_back(query::eq("kind", *kind));
     }
+    auto plan = query::start(query::codebase()) |
+                query::nodes(query::all_of(std::move(predicates))) |
+                query::select({"id", "name_length", "name"}) |
+                query::order_by({"name_length", "name"}) | query::limit(limit);
+    return adapter_ordered_ids(plan.plan());
+  };
+
+  std::vector<int64_t> ids;
+  if (!pattern.empty()) {
+    ids = plan_ids(query::any_of(
+        {query::eq("qual_name", pattern), query::eq("spelling", pattern)}));
+    if (ids.empty()) {
+      ids = plan_ids(query::glob("name", make_glob(true)));
+    }
+    if (ids.empty()) {
+      ids = plan_ids(query::glob("name", make_glob(false)));
+    }
+  } else {
+    ids = plan_ids(query::all_of({}));
   }
-  auto syms = db_.find_symbols(pattern, kind, limit);
   std::vector<Sym> out;
-  out.reserve(syms.size());
-  for (auto &sym : syms) {
-    if (candidate_ids && !candidate_ids->empty() &&
-        !candidate_ids->contains(sym.id)) {
-      continue;
+  out.reserve(ids.size());
+  for (const auto id : ids) {
+    if (const auto sym = db_.graph_symbol_by_id(id)) {
+      out.push_back(make_sym_from_symbol(*sym));
     }
-    out.push_back(make_sym_from_symbol(sym));
   }
   return out;
 }
@@ -569,6 +615,26 @@ std::vector<Edge> GraphQuery::references(int64_t sym_id, int limit) {
 }
 
 std::vector<Sym> GraphQuery::aliased_by(int64_t sym_id, int limit) {
+  if (limit < 1) {
+    return {};
+  }
+  if (query_read_) {
+    auto plan = plan_for(sym_id, std::string("alias_of"), "in");
+    plan.stages.push_back(
+        query::where(query::in_list("kind", {"typedef", "type-alias"})));
+    plan.stages.push_back(query::select({"id", "name_length", "name"}));
+    plan.stages.push_back(query::order_by({"name_length", "name"}));
+    plan.stages.push_back(query::limit(limit));
+    const auto ids = adapter_ordered_ids(plan);
+    std::vector<Sym> out;
+    out.reserve(ids.size());
+    for (const auto id : ids) {
+      if (const auto sym = db_.graph_symbol_by_id(id)) {
+        out.push_back(make_sym_from_symbol(*sym));
+      }
+    }
+    return out;
+  }
   auto &raw = db_.read_db();
   auto st =
       raw.prepare("SELECT s.id FROM symbol s "
