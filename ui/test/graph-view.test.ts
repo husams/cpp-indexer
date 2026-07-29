@@ -249,3 +249,24 @@ test("overlay identities reject frontend-invented or incompatible provenance", (
   delete missingProvenance.overlays!.proof!.claims[0]!.identity.limitation;
   assert.throws(() => validateGraphView(missingProvenance), /source provenance/);
 });
+
+test("overlay boundaries stay safe under cycles, empty traces, and evidence budgets", () => {
+  const cyclic = structuredClone(overlayFixture("proof"));
+  cyclic.overlays!.proof!.claims[0]!.parentId = cyclic.overlays!.proof!.claims[1]!.id;
+  cyclic.overlays!.proof!.claims[1]!.parentId = cyclic.overlays!.proof!.claims[0]!.id;
+  assert.throws(() => validateGraphView(cyclic), /acyclic tree/);
+
+  const emptyTrace = structuredClone(overlayFixture("counterexample"));
+  emptyTrace.overlays!.counterexample!.steps = [];
+  assert.throws(() => validateGraphView(emptyTrace), /at least one bounded step/);
+
+  const narrow = structuredClone(overlayFixture("proof"));
+  const proof = narrow.overlays!.proof!;
+  narrow.overlays = {
+    exportMaxBytes: narrow.overlays!.exportMaxBytes,
+    proof: { ...proof, claims: proof.claims.map((claim) => ({ ...claim, identity: { resultId: narrow.resultId, evidenceId: "ev:proof-refutation", limitation: "bounded proof fixture" } })) },
+  };
+  const bounded = applyBudget(narrow, { ...narrow.budget, maxEvidenceRefs: 1 });
+  assert.deepEqual(bounded.evidence.map((item) => item.id), ["ev:proof-refutation"]);
+  assert.doesNotThrow(() => validateGraphView(bounded));
+});

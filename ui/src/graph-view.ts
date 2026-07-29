@@ -499,8 +499,22 @@ export function validateOverlayBundle(bundle: OverlayBundle, resultId: string, e
     validateOverlayElements(bundle.proof.claims, resultId, evidenceIds);
     const claimIds = new Set(bundle.proof.claims.map((claim) => claim.id));
     if (bundle.proof.claims.some((claim) => claim.parentId !== undefined && (claim.parentId === claim.id || !claimIds.has(claim.parentId)))) throw new Error("proof claims must reference an existing parent");
+    const visiting = new Set<string>();
+    const visited = new Set<string>();
+    const hasCycle = (id: string): boolean => {
+      if (visiting.has(id)) return true;
+      if (visited.has(id)) return false;
+      visiting.add(id);
+      const parentId = bundle.proof!.claims.find((claim) => claim.id === id)?.parentId;
+      const cycle = parentId !== undefined && hasCycle(parentId);
+      visiting.delete(id);
+      visited.add(id);
+      return cycle;
+    };
+    if (bundle.proof.claims.some((claim) => hasCycle(claim.id))) throw new Error("proof claims must form an acyclic tree");
   }
   if (bundle.counterexample) {
+    if (bundle.counterexample.steps.length === 0) throw new Error("counterexample must contain at least one bounded step");
     validateOverlayElements(bundle.counterexample.steps.map((step) => ({ id: `step:${step.index}`, identity: step.identity })), resultId, evidenceIds);
     if (bundle.counterexample.steps.some((step, index) => step.index !== index || step.state.length > 16 || step.state.some((binding) => !binding.name || binding.name.length > 80 || binding.value.length > MAX_STRING))) throw new Error("counterexample steps must be bounded and ordered");
   }
@@ -571,9 +585,11 @@ export function applyBudget(result: GraphViewResult, budget: Budget): GraphViewR
     .filter((edge) => nodeKeys.has(stablePortableId(edge.source)) && nodeKeys.has(stablePortableId(edge.target)))
     .slice(0, budget.maxEdges);
   const groups = [...result.groups].sort((a, b) => stablePortableId(a.ref).localeCompare(stablePortableId(b.ref))).slice(0, budget.maxGroups);
+  const overlayIds = new Set(overlayEvidenceIds(result.overlays));
+  if (overlayIds.size > budget.maxEvidenceRefs) throw new Error("overlay evidence exceeds the declared evidence budget");
   const evidenceIds = new Set([...nodes, ...edges, ...groups].flatMap((item) => item.evidenceRefs));
-  overlayEvidenceIds(result.overlays).forEach((id) => evidenceIds.add(id));
-  const evidence = [...result.evidence].filter((item) => evidenceIds.has(item.id)).sort((a, b) => a.id.localeCompare(b.id)).slice(0, budget.maxEvidenceRefs);
+  overlayIds.forEach((id) => evidenceIds.add(id));
+  const evidence = [...result.evidence].filter((item) => evidenceIds.has(item.id)).sort((a, b) => Number(overlayIds.has(b.id)) - Number(overlayIds.has(a.id)) || a.id.localeCompare(b.id)).slice(0, budget.maxEvidenceRefs);
   const keptEvidenceIds = new Set(evidence.map((item) => item.id));
   const boundedNodes = nodes.map((item) => ({ ...item, evidenceRefs: item.evidenceRefs.filter((id) => keptEvidenceIds.has(id)) }));
   const boundedEdges = edges.map((item) => ({ ...item, evidenceRefs: item.evidenceRefs.filter((id) => keptEvidenceIds.has(id)) }));
