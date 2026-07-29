@@ -21,6 +21,7 @@
 
 #include "catalogs/generated_catalog.hpp"
 #include "graph/records.hpp"
+#include "query/plan.hpp"
 #include "storage/ports.hpp"
 
 namespace cidx::graph {
@@ -83,6 +84,14 @@ public:
   // Convenience: open from path (reserved for a service opened at path).
   // Throws NoIndexError when the DB file does not exist.
   static GraphQuery open(const std::string &db_path);
+
+  // Canonical QueryPlan constructor for legacy symbol reads. Compatibility
+  // entry points use this as their shared declarative representation before
+  // adapting result rows back to Sym/Edge/Site records.
+  query::Plan plan_for(int64_t sym_id,
+                       const std::optional<std::string> &relation = std::nullopt,
+                       const std::string &direction = "out",
+                       int min_depth = 1, int max_depth = 1);
 
   // Total number of edges. 0 means the graph layer is empty.
   int64_t edge_count();

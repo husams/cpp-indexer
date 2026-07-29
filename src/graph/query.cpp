@@ -49,6 +49,31 @@ GraphQuery GraphQuery::open(const std::string &db_path) {
                          "handlers");
 }
 
+query::Plan GraphQuery::plan_for(
+    int64_t sym_id, const std::optional<std::string> &relation,
+    const std::string &direction, int min_depth, int max_depth) {
+  const auto sym = get_by_id(sym_id);
+  if (!sym) {
+    return (query::start(query::codebase()) |
+            query::nodes(query::all_of({
+                query::eq("id", static_cast<int64_t>(-1)),
+                query::eq("id", static_cast<int64_t>(-2)),
+            })))
+        .plan();
+  }
+  auto plan = query::start(query::symbol(sym->usr));
+  if (!relation) {
+    return plan.plan();
+  }
+  if (direction == "out") {
+    return (plan | query::out(*relation, min_depth, max_depth)).plan();
+  }
+  if (direction == "in") {
+    return (plan | query::in_(*relation, min_depth, max_depth)).plan();
+  }
+  throw std::invalid_argument("direction must be 'in' or 'out'");
+}
+
 // ---------------------------------------------------------------------------
 // Guards
 // ---------------------------------------------------------------------------

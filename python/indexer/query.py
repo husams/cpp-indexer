@@ -1034,6 +1034,38 @@ class GraphQuery:
                 "`cidx index` (without --no-graph) then `cidx resolve`."
             )
 
+    def plan_for(
+        self,
+        sym,
+        relation: Optional[str] = None,
+        direction: str = "out",
+        min_depth: int = 1,
+        max_depth: int = 1,
+    ):
+        """Build the canonical QueryPlan for a legacy symbol-graph read."""
+        from .queryplan import (
+            all_of,
+            codebase,
+            eq,
+            in_ as plan_in,
+            nodes,
+            out as plan_out,
+            start,
+            symbol,
+        )
+
+        resolved = self.get(sym)
+        if resolved is None:
+            return start(codebase()) | nodes(all_of([eq("id", -1), eq("id", -2)]))
+        query = start(symbol(resolved.usr))
+        if relation is None:
+            return query
+        if direction == "out":
+            return query | plan_out(relation, min_depth, max_depth)
+        if direction == "in":
+            return query | plan_in(relation, min_depth, max_depth)
+        raise ValueError("direction must be 'in' or 'out'")
+
     def _is_resolved(self) -> bool:
         """True once `cidx resolve` has rolled up edge counts (meta flag set).
 
