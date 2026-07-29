@@ -19,7 +19,10 @@ origin.
 ## M4 qualification gates
 
 `npm run check` verifies the pinned offline asset, dependency inventory, browser
-budgets, DOM-level regressions, and the Playwright `file://` smoke test. The
+budgets, executable qualification scenarios, DOM-level regressions, and
+headless Chromium measurements over small, mixed-degree, and high-degree graph
+fixtures. The Playwright `file://` smoke test and performance measurement block
+network access. The
 published limits are in `performance-budget.json`; an incoming view that
 exceeds them is refused before Cytoscape layout starts. The
 `qualification-manifest.json` records the frontend, Cytoscape, catalog, schema,

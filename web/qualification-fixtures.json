@@ -1,0 +1,43 @@
+{
+  "format": "cidx.explorer-qualification-fixtures.v1",
+  "workspaces": {
+    "cpp-indexer": {
+      "identity": {"workspace_revision": "git:d7b2c831ab0436c69ce203d7d559e0e117efbcdd", "corpus": "index.db"},
+      "nodes": [
+        {"id": "cpp-symbol-graph", "name": "GraphEdgeRecord", "kind": "symbol", "repository": "cpp-indexer", "freshness": "current", "status": "complete"},
+        {"id": "cpp-entity-graph", "name": "GraphEntity", "kind": "entity", "repository": "cpp-indexer", "freshness": "current", "status": "complete"},
+        {"id": "cpp-type-view", "name": "GraphView", "kind": "type", "repository": "cpp-indexer", "freshness": "current", "status": "complete"},
+        {"id": "cpp-llvm", "name": "clang::ASTContext", "kind": "symbol", "repository": "llvm", "freshness": "current", "status": "external"},
+        {"id": "cpp-stale", "name": "StaleSnapshot", "kind": "symbol", "repository": "cpp-indexer", "freshness": "stale", "status": "stale"},
+        {"id": "cpp-partial", "name": "PartialEvidence", "kind": "symbol", "repository": "cpp-indexer", "freshness": "current", "status": "partial"},
+        {"id": "cpp-external", "name": "ExternalStub", "kind": "symbol", "repository": "llvm", "freshness": "current", "status": "external"}
+      ],
+      "edges": [
+        {"id": "cpp-include", "kind": "include", "source": "cpp-symbol-graph", "target": "cpp-type-view", "sites": [{"location": "src/ui/graph_view.hpp:1"}]},
+        {"id": "cpp-call-1", "kind": "calls", "source": "cpp-symbol-graph", "target": "cpp-entity-graph", "sites": [{"location": "src/ui/graph_view.cpp:1"}]},
+        {"id": "cpp-call-2", "kind": "calls", "source": "cpp-symbol-graph", "target": "cpp-type-view", "sites": [{"location": "src/ui/graph_view.cpp:2"}]},
+        {"id": "cpp-call-3", "kind": "calls", "source": "cpp-symbol-graph", "target": "cpp-llvm", "sites": [{"location": "src/ui/graph_view.cpp:3"}]}
+      ],
+      "overlays": {"proof": {"claims": [{"label": "bounded result", "state": "proved"}]}, "trace": {"path": [{"label": "GraphEdgeRecord", "relation": "calls"}, {"label": "GraphEntity", "relation": "returns"}]}}
+    },
+    "banking": {
+      "identity": {"workspace_revision": "git:d7b2c831ab0436c69ce203d7d559e0e117efbcdd", "corpus": "cidx.lock/v1"},
+      "nodes": [
+        {"id": "bank-symbol-state", "name": "AccountState", "kind": "symbol", "repository": "banking", "freshness": "current", "status": "complete"},
+        {"id": "bank-entity-boundary", "name": "ApplicationStateBoundary", "kind": "entity", "repository": "banking.analysis", "freshness": "current", "status": "complete"},
+        {"id": "bank-type-state", "name": "State", "kind": "type", "repository": "banking", "freshness": "current", "status": "complete"},
+        {"id": "bank-package", "name": "banking.extract", "kind": "symbol", "repository": "banking.extract", "freshness": "current", "status": "complete"},
+        {"id": "bank-stale", "name": "StalePackage", "kind": "symbol", "repository": "banking", "freshness": "stale", "status": "stale"},
+        {"id": "bank-partial", "name": "PartialPackage", "kind": "symbol", "repository": "banking", "freshness": "current", "status": "partial"},
+        {"id": "bank-external", "name": "ExternalProvider", "kind": "symbol", "repository": "external.registry", "freshness": "current", "status": "external"}
+      ],
+      "edges": [
+        {"id": "bank-include", "kind": "include", "source": "bank-symbol-state", "target": "bank-type-state", "sites": [{"location": "extract/state.hpp:1"}]},
+        {"id": "bank-call-1", "kind": "calls", "source": "bank-symbol-state", "target": "bank-entity-boundary", "sites": [{"location": "extract/state.cpp:1"}]},
+        {"id": "bank-call-2", "kind": "calls", "source": "bank-symbol-state", "target": "bank-type-state", "sites": [{"location": "extract/state.cpp:2"}]},
+        {"id": "bank-call-3", "kind": "calls", "source": "bank-symbol-state", "target": "bank-package", "sites": [{"location": "analysis/state.dl:3"}]}
+      ],
+      "overlays": {"proof": {"claims": [{"label": "boundary contract", "state": "proved"}]}, "trace": {"path": [{"label": "AccountState", "relation": "emits"}, {"label": "ApplicationStateBoundary", "relation": "classifies"}]}}
+    }
+  }
+}

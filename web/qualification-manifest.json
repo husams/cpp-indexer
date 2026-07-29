@@ -1,21 +1,44 @@
 {
   "format": "cidx.explorer-qualification.v1",
   "frontend": {"package": "cidx-graph-explorer", "version": "0.1.0"},
+  "cidx": {"version": "0.53.0", "schema_version": 40, "workspace_revision": "git:d7b2c831ab0436c69ce203d7d559e0e117efbcdd"},
   "cytoscape": {"version": "3.31.2", "asset_sha256": "a9e75b12b6dab7b7f5b428636070b38c59eba2a4a7d0a3af36b2afdd67b13499"},
-  "catalog": {"path": "catalogs/core.json", "version": 1},
+  "catalog": {"path": "catalogs/core.json", "version": 1, "sha256": "c4f426232c34739c83a3d15c3bd91b4d4f8934ec8853f8efaa7a27939e37e9f7"},
   "schema": {"graph_view": "cidx.graph-view.v1", "result_protocol": "spec/contracts/result-protocol.json"},
   "workspaces": [
-    {"name": "cpp-indexer", "root": ".", "index": "index.db", "corpus": "manifests"},
-    {"name": "banking", "root": "examples/packages/banking", "fixture": "fixture/workspace.json", "lock": "cidx.lock.json"}
+    {"name": "cpp-indexer", "root": ".", "index": "index.db", "corpus": "manifests", "corpus_file": "manifests/compile_commands.json", "index_sha256": "d7b6def056bcbc0c7537251a79f7b733021715c57ea055859a52f4a0db13bd11", "corpus_sha256": "4734fe98e9b1372b7d07e97fb3e97a189dc6957c69c999a1a1393761d9970c2b"},
+    {"name": "banking", "root": "examples/packages/banking", "fixture": "fixture/workspace.json", "lock": "cidx.lock.json", "workspace_sha256": "f0add98d21798ddcf52531ea40e63209e9a612126c3945f83a04d55fea806c4f", "corpus_sha256": "898b9562a4a75b48bf53100d828ac766a784c0f3031482bc96618fa1be3911cf"}
   ],
+  "qualification_fixture": "web/qualification-fixtures.json",
   "scenarios": [
-    "symbol", "entity", "include", "type", "high-degree", "multi-repository",
-    "stale", "partial", "external", "proof", "trace"
+    {"id": "cpp-symbol", "workspace": "cpp-indexer", "query": {"node_kind": "symbol", "name": "GraphEdgeRecord"}, "expected": {"nodes": ["cpp-symbol-graph"], "edges": [], "sites": 0}},
+    {"id": "cpp-entity", "workspace": "cpp-indexer", "query": {"node_kind": "entity", "name": "GraphEntity"}, "expected": {"nodes": ["cpp-entity-graph"], "edges": [], "sites": 0}},
+    {"id": "cpp-include", "workspace": "cpp-indexer", "query": {"edge_kind": "include"}, "expected": {"nodes": [], "edges": ["cpp-include"], "sites": 1}},
+    {"id": "cpp-type", "workspace": "cpp-indexer", "query": {"node_kind": "type", "name": "GraphView"}, "expected": {"nodes": ["cpp-type-view"], "edges": [], "sites": 0}},
+    {"id": "cpp-high-degree", "workspace": "cpp-indexer", "query": {"edge_kind": "calls", "min_degree": 3}, "expected": {"nodes": ["cpp-symbol-graph"], "edges": ["cpp-call-1", "cpp-call-2", "cpp-call-3"], "sites": 3}},
+    {"id": "cpp-multi-repository", "workspace": "cpp-indexer", "query": {"repositories": ["cpp-indexer", "llvm"]}, "expected": {"nodes": ["cpp-entity-graph", "cpp-external", "cpp-llvm", "cpp-partial", "cpp-stale", "cpp-symbol-graph", "cpp-type-view"], "edges": [], "sites": 0}},
+    {"id": "cpp-stale", "workspace": "cpp-indexer", "query": {"freshness": "stale"}, "expected": {"nodes": ["cpp-stale"], "edges": [], "sites": 0}},
+    {"id": "cpp-partial", "workspace": "cpp-indexer", "query": {"status": "partial"}, "expected": {"nodes": ["cpp-partial"], "edges": [], "sites": 0}},
+    {"id": "cpp-external", "workspace": "cpp-indexer", "query": {"status": "external", "name": "ExternalStub"}, "expected": {"nodes": ["cpp-external"], "edges": [], "sites": 0}},
+    {"id": "cpp-proof", "workspace": "cpp-indexer", "query": {"overlay": "proof"}, "expected": {"nodes": [], "edges": [], "sites": 0, "overlay_items": 1}},
+    {"id": "cpp-trace", "workspace": "cpp-indexer", "query": {"overlay": "trace"}, "expected": {"nodes": [], "edges": [], "sites": 0, "overlay_items": 2}},
+    {"id": "banking-symbol", "workspace": "banking", "query": {"node_kind": "symbol", "name": "AccountState"}, "expected": {"nodes": ["bank-symbol-state"], "edges": [], "sites": 0}},
+    {"id": "banking-entity", "workspace": "banking", "query": {"node_kind": "entity", "name": "ApplicationStateBoundary"}, "expected": {"nodes": ["bank-entity-boundary"], "edges": [], "sites": 0}},
+    {"id": "banking-include", "workspace": "banking", "query": {"edge_kind": "include"}, "expected": {"nodes": [], "edges": ["bank-include"], "sites": 1}},
+    {"id": "banking-type", "workspace": "banking", "query": {"node_kind": "type", "name": "State"}, "expected": {"nodes": ["bank-type-state"], "edges": [], "sites": 0}},
+    {"id": "banking-high-degree", "workspace": "banking", "query": {"edge_kind": "calls", "min_degree": 3}, "expected": {"nodes": ["bank-symbol-state"], "edges": ["bank-call-1", "bank-call-2", "bank-call-3"], "sites": 3}},
+    {"id": "banking-multi-repository", "workspace": "banking", "query": {"repositories": ["banking", "banking.extract"]}, "expected": {"nodes": ["bank-package", "bank-partial", "bank-stale", "bank-symbol-state", "bank-type-state"], "edges": [], "sites": 0}},
+    {"id": "banking-stale", "workspace": "banking", "query": {"freshness": "stale"}, "expected": {"nodes": ["bank-stale"], "edges": [], "sites": 0}},
+    {"id": "banking-partial", "workspace": "banking", "query": {"status": "partial"}, "expected": {"nodes": ["bank-partial"], "edges": [], "sites": 0}},
+    {"id": "banking-external", "workspace": "banking", "query": {"status": "external", "name": "ExternalProvider"}, "expected": {"nodes": ["bank-external"], "edges": [], "sites": 0}},
+    {"id": "banking-proof", "workspace": "banking", "query": {"overlay": "proof"}, "expected": {"nodes": [], "edges": [], "sites": 0, "overlay_items": 1}},
+    {"id": "banking-trace", "workspace": "banking", "query": {"overlay": "trace"}, "expected": {"nodes": [], "edges": [], "sites": 0, "overlay_items": 2}}
   ],
   "evidence": {
     "versions_are_pinned": true,
     "offline_export": "web/scripts/offline-smoke.mjs",
     "live_loopback": "tests/ui_server_test.cpp",
-    "browser_budgets": "web/performance-budget.json"
+    "browser_budgets": "web/performance-budget.json",
+    "scenario_fixture": "web/qualification-fixtures.json"
   }
 }

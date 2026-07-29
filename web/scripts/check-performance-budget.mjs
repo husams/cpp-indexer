@@ -6,6 +6,24 @@ const root = resolve(new URL('..', import.meta.url).pathname, '..');
 const readJson = async (path) => JSON.parse(await readFile(resolve(root, path), 'utf8'));
 const budget = await readJson('web/performance-budget.json');
 const inventory = await readJson('web/vendor/DEPENDENCY-INVENTORY.json');
+const measurement = await readJson(budget.measurement);
+if (measurement.format !== 'cidx.browser-performance-measurements.v1' ||
+    measurement.environment.browser !== 'Chromium (Playwright)' ||
+    measurement.environment.headless !== true ||
+    measurement.environment.network !== 'blocked') {
+  throw new Error('performance measurement environment is not pinned');
+}
+if (!Array.isArray(measurement.cases) || measurement.cases.length < 3 ||
+    measurement.cases.some((fixture) => fixture.nodes <= 0 || fixture.edges <= 0 ||
+      !fixture.shape || Object.keys(budget.runtime).some((metric) =>
+        !Number.isFinite(fixture.baseline?.[metric])))) {
+  throw new Error('performance measurement inputs/results are incomplete');
+}
+for (const fixture of measurement.cases) {
+  for (const [metric, value] of Object.entries(fixture.baseline)) {
+    if (value > budget.runtime[metric]) throw new Error(`${fixture.id}: baseline ${metric} exceeds budget`);
+  }
+}
 const packages = [
   ['web/package.json', 'web/package-lock.json'],
   ['ui/package.json', 'ui/package-lock.json'],

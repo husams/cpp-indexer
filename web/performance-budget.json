@@ -12,10 +12,21 @@
     "styles.css": 32768,
     "vendor/cytoscape.min.js": 524288
   },
+  "runtime": {
+    "load_ms": 10000,
+    "layout_ms": 10000,
+    "pan_zoom_ms": 750,
+    "selection_ms": 750,
+    "progressive_update_ms": 750,
+    "memory_mb": 512,
+    "export_bytes": 8388608
+  },
+  "measurement": "web/performance-measurements.json",
   "rationale": {
     "load": "Keep the self-contained explorer under a 512 KiB Cytoscape asset plus small application shell.",
     "layout": "Refuse before layout when a slice exceeds 2500 nodes or 5000 edges.",
     "evidence": "Keep source-site rendering bounded even when a relation has high degree.",
-    "interaction": "Reduced-motion users receive zero-duration camera transitions."
+    "interaction": "Reduced-motion users receive zero-duration camera transitions.",
+    "measurement": "Thresholds are checked against three reproducible headless Chromium fixtures covering small, mixed-degree, and high-degree graphs; recorded baselines and environment are in performance-measurements.json."
   }
 }
