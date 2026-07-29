@@ -228,6 +228,25 @@ TEST_CASE("query_plan: canonical JSON matches the shared golden") {
   CHECK(rendered == read_file(CIDX_CXQ_GOLDEN));
 }
 
+TEST_CASE("graph query adapter lowers through the shared legacy plan fixture") {
+  Storage db(":memory:");
+  SqliteQueryReadAdapter read(db);
+  Symbol symbol = make_sym("USR::A", "funcA");
+  const auto id = db.add_symbol(symbol);
+  cidx::graph::GraphQuery graph(read);
+
+  const auto plan = graph.plan_for(id, "calls", "out", 1, 2);
+  const std::string fixture = read_file(CIDX_LEGACY_GRAPH_PLAN_GOLDEN);
+  const std::string expected =
+      fixture.substr(fixture.find("== symbol_calls_depth_two ==\n") +
+                         std::string("== symbol_calls_depth_two ==\n").size(),
+                     fixture.find("\n== entity_inherits ==") -
+                         fixture.find("== symbol_calls_depth_two ==\n") -
+                         std::string("== symbol_calls_depth_two ==\n").size());
+  CHECK(canonical_json(plan) ==
+        expected.substr(0, expected.find_last_not_of("\n") + 1));
+}
+
 TEST_CASE("query_plan: CXQ text lowers to the immutable plan") {
   const Plan parsed =
       parse_cxq("codebase() | nodes(kind = class) | "
@@ -558,6 +577,9 @@ TEST_CASE("query_plan: execution cursor pages symbol and edge enumeration") {
   Storage db(":memory:");
   std::vector<int64_t> edge_ids;
   edge_ids.reserve(static_cast<std::size_t>(kEnumerateBudget + 1));
+  int64_t late_source = 0;
+  int64_t late_target = 0;
+  int64_t late_edge = 0;
   {
     auto txn = db.transaction();
     const int64_t caller =
@@ -568,6 +590,11 @@ TEST_CASE("query_plan: execution cursor pages symbol and edge enumeration") {
                                  "cursor-target-" + std::to_string(i)));
       edge_ids.push_back(db.add_edge(make_edge(caller, callee, 1)));
     }
+    late_source = db.add_symbol(
+        make_sym("USR::cursor-late-source", "cursor-late-source"));
+    late_target = db.add_symbol(
+        make_sym("USR::cursor-late-target", "cursor-late-target"));
+    late_edge = db.add_edge(make_edge(late_source, late_target, 1));
     txn.commit();
   }
 
@@ -582,7 +609,7 @@ TEST_CASE("query_plan: execution cursor pages symbol and edge enumeration") {
   const int64_t symbol_cursor =
       std::get<int64_t>(first_symbols.rows.back().front());
   const Result remaining_symbols = ex.run(symbol_plan, symbol_cursor);
-  CHECK(remaining_symbols.rows.size() == 2);
+  CHECK(remaining_symbols.rows.size() == 4);
   CHECK_FALSE(remaining_symbols.truncated);
 
   const Plan edge_plan = (start(codebase()) | view(View::Edge) | nodes() |
@@ -595,8 +622,26 @@ TEST_CASE("query_plan: execution cursor pages symbol and edge enumeration") {
   const int64_t edge_cursor =
       edge_ids[static_cast<std::size_t>(kEnumerateBudget - 1)];
   const Result remaining_edges = ex.run(edge_plan, edge_cursor);
-  CHECK(remaining_edges.rows.size() == 1);
+  CHECK(remaining_edges.rows.size() == 2);
   CHECK_FALSE(remaining_edges.truncated);
+
+  const Plan late_source_plan =
+      (start(codebase()) | view(View::Edge) | nodes(eq("src_id", late_source)) |
+       select({"edge_id"}))
+          .plan();
+  const Result late_source_edges = ex.run(late_source_plan);
+  REQUIRE(late_source_edges.rows.size() == 1);
+  CHECK(std::get<int64_t>(late_source_edges.rows.front().front()) == late_edge);
+  CHECK_FALSE(late_source_edges.truncated);
+
+  const Plan late_target_plan =
+      (start(codebase()) | view(View::Edge) | nodes(eq("dst_id", late_target)) |
+       select({"edge_id"}))
+          .plan();
+  const Result late_target_edges = ex.run(late_target_plan);
+  REQUIRE(late_target_edges.rows.size() == 1);
+  CHECK(std::get<int64_t>(late_target_edges.rows.front().front()) == late_edge);
+  CHECK_FALSE(late_target_edges.truncated);
 }
 
 TEST_CASE("query_plan: edge view edge_id field exposes the raw cursor id, "

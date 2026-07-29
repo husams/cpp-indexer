@@ -433,6 +433,23 @@ TEST_CASE("GraphView file identities are non-reversible redacted hashes") {
   CHECK(json.find(hex_encode("/external/sys/header.hpp")) == std::string::npos);
 }
 
+TEST_CASE("GraphView resolves repository-relative files after checkout moves") {
+  Storage db(":memory:");
+  const int64_t component =
+      db.add_component("test", "/tmp/cidx-ui-original-checkout");
+  const int64_t directory = db.add_directory(component, "src/ui");
+  db.add_file(directory, "main.cpp");
+
+  cidx::ui::GraphViewRequest request;
+  request.input = cidx::ui::GraphViewInput{
+      .kind = cidx::ui::GraphInputKind::File, .value = "src/ui/main.cpp"};
+  const std::string json =
+      cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
+
+  CHECK(json.find("\"status\": \"exact_file\"") != std::string::npos);
+  CHECK(json.find("\"input_kind\": \"file\"") != std::string::npos);
+}
+
 TEST_CASE("GraphView exposes partial entity-edge completeness and status") {
   Storage db(":memory:");
   const int64_t source =

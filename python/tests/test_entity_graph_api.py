@@ -16,7 +16,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
 
-from indexer.storage import Storage  # noqa: E402
+from indexer.storage import Storage, Symbol  # noqa: E402
 from indexer.query import GraphQuery  # noqa: E402
 from indexer.clang import ast as A  # noqa: E402
 from indexer.clang import util as U  # noqa: E402
@@ -90,6 +90,15 @@ def eg():
             db.delete_edges_for_file(file_id)
             A._index_edges_notxn(db, tu, path, file_id)
         materialize_entity_edges(db)
+        isolated_id = db.add_symbol(Symbol(
+            usr="USR::Isolated", spelling="Isolated", kind="class",
+            resolved=True,
+        ))
+        db._conn.execute(
+            "INSERT INTO entity_node(id, kind) VALUES (?, ?)",
+            (isolated_id, int(EntityKind.CLASS)),
+        )
+        db._conn.commit()
 
         graph = EntityGraph(GraphQuery.from_connection(db._conn))
         yield graph
@@ -127,6 +136,12 @@ def test_entity_kind_mapping():
 
 def test_stats_and_kinds(eg):
     st = eg.stats()
+    expected_entities = eg._c.execute(
+        "SELECT COUNT(*) FROM ("
+        "SELECT id FROM entity_node UNION SELECT src_id FROM entity_edge "
+        "UNION SELECT dst_id FROM entity_edge)"
+    ).fetchone()[0]
+    assert st["entities"] == expected_entities
     assert st["edges"] >= 6
     assert "generalizes" in st["by_kind"]
     assert "composes" in st["by_kind"]
@@ -134,6 +149,29 @@ def test_stats_and_kinds(eg):
     assert EdgeKind.GENERALIZES in present
     assert EdgeKind.COMPOSES in present
     assert EdgeKind.USES in present
+
+
+def test_isolated_entity_node_is_counted_by_plan():
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Storage(os.path.join(tmp, "isolated.db"))
+        isolated_id = db.add_symbol(Symbol(
+            usr="USR::OnlyIsolated", spelling="OnlyIsolated", kind="class",
+            resolved=True,
+        ))
+        db._conn.execute(
+            "INSERT INTO entity_node(id, kind) VALUES (?, ?)",
+            (isolated_id, int(EntityKind.CLASS)),
+        )
+        db._conn.commit()
+        graph = EntityGraph(GraphQuery.from_connection(db._conn))
+        assert [node.id for node in graph.entities()] == [isolated_id]
+        assert list(graph.edges()) == []
+        assert graph.stats() == {
+            "entities": 1,
+            "edges": 0,
+            "by_kind": {},
+        }
+        db.close()
 
 
 def test_entities_and_find(eg):
@@ -164,6 +202,86 @@ def test_derived_direct_and_transitive(eg):
     base = eg.find("app::Base")[0]
     assert [n.name for n in base.derived()] == ["app::Mid"]
     assert {n.name for n in base.derived(transitive=True)} == {"app::Mid", "app::Leaf"}
+
+
+def test_entity_query_edges_hydrate_only_plan_selected_relation(eg):
+    leaf = eg.find("app::Leaf")[0]
+    mid = eg.find("app::Mid")[0]
+    unrelated = list(eg.edges(kind=EdgeKind.GENERALIZES, src=mid))
+    assert unrelated
+
+    query = eg.query(leaf).bases()
+    # A discarded legacy edge source must not be able to inject an unrelated
+    # row after the node QueryPlan has selected the relation result.
+    query._edges_src = lambda: iter(unrelated)
+    assert [(edge.src.name, edge.dst.name) for edge in query.edges()] == [
+        ("app::Leaf", "app::Mid")
+    ]
+
+
+def test_default_transitive_relation_is_plan_backed(eg):
+    query = eg.query("app::Base").derived(transitive=True)
+    assert any(
+        stage.op == "in" and stage.max_depth == 32
+        for stage in query.plan.stages
+    )
+    assert {node.name for node in query.nodes()} == {"app::Mid", "app::Leaf"}
+
+
+def test_default_transitive_relation_preserves_legacy_bfs_past_plan_window(eg):
+    store = Storage.from_connection(eg._c, eg._q.db_path)
+
+    def add_node(name: str) -> int:
+        node_id = store.add_symbol(Symbol(
+            usr=f"USR::{name}", spelling=name, kind="class", resolved=True,
+        ))
+        eg._c.execute(
+            "INSERT INTO entity_node(id, kind) VALUES (?, ?)",
+            (node_id, int(EntityKind.CLASS)),
+        )
+        return node_id
+
+    root = add_node("bfs_root")
+    child_low = add_node("bfs_child_low")
+    child_high = add_node("bfs_child_high")
+    grandchild_for_high = add_node("bfs_grandchild_for_high")
+    grandchild_for_low = add_node("bfs_grandchild_for_low")
+    for src_id, dst_id in (
+        (child_low, root),
+        (child_high, root),
+        (grandchild_for_low, child_low),
+        (grandchild_for_high, child_high),
+    ):
+        eg._c.execute(
+            "INSERT INTO entity_edge(src_id, dst_id, kind) VALUES (?, ?, ?)",
+            (src_id, dst_id, int(EdgeKind.GENERALIZES)),
+        )
+
+    chain_root = add_node("long_chain_0")
+    chain_ids: list[int] = []
+    previous = chain_root
+    for depth in range(1, 36):
+        current = add_node(f"long_chain_{depth}")
+        eg._c.execute(
+            "INSERT INTO entity_edge(src_id, dst_id, kind) VALUES (?, ?, ?)",
+            (current, previous, int(EdgeKind.GENERALIZES)),
+        )
+        chain_ids.append(current)
+        previous = current
+    eg._c.commit()
+
+    branch_result = [
+        node.id for node in eg.query(root).derived(transitive=True).nodes()
+    ]
+    assert branch_result == [
+        child_low,
+        child_high,
+        grandchild_for_low,
+        grandchild_for_high,
+    ]
+    assert [
+        node.id for node in eg.query(chain_root).derived(transitive=True).nodes()
+    ] == chain_ids
 
 
 def test_neighbors_direction(eg):

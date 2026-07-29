@@ -40,6 +40,33 @@ def test_find_kind_filter(g):
     assert g.find("Derived", kind="function") == []
 
 
+def test_find_adapter_preserves_exact_order_above_executor_cap(tmp_path):
+    """The production adapter must page and globally order >1,000 rows."""
+    db_path = str(tmp_path / "ordered-find.db")
+    with Storage(db_path) as db:
+        expected = []
+        for index in range(1205):
+            spelling = f"symbol{(index * 37) % 10000}"
+            sid = db.add_symbol(
+                Symbol(
+                    usr=f"USR::ordered-{index}",
+                    spelling=spelling,
+                    kind="function",
+                )
+            )
+            expected.append((len(spelling), spelling, sid))
+
+    expected_ids = [sid for _length, _name, sid in sorted(expected)]
+    g = GraphQuery(db_path)
+    try:
+        actual = g.find("", limit=1205)
+        assert len(actual) == 1205
+        assert len({sym.id for sym in actual}) == 1205
+        assert [sym.id for sym in actual] == expected_ids
+    finally:
+        g.close()
+
+
 def test_by_name_exact(g):
     # three classes define a method spelled 'draw'
     draws = g.by_name("draw")
@@ -69,6 +96,12 @@ def test_sym_carries_grounding(g):
     assert s.loc == "lib.c:20"
 
 
+def test_sites_zero_and_negative_limits_preserve_sqlite_boundary(g):
+    edge = g.edges_out(g.get("c:@F@main"), ("calls",))[0]
+    assert g.sites(edge, limit=0) == []
+    assert len(g.sites(edge, limit=-1)) == 1
+
+
 # --------------------------------------------------------------------------- #
 # Lookup references
 # --------------------------------------------------------------------------- #
@@ -89,6 +122,112 @@ def test_references_includes_calls_and_uses(g):
     refs = g.references(g_config)
     assert {e.peer.name for e in refs} == {"helper"}
     assert {e.kind for e in refs} == {"uses"}
+
+
+def test_legacy_references_keep_typed_rows_when_plan_is_partial(tmp_path):
+    """A failed of_type lowering must not filter successful call lowering."""
+    db_path = str(tmp_path / "mixed-references.db")
+    with Storage(db_path) as db:
+        target = db.add_symbol(
+            Symbol(usr="USR::mixed-target", spelling="target", kind="function")
+        )
+        caller = db.add_symbol(
+            Symbol(usr="USR::mixed-caller", spelling="caller", kind="function")
+        )
+        typed = db.add_symbol(
+            Symbol(usr="USR::mixed-typed", spelling="typed", kind="member")
+        )
+        db.add_edge(caller, target, 1)  # calls, handled by QueryPlan
+        db.add_edge(typed, target, 20)  # of_type, legacy cross-view fallback
+        db.set_meta("graph_resolved_at", "test")
+
+    g = GraphQuery(db_path)
+    try:
+        refs = g.references(target)
+        assert {(edge.peer.id, edge.kind) for edge in refs} == {
+            (caller, "calls"),
+            (typed, "of_type"),
+        }
+    finally:
+        g.close()
+
+
+def test_legacy_edges_fall_back_when_queryplan_candidates_are_truncated(tmp_path):
+    """High-degree legacy ordering/limits remain authoritative past the cap."""
+    db_path = str(tmp_path / "high-degree.db")
+    with Storage(db_path) as db:
+        target = db.add_symbol(
+            Symbol(
+                usr="USR::degree-target", spelling="target", kind="function"
+            )
+        )
+        for index in range(1005):
+            caller = db.add_symbol(
+                Symbol(
+                    usr=f"USR::degree-caller-{index}",
+                    spelling=f"caller{index}",
+                    kind="function",
+                )
+            )
+            db.add_edge(caller, target, 1, count=999 if index == 1004 else 1)
+        db.set_meta("graph_resolved_at", "test")
+
+    g = GraphQuery(db_path)
+    try:
+        edges = g.edges_in(target, ("calls",), limit=1)
+        assert len(edges) == 1
+        assert edges[0].peer.spelling == "caller1004"
+        assert edges[0].count == 999
+    finally:
+        g.close()
+
+
+def test_find_preserves_legacy_case_insensitive_matches_with_partial_plan(tmp_path):
+    db_path = str(tmp_path / "mixed-case-find.db")
+    with Storage(db_path) as db:
+        db.add_symbol(
+            Symbol(usr="USR::upper-find", spelling="ALPHAThing", kind="function")
+        )
+        db.add_symbol(
+            Symbol(usr="USR::lower-find", spelling="alphaThing", kind="function")
+        )
+
+    g = GraphQuery(db_path)
+    try:
+        assert {sym.spelling for sym in g.find("ALPHA")} == {
+            "ALPHAThing",
+            "alphaThing",
+        }
+    finally:
+        g.close()
+
+
+def test_find_preserves_segmented_fuzzy_matches_with_partial_plan(tmp_path):
+    db_path = str(tmp_path / "segmented-find.db")
+    with Storage(db_path) as db:
+        db.add_symbol(
+            Symbol(
+                usr="USR::literal-segment",
+                spelling="xFoo::Barx",
+                kind="function",
+            )
+        )
+        db.add_symbol(
+            Symbol(
+                usr="USR::wildcard-segment",
+                spelling="xFooXBarx",
+                kind="function",
+            )
+        )
+
+    g = GraphQuery(db_path)
+    try:
+        assert {sym.spelling for sym in g.find("Foo::Bar")} == {
+            "xFoo::Barx",
+            "xFooXBarx",
+        }
+    finally:
+        g.close()
 
 
 def test_edges_in_out_typed(g):
@@ -124,6 +263,75 @@ def test_count_falls_back_to_site_count_when_unresolved(index_db):
             0
         ]
         assert edge.count == 2
+
+
+def test_effective_edge_count_matches_legacy_states(tmp_path):
+    db_path = str(tmp_path / "effective-count.db")
+    with Storage(db_path) as db:
+        component = db.add_component("count-test", str(tmp_path))
+        directory = db.add_directory(component, "")
+        file_id = db.add_file(directory, "counts.cpp")
+        src = db.add_symbol(Symbol(usr="USR::count-src", spelling="src", kind="function"))
+        with_sites = db.add_symbol(Symbol(
+            usr="USR::count-with-sites", spelling="with_sites", kind="function"
+        ))
+        without_sites = db.add_symbol(Symbol(
+            usr="USR::count-without-sites", spelling="without_sites", kind="function"
+        ))
+        zero = db.add_symbol(Symbol(
+            usr="USR::count-zero", spelling="zero", kind="function"
+        ))
+        zero_with_sites = db.add_symbol(Symbol(
+            usr="USR::count-zero-with-sites", spelling="zero_with_sites", kind="function"
+        ))
+        e_with_sites = db.add_edge(src, with_sites, 1, count=7)
+        e_without_sites = db.add_edge(src, without_sites, 1, count=7)
+        e_zero = db.add_edge(src, zero, 1, count=0)
+        e_zero_with_sites = db.add_edge(src, zero_with_sites, 1, count=0)
+        db.add_edge_site(e_with_sites, file_id, 10, 1)
+        db.add_edge_site(e_zero_with_sites, file_id, 20, 1)
+        db._conn.commit()
+
+    def counts(resolved):
+        if resolved:
+            with Storage(db_path) as db:
+                db.set_meta("graph_resolved_at", "test")
+        with GraphQuery(db_path) as query:
+            rows = query.edges_out(src, ("calls",), limit=20)
+            return {row.dst_id: row.count for row in rows}
+
+    unresolved = counts(False)
+    resolved = counts(True)
+    with Storage(db_path) as db:
+        db.set_meta("graph_resolved_at", "")
+        oracle = db._conn.execute(
+            "SELECT dst_id, CASE "
+            "WHEN COALESCE((SELECT value FROM meta WHERE key = 'graph_resolved_at'), '') <> '' "
+            "THEN CASE WHEN e.count <> 0 THEN e.count ELSE 1 END "
+            "WHEN (SELECT COUNT(*) FROM edge_site WHERE edge_id = e.id) > 0 "
+            "THEN (SELECT COUNT(*) FROM edge_site WHERE edge_id = e.id) "
+            "WHEN e.count <> 0 THEN e.count ELSE 1 END "
+            "FROM edge e WHERE src_id = ? ORDER BY id",
+            (src,),
+        ).fetchall()
+        assert {row[0] for row in oracle} == set(unresolved)
+        assert dict(oracle) == unresolved
+        db.set_meta("graph_resolved_at", "test")
+        oracle_resolved = db._conn.execute(
+            "SELECT dst_id, CASE "
+            "WHEN COALESCE((SELECT value FROM meta WHERE key = 'graph_resolved_at'), '') <> '' "
+            "THEN CASE WHEN e.count <> 0 THEN e.count ELSE 1 END "
+            "WHEN (SELECT COUNT(*) FROM edge_site WHERE edge_id = e.id) > 0 "
+            "THEN (SELECT COUNT(*) FROM edge_site WHERE edge_id = e.id) "
+            "WHEN e.count <> 0 THEN e.count ELSE 1 END "
+            "FROM edge e WHERE src_id = ? ORDER BY id",
+            (src,),
+        ).fetchall()
+        assert dict(oracle_resolved) == resolved
+    assert resolved[with_sites] == 7
+    assert resolved[without_sites] == 7
+    assert resolved[zero] == 1
+    assert resolved[zero_with_sites] == 1
 
 
 # --------------------------------------------------------------------------- #

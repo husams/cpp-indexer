@@ -233,6 +233,23 @@ const std::vector<FieldDesc> &field_catalog() {
 }
 
 const FieldDesc *field_desc(const std::string &name) {
+  if (name == "name_length") {
+    static const FieldDesc derived{
+        .name = "name_length", .filterable = false, .is_string = false};
+    return &derived;
+  }
+  if (name == "file") {
+    static const FieldDesc file_id{
+        .name = "file", .filterable = true, .is_string = false};
+    return &file_id;
+  }
+  if (name == "multi_def" || name == "negative_multi_def") {
+    static const FieldDesc multi_def{
+        .name = "multi_def", .filterable = true, .is_string = false};
+    static const FieldDesc negative_multi_def{
+        .name = "negative_multi_def", .filterable = false, .is_string = false};
+    return name == "multi_def" ? &multi_def : &negative_multi_def;
+  }
   for (const auto &f : field_catalog()) {
     if (name == f.name) {
       return &f;
@@ -746,9 +763,10 @@ bool field_available(View view, const std::string &name) {
     // -- see `typed_column`'s matching special case and
     // python/indexer/queryplan.py's `_TYPED_FIELDS["edge"]`.
     return has(std::array{"edge_id", "src_id", "dst_id", "kind", "count",
-                          "base_access", "is_virtual", "vtable_slot",
-                          "relation", "source", "target", "evidence", "status",
-                          "partial", "unknown"});
+                          "negative_count", "effective_count", "base_access",
+                          "is_virtual", "vtable_slot", "relation", "source",
+                          "target", "evidence", "status", "partial",
+                          "unknown"});
   case View::Site:
     return has(std::array{"edge_id", "file_id", "file", "line", "col", "src_id",
                           "dst_id", "relation", "source", "target", "evidence",
@@ -811,8 +829,10 @@ void check_cmp(const Pred &p, View active) {
                                  "extent",        "kind",
                                  "mode",          "value_kind",
                                  "named_decl"};
-    const auto is_string = [&p, &strings] {
-      return std::ranges::find(strings, p.field) != strings.end();
+    const auto is_string = [&p, &strings, active] {
+      return std::ranges::find(strings, p.field) != strings.end() &&
+             !(active == View::Edge && p.field == "kind" &&
+               p.int_value.has_value());
     };
     if (is_string()) {
       if (p.int_value.has_value()) {

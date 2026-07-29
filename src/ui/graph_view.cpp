@@ -929,6 +929,33 @@ RootResolution resolve_root(graph::GraphQuery &graph, Storage &db,
   return result;
 }
 
+auto resolve_file_input(Storage &db, const std::string &input_path)
+    -> std::optional<File> {
+  if (const auto direct = db.get_file(input_path)) {
+    return direct;
+  }
+  if (pathutil::isabs(input_path)) {
+    return std::nullopt;
+  }
+
+  const std::string relative = pathutil::normpath(input_path);
+  if (relative == "." || relative == ".." || relative.starts_with("../")) {
+    return std::nullopt;
+  }
+  const std::string suffix = "/" + relative;
+  std::optional<File> match;
+  for (const auto &[file, indexed_path] : db.list_files()) {
+    if (indexed_path != relative && !indexed_path.ends_with(suffix)) {
+      continue;
+    }
+    if (match && match->id != file.id) {
+      return std::nullopt;
+    }
+    match = file;
+  }
+  return match;
+}
+
 void add_root_candidate_metadata(Object &metadata,
                                  const RootResolution &resolution) {
   Object root;
@@ -2229,7 +2256,7 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request,
     }
     break;
   case GraphInputKind::File: {
-    const auto file = db.get_file(input.value);
+    const auto file = resolve_file_input(db, input.value);
     if (!file) {
       resolution.status = "unknown";
       break;

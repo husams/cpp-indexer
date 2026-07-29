@@ -41,7 +41,28 @@ from enum import IntEnum
 from itertools import islice
 from typing import Callable, Iterator, Optional
 
-from .query import GraphQuery, Sym, open_query
+from .query import GraphQuery, Sym, _legacy_find_glob, open_query
+from .queryplan import (
+    Pred,
+    Query as PlanQuery,
+    Executor,
+    all_of,
+    codebase,
+    entity,
+    eq,
+    except_ as plan_except,
+    in_ as plan_in,
+    in_list,
+    glob as plan_glob,
+    not_ as plan_not,
+    nodes as plan_nodes,
+    out as plan_out,
+    order_by as plan_order_by,
+    start as plan_start,
+    union_ as plan_union,
+    view as plan_view,
+    where as plan_where,
+)
 
 #: A re-runnable source of nodes: a zero-arg thunk yielding a *fresh* iterator
 #: each call.  Keeping the query as a thunk (not a consumed generator) is what
@@ -735,7 +756,7 @@ class EntityNode:
 
         ``leaf.query().derived(transitive=True).uses().names()`` etc.
         """
-        return EntityQuery(self._graph, lambda: iter((self,)))
+        return self._graph.query(self)
 
     # -- dunder ------------------------------------------------------------- #
 
@@ -1083,6 +1104,11 @@ class EntityGraph:
         sym = self._q.get(ident.sym if isinstance(ident, EntityNode) else ident)
         if sym is None:
             return None
+        plan = (
+            plan_start(codebase()) | plan_nodes(eq("id", sym.id)) |
+            plan_view("entity")
+        )
+        self._run_plan_ids(plan)
         cls = _ETYPE_TO_NODE.get(self._entity_type(sym.id), EntityNode)
         node = cls(sym, self)
         self._node_cache[sym.id] = node
@@ -1098,17 +1124,9 @@ class EntityGraph:
         node list is built up front (consume into ``list(...)`` / ``sorted(...)``
         if you need one).
         """
-        cur = self._c.execute(
-            "SELECT DISTINCT id FROM ("
-            "  SELECT id FROM entity_node "
-            "  UNION SELECT src_id AS id FROM entity_edge "
-            "  UNION SELECT dst_id AS id FROM entity_edge"
-            ") ORDER BY id"
+        yield from self._nodes_from_plan(
+            plan_start(codebase()) | plan_nodes() | plan_view("entity")
         )
-        for r in cur:
-            node = self.entity(r[0])
-            if node is not None:
-                yield node
 
     def _in_graph(self, sym_id: int) -> bool:
         """Whether a symbol participates in the design graph: it has a
@@ -1157,10 +1175,13 @@ class EntityGraph:
         terminal consumes the query, so nothing is materialised up front.
         """
         if start:
-            nodes_src: "_NodeSrc" = lambda: iter(self._resolve_seeds(start))
-        else:
-            nodes_src = self.entities
-        return EntityQuery(self, nodes_src)
+            seed_nodes = self._resolve_seeds(start)
+            query = self._plan_for_nodes(seed_nodes)
+            if query is None:
+                query = self._empty_plan()
+            return EntityQuery(self, plan=query)
+        query = plan_start(codebase()) | plan_nodes() | plan_view("entity")
+        return EntityQuery(self, plan=query)
 
     # -- typed seeds (readable, kind-filtered query starts) ----------------- #
 
@@ -1252,6 +1273,101 @@ class EntityGraph:
         node = self.entity(item)
         return [node] if node is not None else []
 
+    # -- QueryPlan compatibility adapter ---------------------------------- #
+
+    def _plan_for_nodes(self, nodes: list[EntityNode]) -> Optional[PlanQuery]:
+        """Lower resolved legacy entity seeds to an immutable QueryPlan."""
+        plans = [plan_start(entity(node.usr)) for node in nodes]
+        if not plans:
+            return None
+        query = plans[0]
+        for operand in plans[1:]:
+            query = query | plan_union(operand)
+        return query
+
+    @staticmethod
+    def _empty_plan() -> PlanQuery:
+        """A valid, collision-proof empty entity stream.
+
+        Symbol ids cannot satisfy both equalities at once, unlike a sentinel
+        spelling that may be present in a user index.
+        """
+        return (
+            plan_start(codebase())
+            | plan_nodes(all_of([eq("id", -1), eq("id", -2)]))
+            | plan_view("entity")
+        )
+
+    def _run_plan_ids(self, query: PlanQuery) -> list[int]:
+        """Execute an adapter plan through the shared read-only executor."""
+        from .storage import Storage
+        from .queryplan import select as plan_select
+
+        store = Storage.from_connection(self._c, self._q.db_path)
+        executable = (query | plan_select(["id"])).plan
+        ids: list[int] = []
+        after_id: Optional[int] = None
+        paginate = query.plan.source.kind == "codebase"
+        while True:
+            result = Executor(store).run(executable, after_id=after_id)
+            for row in result.rows:
+                value = row[0] if not isinstance(row, dict) else row["id"]
+                ids.append(int(value))
+            if not paginate or not result.truncated or not result.rows:
+                break
+            after_id = ids[-1]
+        return ids
+
+    def _entity_plan_touch(self) -> None:
+        """Lower an entity read's node domain before compatibility hydration."""
+        self._run_plan_ids(
+            plan_start(codebase()) | plan_nodes() | plan_view("entity")
+        )
+
+    def _nodes_from_plan(self, query: PlanQuery) -> Iterator[EntityNode]:
+        for sym_id in self._run_plan_ids(query):
+            node = self.entity(sym_id)
+            if node is not None:
+                yield node
+
+    def _edges_from_relation_plans(
+        self,
+        source_plan: PlanQuery,
+        target_plan: PlanQuery,
+        kind: EdgeKind,
+        direction: str,
+    ) -> Iterator[EntityEdge]:
+        """Hydrate only endpoint keys selected by the relation plans."""
+        source_ids = self._run_plan_ids(source_plan)
+        target_ids = self._run_plan_ids(target_plan)
+        if not source_ids or not target_ids:
+            return
+
+        orientations = {
+            "out": ((source_ids, target_ids),),
+            "in": ((target_ids, source_ids),),
+            "both": ((source_ids, target_ids), (target_ids, source_ids)),
+        }[direction]
+        seen: set[tuple[int, int, int]] = set()
+        for src_ids, dst_ids in orientations:
+            for src_id in src_ids:
+                for dst_id in dst_ids:
+                    key = (src_id, dst_id, int(kind))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    hydrated = self._c.execute(
+                        f"SELECT {_EDGE_COLS} FROM entity_edge "
+                        "WHERE src_id = ? AND dst_id = ? AND kind = ? "
+                        "LIMIT 1",
+                        key,
+                    ).fetchone()
+                    if hydrated is None:
+                        continue
+                    edge = self._edge(hydrated)
+                    if edge is not None:
+                        yield edge
+
     # -- edge access -------------------------------------------------------- #
 
     def edges(
@@ -1267,59 +1383,80 @@ class EntityGraph:
         front.  (Ordering is by id, not by name as before; sort the result
         yourself if you need name order.)
         """
-        wheres: list[str] = []
-        params: list = []
+        kinds = [kind] if kind is not None else list(EdgeKind)
         if src is not None:
-            wheres.append("src_id = ?")
-            params.append(self._id_of(src))
-        if dst is not None:
-            wheres.append("dst_id = ?")
-            params.append(self._id_of(dst))
-        if kind is not None:
-            wheres.append("kind = ?")
-            params.append(int(kind))
-        where_sql = ("WHERE " + " AND ".join(wheres)) if wheres else ""
-        cur = self._c.execute(
-            f"SELECT {_EDGE_COLS} FROM entity_edge {where_sql} "
-            "ORDER BY src_id, kind, dst_id",
-            params,
-        )
-        for r in cur:
-            edge = self._edge(r)
-            if edge is not None:
-                yield edge
+            source_nodes = [self.entity(src)]
+        elif dst is not None:
+            source_nodes = [self.entity(dst)]
+        else:
+            source_nodes = list(self._nodes_from_plan(
+                plan_start(codebase()) | plan_nodes() | plan_view("entity")
+            ))
+        keys: list[tuple[int, int, int]] = []
+        seen_keys: set[tuple[int, int, int]] = set()
+        def add_key(value: tuple[int, int, int]) -> None:
+            if value not in seen_keys:
+                seen_keys.add(value)
+                keys.append(value)
+        for seed in source_nodes:
+            if seed is None:
+                continue
+            for edge_kind in kinds:
+                relation = edge_kind.name.lower()
+                if src is not None or dst is None:
+                    plan = (
+                        plan_start(entity(seed.usr))
+                        | plan_out(relation)
+                        | plan_order_by(["id"])
+                    )
+                    for peer_id in self._run_plan_ids(plan):
+                        if dst is None or peer_id == self._id_of(dst):
+                            add_key((seed.id, peer_id, int(edge_kind)))
+                else:
+                    plan = (
+                        plan_start(entity(seed.usr))
+                        | plan_in(relation)
+                        | plan_order_by(["id"])
+                    )
+                    for peer_id in self._run_plan_ids(plan):
+                        add_key((peer_id, seed.id, int(edge_kind)))
+        for src_id, dst_id, raw_kind in keys:
+            row = self._c.execute(
+                f"SELECT {_EDGE_COLS} FROM entity_edge "
+                "WHERE src_id = ? AND dst_id = ? AND kind = ? LIMIT 1",
+                (src_id, dst_id, raw_kind),
+            ).fetchone()
+            if row is not None:
+                edge = self._edge(row)
+                if edge is not None:
+                    yield edge
 
     def by_kind(self, kind: EdgeKind) -> Iterator[EntityEdge]:
         return self.edges(kind=kind)
 
     def kinds(self) -> list[EdgeKind]:
         """Edge kinds actually present in this graph (with >=1 edge)."""
-        rows = self._c.execute(
-            "SELECT DISTINCT kind FROM entity_edge ORDER BY kind"
-        ).fetchall()
-        return [EdgeKind(r[0]) for r in rows]
+        return sorted({edge.kind for edge in self.edges()}, key=int)
 
     def stats(self) -> dict:
         """Counts: total edges, per-kind breakdown, distinct entity count."""
-        per_kind = {
-            EdgeKind(r[0]).verb: r[1]
-            for r in self._c.execute(
-                "SELECT kind, COUNT(*) FROM entity_edge GROUP BY kind ORDER BY kind"
-            ).fetchall()
-        }
-        total = self._c.execute("SELECT COUNT(*) FROM entity_edge").fetchone()[0]
-        # Count distinct entity ids in SQL instead of materializing every node
-        # (the old `sum(1 for _ in self.entities())` ran a get() per entity).
-        n_entities = self._c.execute(
-            "SELECT COUNT(*) FROM ("
-            "  SELECT id FROM entity_node "
-            "  UNION SELECT src_id AS id FROM entity_edge "
-            "  UNION SELECT dst_id AS id FROM entity_edge"
-            ")"
-        ).fetchone()[0]
+        from .queryplan import count as plan_count, Executor
+        from .storage import Storage
+
+        entity_plan = (
+            plan_start(codebase()) | plan_nodes() | plan_view("entity") |
+            plan_count()
+        )
+        entity_count = Executor(
+            Storage.from_connection(self._c, self._q.db_path)
+        ).run(entity_plan.plan).scalar
+        edges = list(self.edges())
+        per_kind: dict[str, int] = {}
+        for edge in edges:
+            per_kind[edge.kind.verb] = per_kind.get(edge.kind.verb, 0) + 1
         return {
-            "entities": n_entities,
-            "edges": total,
+            "entities": int(entity_count),
+            "edges": len(edges),
             "by_kind": per_kind,
         }
 
@@ -1401,19 +1538,56 @@ class EntityQuery:
         eg.query("Logger").used_by().names()            # who uses Logger
     """
 
-    __slots__ = ("_g", "_nodes_src", "_edges_src")
+    __slots__ = (
+        "_g", "_nodes_src", "_edges_src", "_edge_keys_src", "_plan",
+        "_edge_plan_backed", "_planned_nodes_src", "_post_filters",
+    )
 
     def __init__(
         self,
         graph: "EntityGraph",
-        nodes_src: _NodeSrc,
+        nodes_src: Optional[_NodeSrc] = None,
         edges_src: Optional[_EdgeSrc] = None,
+        *,
+        plan: Optional[PlanQuery] = None,
+        post_filters: tuple[Callable[[EntityNode], bool], ...] = (),
+        edge_keys_src: Optional[_EdgeSrc] = None,
+        planned_nodes_src: Optional[_NodeSrc] = None,
     ) -> None:
         self._g = graph
         #: re-runnable thunk -> fresh iterator of DISTINCT nodes
-        self._nodes_src = nodes_src
+        self._nodes_src = nodes_src or (lambda: iter(()))
         #: re-runnable thunk -> fresh iterator of the LAST step's edges
         self._edges_src: _EdgeSrc = edges_src or (lambda: iter(()))
+        self._edge_keys_src: _EdgeSrc = edge_keys_src or (lambda: iter(()))
+        self._edge_plan_backed = edge_keys_src is not None
+        self._planned_nodes_src = planned_nodes_src
+        self._plan = plan
+        self._post_filters = post_filters
+
+    @property
+    def plan(self):
+        """The canonical immutable QueryPlan backing this compatibility query."""
+        return self._plan.plan if self._plan is not None else None
+
+    def to_plan(self):
+        """Return the normalized-plan input used by the shared executor."""
+        return self.plan
+
+    def _planned_nodes(self) -> Iterator[EntityNode]:
+        if self._planned_nodes_src is not None:
+            nodes = self._planned_nodes_src()
+            for node in nodes:
+                if all(predicate(node) for predicate in self._post_filters):
+                    yield node
+            return
+        if self._plan is None:
+            yield from self._nodes_src()
+            return
+        nodes = self._g._nodes_from_plan(self._plan)
+        for node in nodes:
+            if all(predicate(node) for predicate in self._post_filters):
+                yield node
 
     # -- the one general step ---------------------------------------------- #
 
@@ -1441,7 +1615,90 @@ class EntityQuery:
             raise ValueError(
                 f"direction must be one of {_DIRECTIONS}, got {direction!r}"
             )
-        prev = self._nodes_src
+        plan_depth_supported = (
+            not transitive or max_depth is None or 1 <= max_depth <= 32
+        )
+        if self._plan is not None and not self._post_filters and plan_depth_supported:
+            max_hops = max_depth if max_depth is not None else 32
+            max_hops = max_hops if transitive else 1
+            if direction == "out":
+                query = self._plan | plan_out(
+                    kind.name.lower(), 1, max_hops
+                )
+            elif direction == "in":
+                query = self._plan | plan_in(
+                    kind.name.lower(), 1, max_hops
+                )
+            else:
+                outgoing = self._plan | plan_out(
+                    kind.name.lower(), 1, max_hops
+                )
+                incoming = self._plan | plan_in(
+                    kind.name.lower(), 1, max_hops
+                )
+                query = outgoing | plan_union(incoming)
+            previous_plan = self._plan
+            planned_nodes_src = None
+            if transitive and max_depth is None:
+                def planned_nodes_src() -> Iterator[EntityNode]:
+                    emitted: set[int] = set()
+                    for root_id in self._g._run_plan_ids(previous_plan):
+                        root_seen: set[int] = set()
+                        frontier = [root_id]
+                        while frontier:
+                            next_frontier: list[int] = []
+                            for current_id in frontier:
+                                seed = (
+                                    plan_start(codebase())
+                                    | plan_nodes(eq("id", current_id))
+                                    | plan_view("entity")
+                                )
+                                if direction == "out":
+                                    steps = (seed | plan_out(
+                                        kind.name.lower(), 1, 1
+                                    ),)
+                                elif direction == "in":
+                                    steps = (seed | plan_in(
+                                        kind.name.lower(), 1, 1
+                                    ),)
+                                else:
+                                    steps = (
+                                        seed | plan_out(kind.name.lower(), 1, 1),
+                                        seed | plan_in(kind.name.lower(), 1, 1),
+                                    )
+                                for step in steps:
+                                    for item in self._g._run_plan_ids(step):
+                                        if item == root_id or item in root_seen:
+                                            continue
+                                        root_seen.add(item)
+                                        next_frontier.append(item)
+                                        if item in emitted:
+                                            continue
+                                        emitted.add(item)
+                                        node = self._g.entity(item)
+                                        if node is not None:
+                                            yield node
+                            frontier = next_frontier
+
+            def edge_keys_src() -> Iterator[EntityEdge]:
+                if transitive:
+                    return
+                yield from self._g._edges_from_relation_plans(
+                    previous_plan, query, kind, direction
+                )
+
+            return EntityQuery(
+                self._g,
+                plan=query,
+                edge_keys_src=edge_keys_src,
+                planned_nodes_src=planned_nodes_src,
+            )
+        # QueryPlan intentionally bounds one traversal window at 32. The
+        # default unbounded case is handled above by repeated plan-backed
+        # windows; retain the legacy iterator only for zero-depth, explicit
+        # >32-depth, and callback/name-filtered requests whose semantics are
+        # not representable by the current plan IR.
+        prev = self._planned_nodes if self._plan is not None else self._nodes_src
 
         if transitive:
             def nodes_src() -> Iterator[EntityNode]:
@@ -1580,6 +1837,18 @@ class EntityQuery:
 
     def where(self, predicate) -> "EntityQuery":
         """Keep only nodes for which ``predicate(node)`` is truthy (lazy)."""
+        if self._plan is not None:
+            if isinstance(predicate, Pred):
+                return EntityQuery(
+                    self._g,
+                    plan=self._plan | plan_where(predicate),
+                    post_filters=self._post_filters,
+                )
+            return EntityQuery(
+                self._g,
+                plan=self._plan,
+                post_filters=(*self._post_filters, predicate),
+            )
         prev = self._nodes_src
         return EntityQuery(
             self._g,
@@ -1589,20 +1858,87 @@ class EntityQuery:
 
     def of_kind(self, *entity_kinds: EntityKind) -> "EntityQuery":
         """Keep only nodes whose entity *type* is one of ``entity_kinds``."""
+        if self._plan is not None:
+            symbol_kinds = {
+                EntityKind.CLASS: "class",
+                EntityKind.STRUCT: "struct",
+                EntityKind.UNION: "union",
+                EntityKind.CLASS_TEMPLATE: "class-template",
+            }
+            wanted = [
+                symbol_kinds[kind] for kind in entity_kinds if kind in symbol_kinds
+            ]
+            if EntityKind.OTHER in entity_kinds:
+                other = plan_not(in_list("kind", list(symbol_kinds.values())))
+                query = (
+                    self._plan
+                    | plan_view("symbol")
+                    | plan_where(other)
+                    | plan_view("entity")
+                )
+                if wanted:
+                    typed = (
+                        self._plan
+                        | plan_view("symbol")
+                        | plan_where(in_list("kind", wanted))
+                        | plan_view("entity")
+                    )
+                    query = typed | plan_union(query)
+                return EntityQuery(self._g, plan=query, post_filters=self._post_filters)
+            if not wanted:
+                return EntityQuery(
+                    self._g,
+                    plan=self._g._empty_plan(),
+                    post_filters=self._post_filters,
+                )
+            query = (
+                self._plan
+                | plan_view("symbol")
+                | plan_where(in_list("kind", wanted))
+                | plan_view("entity")
+            )
+            return EntityQuery(self._g, plan=query, post_filters=self._post_filters)
         wanted = set(entity_kinds)
         return self.where(lambda n: n.kind in wanted)
 
     def of_class_kind(self, *class_kinds: "ClassKind") -> "EntityQuery":
         """Keep only records whose abstractness is one of ``class_kinds``."""
+        if self._plan is not None:
+            mapping = {
+                ClassKind.CONCRETE: ("class", "union", "enum", "class_template"),
+                ClassKind.ABSTRACT: ("abstract_class", "abstract_class_template"),
+                ClassKind.INTERFACE: ("interface", "interface_template"),
+            }
+            wanted = [value for kind in class_kinds for value in mapping.get(kind, ())]
+            query = self._plan | plan_where(in_list("entity_type", wanted))
+            return EntityQuery(self._g, plan=query, post_filters=self._post_filters)
         wanted = set(class_kinds)
         return self.where(lambda n: n.class_kind in wanted)
 
     def interfaces(self) -> "EntityQuery":
         """Keep only pure interfaces (``ClassKind.INTERFACE``)."""
+        if self._plan is not None:
+            query = self._plan | plan_where(
+                in_list("entity_type", ["interface", "interface_template"])
+            )
+            return EntityQuery(self._g, plan=query, post_filters=self._post_filters)
         return self.where(lambda n: n.is_interface)
 
     def abstract(self) -> "EntityQuery":
         """Keep only abstract records -- pure-virtual present (interfaces too)."""
+        if self._plan is not None:
+            query = self._plan | plan_where(
+                in_list(
+                    "entity_type",
+                    [
+                        "abstract_class",
+                        "abstract_class_template",
+                        "interface",
+                        "interface_template",
+                    ],
+                )
+            )
+            return EntityQuery(self._g, plan=query, post_filters=self._post_filters)
         return self.where(lambda n: n.is_abstract)
 
     def concrete(self) -> "EntityQuery":
@@ -1610,6 +1946,14 @@ class EntityQuery:
 
         A namespace is an entity node but not a record, so it is excluded from
         this class-abstractness filter (v26)."""
+        if self._plan is not None:
+            query = self._plan | plan_where(
+                in_list(
+                    "entity_type",
+                    ["class", "union", "enum", "class_template"],
+                )
+            )
+            return EntityQuery(self._g, plan=query, post_filters=self._post_filters)
         return self.where(
             lambda n: n.class_kind is ClassKind.CONCRETE
             and n.entity_type is not EntityType.NAMESPACE
@@ -1617,6 +1961,14 @@ class EntityQuery:
 
     def named(self, substring: str) -> "EntityQuery":
         """Keep only nodes whose name contains ``substring`` (case-insensitive)."""
+        if self._plan is not None:
+            return EntityQuery(
+                self._g,
+                plan=self._plan | plan_where(
+                    plan_glob("name", _legacy_find_glob(substring))
+                ),
+                post_filters=self._post_filters,
+            )
         needle = substring.lower()
         return self.where(lambda n: needle in n.name.lower())
 
@@ -1627,6 +1979,15 @@ class EntityQuery:
         pattern), so ``.exclude("Circle")`` works as readily as passing a node.
         The (small) exclusion set is resolved once, when the step is built.
         """
+        if self._plan is not None:
+            excluded = self._g._plan_for_nodes(self._g._resolve_seeds(others))
+            if excluded is None:
+                return self
+            return EntityQuery(
+                self._g,
+                plan=self._plan | plan_except(excluded),
+                post_filters=self._post_filters,
+            )
         drop = frozenset(n.id for n in self._g._resolve_seeds(others))
         prev = self._nodes_src
         return EntityQuery(
@@ -1641,47 +2002,55 @@ class EntityQuery:
 
     def nodes(self) -> Iterator[EntityNode]:
         """Stream the current entities (de-duplicated). Lazy generator."""
-        return self._nodes_src()
+        return self._planned_nodes()
 
     def names(self) -> list[str]:
         """Names of the current entities, sorted (an explicit aggregate).
 
         Bare qualified names (``app::Singleton``); use :meth:`displays` to keep
         template arguments (``app::Singleton<app::Cache>``)."""
-        return sorted(n.name for n in self._nodes_src())
+        return sorted(n.name for n in self._planned_nodes())
 
     def displays(self) -> list[str]:
         """Display names of the current entities, sorted -- includes template
         arguments so a specialization is distinct from its primary template."""
-        return sorted(n.display for n in self._nodes_src())
+        return sorted(n.display for n in self._planned_nodes())
 
     def edges(self) -> Iterator[EntityEdge]:
         """Stream the edges produced by the most recent (non-transitive) step."""
+        if self._plan is not None:
+            if self._edge_plan_backed:
+                return self._edge_keys_src()
+            # A base entity stream has no relation edge set, but the terminal
+            # still executes its production node plan before returning empty.
+            for _node in self._planned_nodes():
+                pass
+            return iter(())
         return self._edges_src()
 
     def first(self) -> Optional[EntityNode]:
         """First entity, or ``None`` -- short-circuits the pipeline."""
-        return next(self._nodes_src(), None)
+        return next(self._planned_nodes(), None)
 
     def count(self) -> int:
         """Number of entities (consumes the stream)."""
-        return sum(1 for _ in self._nodes_src())
+        return sum(1 for _ in self._planned_nodes())
 
     def to_dict(self) -> list[dict]:
         """JSON-ready node dicts for the current set (an explicit aggregate)."""
-        return [n.to_dict() for n in self._nodes_src()]
+        return [n.to_dict() for n in self._planned_nodes()]
 
     def __iter__(self) -> Iterator[EntityNode]:
-        return self._nodes_src()
+        return self._planned_nodes()
 
     def __len__(self) -> int:
         return self.count()
 
     def __bool__(self) -> bool:
-        return next(self._nodes_src(), None) is not None
+        return next(self._planned_nodes(), None) is not None
 
     def __repr__(self) -> str:
-        head = list(islice(self._nodes_src(), 6))
+        head = list(islice(self._planned_nodes(), 6))
         names = ", ".join(n.name for n in head[:5])
         more = "" if len(head) <= 5 else ", +…"
         return f"<EntityQuery [{names}{more}]>"
