@@ -12,14 +12,40 @@ const cidx = process.env.CIDX_BIN || resolve(root, 'build/cidx');
 const hashFile = async (path) => createHash('sha256').update(await readFile(path)).digest('hex');
 const hashText = (text) => createHash('sha256').update(text).digest('hex');
 const execute = async (args, options = {}) => run(cidx, args, {cwd: root, ...options});
+const sourceFingerprint = async (paths) => {
+  const {stdout} = await run('git', ['ls-files', '--', ...paths], {cwd: root});
+  const digest = createHash('sha256');
+  const files = stdout.trim().split('\n').filter(Boolean).sort();
+  for (const path of files) {
+    digest.update(path);
+    digest.update('\0');
+    digest.update(await readFile(resolve(root, path)));
+    digest.update('\0');
+  }
+  return {files: files.length, digest: digest.digest('hex')};
+};
 
 if (manifest.format !== 'cidx.explorer-qualification.v2' ||
     manifest.schema.graph_view !== 'cidx.graph-view.v1') {
   throw new Error('unsupported explorer qualification manifest');
 }
+const requiredClasses = ['symbol', 'entity', 'include', 'type', 'high-degree',
+  'multi-repository', 'stale', 'partial', 'external', 'proof', 'trace'];
+for (const workspace of ['cpp-indexer', 'banking']) {
+  const classes = new Set(manifest.scenarios.filter((scenario) => scenario.workspace === workspace)
+    .map((scenario) => scenario.class || (scenario.id.includes('symbol') ? 'symbol' : '')));
+  for (const required of requiredClasses) {
+    if (!classes.has(required)) throw new Error(`${workspace}: missing ${required} production scenario`);
+  }
+}
 const {stdout: version} = await execute(['--version']);
 if (version.trim() !== manifest.cidx.version) {
   throw new Error(`CIDX version drift (${version.trim()})`);
+}
+const source = await sourceFingerprint(manifest.cpp_indexer_source.paths);
+if (source.files !== manifest.cpp_indexer_source.file_count ||
+    source.digest !== manifest.cpp_indexer_source.sha256) {
+  throw new Error(`cpp-indexer source identity drift (${source.files} files, ${source.digest})`);
 }
 
 for (const input of manifest.inputs) {

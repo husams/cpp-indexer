@@ -8,7 +8,8 @@ payload and the same redaction, status, evidence, and budget rules.
 
 The checked-in [qualification manifest](../web/qualification-manifest.json)
 records the pinned CIDX version/schema, catalog digest, committed `index.db`,
-and banking corpus hashes. It deliberately does not compare a moving remote
+scoped `src`/`tests`/`manifests` source-tree fingerprint, and banking corpus
+hashes. It deliberately does not compare a moving remote
 branch. The executable scenarios build the banking corpus and invoke the
 production `cidx ui export` command for both workspaces, then verify the
 embedded GraphView and complete exported HTML digest. The gate therefore fails
@@ -33,10 +34,10 @@ ui_server_test --output-on-failure`. It exercises symbol, entity, include, and
 type-shaped graph requests, high-degree bounded evidence, partial/stale and
 external identities, witness paths, continuation tokens, invalid origins and
 sessions, oversized requests/responses, cancellation, and shutdown. `npm run
-qualify` verifies immutable inputs and executes five production exports
-(including the refreshed repository index and a rebuilt banking workspace);
-semantic corpus or explorer-output drift therefore fails the gate instead of
-being treated as absence.
+qualify` verifies immutable inputs and executes the complete eleven-class
+matrix for both named workspaces (including the refreshed repository index and
+a rebuilt banking workspace); semantic corpus or explorer-output drift
+therefore fails the gate instead of being treated as absence.
 
 Known advisory limitation: `npm audit --offline` requires a locally populated
 npm advisory cache. When unavailable, the build remains fully offline and the
