@@ -323,6 +323,19 @@ TEST_CASE("graph_query: truncated plan candidates preserve legacy edge order") {
   CHECK(edges.front().count == 999);
 }
 
+TEST_CASE("graph_query: find preserves legacy case-insensitive matches") {
+  Storage db(":memory:");
+  db.add_symbol(make_sym("USR::upper-find", "ALPHAThing", "function"));
+  db.add_symbol(make_sym("USR::lower-find", "alphaThing", "function"));
+
+  cidx::query::SqliteQueryReadAdapter read(db);
+  GraphQuery g(read, ":memory:");
+  const auto matches = g.find("ALPHA", std::nullopt, 50);
+  REQUIRE(matches.size() == 2);
+  CHECK(std::set<std::string>{matches[0].spelling, matches[1].spelling} ==
+        std::set<std::string>{"ALPHAThing", "alphaThing"});
+}
+
 TEST_CASE(
     "graph_query: aliased_by() returns typedef and type-alias users only") {
   Storage db(":memory:");

@@ -89,6 +89,20 @@ class _AdapterPlanTruncated(RuntimeError):
     """The QueryPlan candidate set was capped and is not complete."""
 
 
+def _legacy_find_glob(pattern: str) -> str:
+    """Build a GLOB that preserves legacy ASCII case-insensitive matching."""
+    out = ["*"]
+    for char in pattern:
+        if char == "*" or char == "?":
+            out.extend(("[", char, "]"))
+        elif "a" <= char <= "z" or "A" <= char <= "Z":
+            out.extend(("[", char.lower(), char.upper(), "]"))
+        else:
+            out.append(char)
+    out.append("*")
+    return "".join(out)
+
+
 def default_db_path() -> str:
     """The standard cidx index path: $INDEXER_CACHE/index.db else ~/.cache/cidx/index.db.
 
@@ -1357,11 +1371,11 @@ class GraphQuery:
         if pattern:
             from .queryplan import codebase, glob, nodes, start
 
-            escaped = pattern.replace("*", "[*]").replace("?", "[?]")
             try:
                 adapter_ids = set(
                     self._adapter_ids(
-                        start(codebase()) | nodes(glob("name", f"*{escaped}*"))
+                        start(codebase())
+                        | nodes(glob("name", _legacy_find_glob(pattern)))
                     )
                 )
             except _AdapterPlanTruncated:

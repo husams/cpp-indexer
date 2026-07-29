@@ -149,6 +149,26 @@ def test_legacy_edges_fall_back_when_queryplan_candidates_are_truncated(tmp_path
         g.close()
 
 
+def test_find_preserves_legacy_case_insensitive_matches_with_partial_plan(tmp_path):
+    db_path = str(tmp_path / "mixed-case-find.db")
+    with Storage(db_path) as db:
+        db.add_symbol(
+            Symbol(usr="USR::upper-find", spelling="ALPHAThing", kind="function")
+        )
+        db.add_symbol(
+            Symbol(usr="USR::lower-find", spelling="alphaThing", kind="function")
+        )
+
+    g = GraphQuery(db_path)
+    try:
+        assert {sym.spelling for sym in g.find("ALPHA")} == {
+            "ALPHAThing",
+            "alphaThing",
+        }
+    finally:
+        g.close()
+
+
 def test_edges_in_out_typed(g):
     base = g.get("c:@S@Base")
     inbound = g.edges_in(base)

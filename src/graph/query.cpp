@@ -383,12 +383,21 @@ std::vector<Sym> GraphQuery::find(const std::string &pattern,
                                   int limit) {
   std::optional<std::unordered_set<int64_t>> candidate_ids;
   if (query_read_ && !pattern.empty()) {
-    std::string escaped = pattern;
     std::string glob_pattern = "*";
-    for (const char ch : escaped) {
+    for (const char ch : pattern) {
       if (ch == '*' || ch == '?') {
         glob_pattern.push_back('[');
         glob_pattern.push_back(ch);
+        glob_pattern.push_back(']');
+      } else if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')) {
+        glob_pattern.push_back('[');
+        if (ch >= 'a' && ch <= 'z') {
+          glob_pattern.push_back(ch);
+          glob_pattern.push_back(static_cast<char>(ch - 'a' + 'A'));
+        } else {
+          glob_pattern.push_back(static_cast<char>(ch - 'A' + 'a'));
+          glob_pattern.push_back(ch);
+        }
         glob_pattern.push_back(']');
       } else {
         glob_pattern.push_back(ch);
