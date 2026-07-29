@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto';
-import {access, copyFile, mkdir, mkdtemp, readFile, rm} from 'node:fs/promises';
+import {access, copyFile, mkdir, mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
 import {execFile} from 'node:child_process';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
@@ -176,13 +176,22 @@ const prepareScenarioState = async (db, state) => {
 };
 
 const scenarioArgs = (scenario) => scenario.args.map((arg) => {
-  if (arg === '{{banking-peer-root}}') return resolve(root, 'examples/packages/banking/qualification-peer');
-  if (arg === '{{banking-peer-file}}') return resolve(root, 'examples/packages/banking/qualification-peer/banking_peer.cpp');
+  if (arg === '{{banking-peer-root}}') return '/tmp/cidx-hse94-banking-peer';
+  if (arg === '{{banking-peer-file}}') return '/tmp/cidx-hse94-banking-peer/banking_peer.cpp';
   return arg;
 });
 
-const repositoryNames = async (db) =>
-  (await sqliteJson(db, 'SELECT name FROM repository ORDER BY name')).map((row) => row.name);
+const repositorySummary = async (db) => sqliteJson(db,
+  'SELECT r.name, r.semantic_universe_id, COUNT(DISTINCT f.id) AS files, ' +
+  'COUNT(DISTINCT CASE WHEN f.indexed = 1 THEN f.id END) AS indexed_files, ' +
+  'COUNT(DISTINCT s.id) AS symbols, ' +
+  'COUNT(DISTINCT CASE WHEN f.indexed = 1 THEN s.id END) AS indexed_symbols ' +
+  'FROM repository r ' +
+  'JOIN component c ON c.repository_id = r.id ' +
+  'JOIN directory d ON d.component_id = c.id ' +
+  'JOIN file f ON f.directory_id = d.id ' +
+  'LEFT JOIN symbol s ON s.file_id = f.id ' +
+  'GROUP BY r.id, r.name, r.semantic_universe_id ORDER BY r.name');
 
 const semanticOutput = (view, records) => JSON.stringify({
   schema: view.schema,
@@ -224,6 +233,16 @@ try {
   const bankingSource = resolve(root, banking.compile_commands);
   const peerSource = resolve(root, 'examples/packages/banking/qualification-peer/compile_commands.json');
   await access(bankingSource);
+  const peerWorkspace = '/tmp/cidx-hse94-banking-peer';
+  const peerFile = join(peerWorkspace, 'banking_peer.cpp');
+  await rm(peerWorkspace, {recursive: true, force: true});
+  await mkdir(peerWorkspace, {recursive: true});
+  await copyFile(resolve(root, 'examples/packages/banking/qualification-peer/banking_peer.cpp'), peerFile);
+  await writeFile(join(peerWorkspace, 'compile_commands.json'), JSON.stringify([{
+    directory: peerWorkspace,
+    command: 'clang++ -std=c++23 -c banking_peer.cpp',
+    file: peerFile,
+  }]));
   await access(peerSource);
   const bankingCache = join(temporary, 'banking-cache');
   await execute(['import', '--db', bankingSource, '--name', 'banking', '--repo', 'banking'],
@@ -237,12 +256,11 @@ try {
     const multiCache = join(temporary, `${workspace}-multi-cache`);
     await mkdir(multiCache, {recursive: true});
     await copyFile(workspaceDbs.get(workspace), join(multiCache, 'index.db'));
-    await execute(['import', '--db', peerSource, '--name', 'banking-peer', '--repo', 'banking-peer'],
+    await execute(['import', '--db', join(peerWorkspace, 'compile_commands.json'),
+      '--name', 'banking-peer', '--repo', 'banking-peer'],
       {env: {...process.env, INDEXER_CACHE: multiCache}});
-    if (workspace === 'banking') {
-      await execute(['index'], {env: {...process.env, INDEXER_CACHE: multiCache}});
-      await execute(['resolve'], {env: {...process.env, INDEXER_CACHE: multiCache}});
-    }
+    await execute(['index', peerFile], {env: {...process.env, INDEXER_CACHE: multiCache}});
+    await execute(['resolve'], {env: {...process.env, INDEXER_CACHE: multiCache}});
     scenarioDbs.set(`${workspace}:multi-repository`, join(multiCache, 'index.db'));
   }
 
@@ -265,11 +283,24 @@ try {
     const {view, records} = extractGraphView(html, scenario);
     const expectedRepositories = scenario.expected.repository_names;
     if (expectedRepositories) {
-      const actualRepositories = await repositoryNames(db);
+      const actualRepositories = await repositorySummary(db);
       for (const repository of expectedRepositories) {
-        if (!actualRepositories.includes(repository)) {
+        const actual = actualRepositories.find((entry) => entry.name === repository);
+        if (!actual || actual.files === 0 || actual.indexed_files === 0 ||
+            actual.symbols === 0 || actual.indexed_symbols === 0) {
           throw new Error(`${scenario.id}: repository ${repository} is not present`);
         }
+      }
+    }
+    if (scenario.expected.behavior?.repository_filter !== undefined &&
+        JSON.stringify(view.request.repositories || []) !==
+        JSON.stringify([...scenario.expected.behavior.repository_filter].sort())) {
+      throw new Error(`${scenario.id}: repository selection drift`);
+    }
+    if (scenario.expected.behavior?.selected_component !== undefined) {
+      const components = [...new Set(records.map((node) => node.component).filter(Boolean))];
+      if (components.length !== 1 || components[0] !== scenario.expected.behavior.selected_component) {
+        throw new Error(`${scenario.id}: repository selection leaked into ${components.join(',')}`);
       }
     }
     const workspaceSeen = seenSemanticOutputs.get(scenario.workspace) || new Set();
