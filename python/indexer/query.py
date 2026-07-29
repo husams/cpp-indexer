@@ -92,13 +92,19 @@ class _AdapterPlanTruncated(RuntimeError):
 def _legacy_find_glob(pattern: str) -> str:
     """Build a GLOB that preserves legacy ASCII case-insensitive matching."""
     out = ["*"]
-    for char in pattern:
-        if char == "*" or char == "?":
-            out.extend(("[", char, "]"))
-        elif "a" <= char <= "z" or "A" <= char <= "Z":
-            out.extend(("[", char.lower(), char.upper(), "]"))
-        else:
-            out.append(char)
+    segments = [segment for segment in pattern.split("::") if segment]
+    for segment_index, segment in enumerate(segments):
+        if segment_index:
+            out.append("*")
+        for char in segment:
+            if char == "*" or char == "?":
+                out.extend(("[", char, "]"))
+            elif char == "[":
+                out.extend(("[", "[", "]"))
+            elif "a" <= char <= "z" or "A" <= char <= "Z":
+                out.extend(("[", char.lower(), char.upper(), "]"))
+            else:
+                out.append(char)
     out.append("*")
     return "".join(out)
 

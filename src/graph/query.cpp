@@ -384,24 +384,44 @@ std::vector<Sym> GraphQuery::find(const std::string &pattern,
   std::optional<std::unordered_set<int64_t>> candidate_ids;
   if (query_read_ && !pattern.empty()) {
     std::string glob_pattern = "*";
-    for (const char ch : pattern) {
-      if (ch == '*' || ch == '?') {
-        glob_pattern.push_back('[');
-        glob_pattern.push_back(ch);
-        glob_pattern.push_back(']');
-      } else if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')) {
-        glob_pattern.push_back('[');
-        if (ch >= 'a' && ch <= 'z') {
-          glob_pattern.push_back(ch);
-          glob_pattern.push_back(static_cast<char>(ch - 'a' + 'A'));
-        } else {
-          glob_pattern.push_back(static_cast<char>(ch - 'A' + 'a'));
-          glob_pattern.push_back(ch);
+    bool first_segment = true;
+    std::size_t segment_start = 0;
+    while (segment_start <= pattern.size()) {
+      const auto separator = pattern.find("::", segment_start);
+      const auto segment_end =
+          separator == std::string::npos ? pattern.size() : separator;
+      if (segment_end > segment_start) {
+        if (!first_segment) {
+          glob_pattern.push_back('*');
         }
-        glob_pattern.push_back(']');
-      } else {
-        glob_pattern.push_back(ch);
+        for (std::size_t at = segment_start; at < segment_end; ++at) {
+          const char ch = pattern[at];
+          if (ch == '*' || ch == '?') {
+            glob_pattern.push_back('[');
+            glob_pattern.push_back(ch);
+            glob_pattern.push_back(']');
+          } else if (ch == '[') {
+            glob_pattern += "[[]";
+          } else if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')) {
+            glob_pattern.push_back('[');
+            if (ch >= 'a' && ch <= 'z') {
+              glob_pattern.push_back(ch);
+              glob_pattern.push_back(static_cast<char>(ch - 'a' + 'A'));
+            } else {
+              glob_pattern.push_back(static_cast<char>(ch - 'A' + 'a'));
+              glob_pattern.push_back(ch);
+            }
+            glob_pattern.push_back(']');
+          } else {
+            glob_pattern.push_back(ch);
+          }
+        }
+        first_segment = false;
       }
+      if (separator == std::string::npos) {
+        break;
+      }
+      segment_start = separator + 2;
     }
     glob_pattern.push_back('*');
     try {

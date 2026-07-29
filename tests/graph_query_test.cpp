@@ -336,6 +336,19 @@ TEST_CASE("graph_query: find preserves legacy case-insensitive matches") {
         std::set<std::string>{"ALPHAThing", "alphaThing"});
 }
 
+TEST_CASE("graph_query: find preserves segmented fuzzy matches") {
+  Storage db(":memory:");
+  db.add_symbol(make_sym("USR::literal-segment", "xFoo::Barx", "function"));
+  db.add_symbol(make_sym("USR::wildcard-segment", "xFooXBarx", "function"));
+
+  cidx::query::SqliteQueryReadAdapter read(db);
+  GraphQuery g(read, ":memory:");
+  const auto matches = g.find("Foo::Bar", std::nullopt, 50);
+  REQUIRE(matches.size() == 2);
+  CHECK(std::set<std::string>{matches[0].spelling, matches[1].spelling} ==
+        std::set<std::string>{"xFoo::Barx", "xFooXBarx"});
+}
+
 TEST_CASE(
     "graph_query: aliased_by() returns typedef and type-alias users only") {
   Storage db(":memory:");
