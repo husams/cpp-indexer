@@ -24,6 +24,17 @@
 
 namespace cidx::query {
 
+namespace {
+thread_local PlanObserver *active_plan_observer = nullptr;
+}
+
+ScopedPlanObserver::ScopedPlanObserver(PlanObserver observer)
+    : observer_(std::move(observer)), previous_(active_plan_observer) {
+  active_plan_observer = &observer_;
+}
+
+ScopedPlanObserver::~ScopedPlanObserver() { active_plan_observer = previous_; }
+
 SqliteQueryReadAdapter::SqliteQueryReadAdapter(SqliteStorageService &service)
     : service_(&service), read_db_(service.raw_db()) {}
 
@@ -273,7 +284,8 @@ std::string col_expr(const std::string &field, const std::string &symbol_alias,
   }
   if (field == "effective_count") {
     return "(CASE WHEN COALESCE((SELECT value FROM meta WHERE key = "
-           "'graph_resolved_at'), '') <> '' THEN edge.count WHEN "
+           "'graph_resolved_at'), '') <> '' THEN "
+           "CASE WHEN edge.count <> 0 THEN edge.count ELSE 1 END WHEN "
            "(SELECT COUNT(*) FROM edge_site WHERE edge_id = edge.id) > 0 "
            "THEN (SELECT COUNT(*) FROM edge_site WHERE edge_id = edge.id) "
            "WHEN edge.count <> 0 THEN edge.count ELSE 1 END)";
@@ -3135,7 +3147,8 @@ private:
     }
     if (field == "effective_count" && view == View::Edge) {
       return "(CASE WHEN COALESCE((SELECT value FROM meta WHERE key = "
-             "'graph_resolved_at'), '') <> '' THEN edge.count WHEN "
+             "'graph_resolved_at'), '') <> '' THEN "
+             "CASE WHEN edge.count <> 0 THEN edge.count ELSE 1 END WHEN "
              "(SELECT COUNT(*) FROM edge_site WHERE edge_id = edge.id) > 0 "
              "THEN (SELECT COUNT(*) FROM edge_site WHERE edge_id = edge.id) "
              "WHEN edge.count <> 0 THEN edge.count ELSE 1 END)";
@@ -4362,6 +4375,9 @@ protocol::ResultEnvelope Result::to_envelope() const {
 
 Result Executor::run(const Plan &plan, std::optional<int64_t> after_id) {
   const Plan normalized = validate(plan);
+  if (active_plan_observer != nullptr) {
+    (*active_plan_observer)(normalized);
+  }
   Exec exec(read_);
   Stream st = exec.run_plan(normalized, after_id);
   Result res = exec.finish(std::move(st));
@@ -4371,6 +4387,9 @@ Result Executor::run(const Plan &plan, std::optional<int64_t> after_id) {
 
 Result Executor::run_fast(const Plan &plan, std::optional<int64_t> after_id) {
   const Plan normalized = validate(plan);
+  if (active_plan_observer != nullptr) {
+    (*active_plan_observer)(normalized);
+  }
   if (!after_id && normalized.source.kind == SourceKind::Codebase) {
     View view = View::Symbol;
     std::optional<int64_t> edge_id;

@@ -47,6 +47,7 @@ from .queryplan import (
     Query as PlanQuery,
     Executor,
     all_of,
+    any_of,
     codebase,
     entity,
     eq,
@@ -1330,6 +1331,44 @@ class EntityGraph:
             if node is not None:
                 yield node
 
+    def _edges_from_relation_plans(
+        self,
+        source_plan: PlanQuery,
+        target_plan: PlanQuery,
+        kind: EdgeKind,
+        direction: str,
+    ) -> Iterator[EntityEdge]:
+        """Hydrate only endpoint keys selected by the relation plans."""
+        source_ids = self._run_plan_ids(source_plan)
+        target_ids = self._run_plan_ids(target_plan)
+        if not source_ids or not target_ids:
+            return
+
+        orientations = {
+            "out": ((source_ids, target_ids),),
+            "in": ((target_ids, source_ids),),
+            "both": ((source_ids, target_ids), (target_ids, source_ids)),
+        }[direction]
+        seen: set[tuple[int, int, int]] = set()
+        for src_ids, dst_ids in orientations:
+            for src_id in src_ids:
+                for dst_id in dst_ids:
+                    key = (src_id, dst_id, int(kind))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    hydrated = self._c.execute(
+                        f"SELECT {_EDGE_COLS} FROM entity_edge "
+                        "WHERE src_id = ? AND dst_id = ? AND kind = ? "
+                        "LIMIT 1",
+                        key,
+                    ).fetchone()
+                    if hydrated is None:
+                        continue
+                    edge = self._edge(hydrated)
+                    if edge is not None:
+                        yield edge
+
     # -- edge access -------------------------------------------------------- #
 
     def edges(
@@ -1500,7 +1539,10 @@ class EntityQuery:
         eg.query("Logger").used_by().names()            # who uses Logger
     """
 
-    __slots__ = ("_g", "_nodes_src", "_edges_src", "_plan", "_post_filters")
+    __slots__ = (
+        "_g", "_nodes_src", "_edges_src", "_edge_keys_src", "_plan",
+        "_edge_plan_backed", "_planned_nodes_src", "_post_filters",
+    )
 
     def __init__(
         self,
@@ -1510,12 +1552,17 @@ class EntityQuery:
         *,
         plan: Optional[PlanQuery] = None,
         post_filters: tuple[Callable[[EntityNode], bool], ...] = (),
+        edge_keys_src: Optional[_EdgeSrc] = None,
+        planned_nodes_src: Optional[_NodeSrc] = None,
     ) -> None:
         self._g = graph
         #: re-runnable thunk -> fresh iterator of DISTINCT nodes
         self._nodes_src = nodes_src or (lambda: iter(()))
         #: re-runnable thunk -> fresh iterator of the LAST step's edges
         self._edges_src: _EdgeSrc = edges_src or (lambda: iter(()))
+        self._edge_keys_src: _EdgeSrc = edge_keys_src or (lambda: iter(()))
+        self._edge_plan_backed = edge_keys_src is not None
+        self._planned_nodes_src = planned_nodes_src
         self._plan = plan
         self._post_filters = post_filters
 
@@ -1529,6 +1576,12 @@ class EntityQuery:
         return self.plan
 
     def _planned_nodes(self) -> Iterator[EntityNode]:
+        if self._planned_nodes_src is not None:
+            nodes = self._planned_nodes_src()
+            for node in nodes:
+                if all(predicate(node) for predicate in self._post_filters):
+                    yield node
+            return
         if self._plan is None:
             yield from self._nodes_src()
             return
@@ -1564,8 +1617,7 @@ class EntityQuery:
                 f"direction must be one of {_DIRECTIONS}, got {direction!r}"
             )
         plan_depth_supported = (
-            not transitive
-            or (max_depth is not None and 1 <= max_depth <= 32)
+            not transitive or max_depth is None or 1 <= max_depth <= 32
         )
         if self._plan is not None and not self._post_filters and plan_depth_supported:
             max_hops = max_depth if max_depth is not None else 32
@@ -1586,28 +1638,52 @@ class EntityQuery:
                     kind.name.lower(), 1, max_hops
                 )
                 query = outgoing | plan_union(incoming)
-            previous = self._planned_nodes
+            previous_plan = self._plan
+            planned_nodes_src = None
+            if transitive and max_depth is None:
+                def planned_nodes_src() -> Iterator[EntityNode]:
+                    frontier = self._g._run_plan_ids(previous_plan)
+                    seen = set(frontier)
+                    while frontier:
+                        seed = (
+                            plan_start(codebase())
+                            | plan_nodes(any_of([eq("id", item) for item in frontier]))
+                            | plan_view("entity")
+                        )
+                        if direction == "out":
+                            step = seed | plan_out(kind.name.lower(), 1, 32)
+                        elif direction == "in":
+                            step = seed | plan_in(kind.name.lower(), 1, 32)
+                        else:
+                            outgoing = seed | plan_out(kind.name.lower(), 1, 32)
+                            incoming = seed | plan_in(kind.name.lower(), 1, 32)
+                            step = outgoing | plan_union(incoming)
+                        reached = self._g._run_plan_ids(step)
+                        frontier = [item for item in reached if item not in seen]
+                        seen.update(frontier)
+                        for item in frontier:
+                            node = self._g.entity(item)
+                            if node is not None:
+                                yield node
 
-            def edges_src() -> Iterator[EntityEdge]:
+            def edge_keys_src() -> Iterator[EntityEdge]:
                 if transitive:
                     return
-                for node in previous():
-                    if direction in ("out", "both"):
-                        yield from node.out_edges(kind)
-                    if direction in ("in", "both"):
-                        yield from node.in_edges(kind)
+                yield from self._g._edges_from_relation_plans(
+                    previous_plan, query, kind, direction
+                )
 
             return EntityQuery(
                 self._g,
                 plan=query,
-                edges_src=edges_src,
+                edge_keys_src=edge_keys_src,
+                planned_nodes_src=planned_nodes_src,
             )
-        # QueryPlan intentionally bounds traversal depth at 32. Retain the
-        # legacy iterator for unbounded, zero-depth, and >32-depth requests;
-        # it preserves the historical cardinality and BFS ordering until the
-        # executor gains an equivalent unbounded compatibility stage. Any
-        # callback/name filters also stay here so they are applied before the
-        # next relation, exactly as the original fluent API required.
+        # QueryPlan intentionally bounds one traversal window at 32. The
+        # default unbounded case is handled above by repeated plan-backed
+        # windows; retain the legacy iterator only for zero-depth, explicit
+        # >32-depth, and callback/name-filtered requests whose semantics are
+        # not representable by the current plan IR.
         prev = self._planned_nodes if self._plan is not None else self._nodes_src
 
         if transitive:
@@ -1928,15 +2004,15 @@ class EntityQuery:
 
     def edges(self) -> Iterator[EntityEdge]:
         """Stream the edges produced by the most recent (non-transitive) step."""
-        def stream() -> Iterator[EntityEdge]:
-            # Keep the terminal edge operation on the same QueryPlan boundary
-            # as nodes/count/name terminals. The edge adapter still hydrates
-            # only the exact keys emitted by the plan-backed source.
-            if self._plan is not None:
-                for _node in self._planned_nodes():
-                    pass
-            yield from self._edges_src()
-        return stream()
+        if self._plan is not None:
+            if self._edge_plan_backed:
+                return self._edge_keys_src()
+            # A base entity stream has no relation edge set, but the terminal
+            # still executes its production node plan before returning empty.
+            for _node in self._planned_nodes():
+                pass
+            return iter(())
+        return self._edges_src()
 
     def first(self) -> Optional[EntityNode]:
         """First entity, or ``None`` -- short-circuits the pipeline."""

@@ -242,11 +242,19 @@ def _assert_entity_legacy_parity(operation, value, graph):
             ).fetchone()
 
 
-def _assert_operation_plan(calls: list[str], before: int, operation: str):
+def _assert_operation_plan(
+    calls: list[str], truncated: list[bool], before: int, operation: str,
+    *, builder: bool = False,
+):
     produced = calls[before:]
     assert produced, f"{operation} did not execute a production QueryPlan"
-    meaningful = {"nodes", "select", "out", "in", "where", "view", "sites", "limit",
-                  "count", "union", "except"}
+    assert not any(truncated[before:]), f"{operation} used a truncated QueryPlan"
+    if builder:
+        return
+    meaningful = {
+        "select", "out", "in", "where", "sites", "limit", "count", "union",
+        "intersect", "except", "order_by", "distinct", "path", "rank",
+    }
     assert any(
         meaningful.intersection(stage["op"] for stage in json.loads(plan)["stages"])
         for plan in produced
@@ -305,11 +313,14 @@ def test_python_inventory_executes_production_plans_and_legacy_oracles(
 ):
     entries = _inventory()
     calls: list[str] = []
+    truncated: list[bool] = []
     original_run = Executor.run
 
     def recording_run(executor, plan, after_id=None):
         calls.append(canonical_json(plan))
-        return original_run(executor, plan, after_id=after_id)
+        result = original_run(executor, plan, after_id=after_id)
+        truncated.append(result.truncated)
+        return result
 
     monkeypatch.setattr(Executor, "run", recording_run)
     sym = g.get("c:@F@main")
@@ -342,7 +353,7 @@ def test_python_inventory_executes_production_plans_and_legacy_oracles(
         if operation not in {"make_file", "plan_for"}:
             _assert_graph_legacy_parity(operation, args, result, g)
         if operation != "make_file":
-            _assert_operation_plan(calls, before, operation)
+            _assert_operation_plan(calls, truncated, before, operation)
 
     # Differential production oracles for the seeded selection, ordering, and
     # hydration boundary. These are independent SQLite legacy reads, not
@@ -370,11 +381,14 @@ def test_python_inventory_executes_production_plans_and_legacy_oracles(
 def test_entity_inventory_executes_production_plans(g, monkeypatch):
     entries = _inventory()
     calls: list[str] = []
+    truncated: list[bool] = []
     original_run = Executor.run
 
     def recording_run(executor, plan, after_id=None):
         calls.append(canonical_json(plan))
-        return original_run(executor, plan, after_id=after_id)
+        result = original_run(executor, plan, after_id=after_id)
+        truncated.append(result.truncated)
+        return result
 
     monkeypatch.setattr(Executor, "run", recording_run)
     graph = EntityGraph(g)
@@ -398,7 +412,10 @@ def test_entity_inventory_executes_production_plans(g, monkeypatch):
                 value = list(value.nodes())
             _assert_entity_legacy_parity(operation, value, graph)
             _consume(value)
-            _assert_operation_plan(calls, before, f"{owner}.{operation}")
+            _assert_operation_plan(
+                calls, truncated, before, f"{owner}.{operation}",
+                builder=operation in {"query"},
+            )
         elif surface == "python_entity_query":
             method = getattr(query, operation)
             if operation in {"relation", "step", "then"}:
@@ -416,7 +433,9 @@ def test_entity_inventory_executes_production_plans(g, monkeypatch):
             elif operation == "to_plan":
                 value = method()
                 Executor(Storage.from_connection(g._c, g.db_path)).run(value)
-                _assert_operation_plan(calls, before, f"{owner}.{operation}")
+                _assert_operation_plan(
+                    calls, truncated, before, f"{owner}.{operation}", builder=True
+                )
                 continue
             else:
                 value = method()
@@ -424,4 +443,10 @@ def test_entity_inventory_executes_production_plans(g, monkeypatch):
                 value = list(value.nodes())
             _assert_entity_legacy_parity(operation, value, graph)
             _consume(value)
-            _assert_operation_plan(calls, before, f"{owner}.{operation}")
+            _assert_operation_plan(
+                calls, truncated, before, f"{owner}.{operation}",
+                builder=operation in {
+                    "query", "relation", "step", "then", "where", "of_kind",
+                    "of_class_kind", "exclude", "named", "to_plan",
+                },
+            )

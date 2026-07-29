@@ -620,6 +620,20 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: web/package-lock.json
+      - name: Install cidx build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            cmake ninja-build g++ libsqlite3-dev llvm-dev clang \
+            libclang-dev libclang-cpp-dev
+      - name: Build cidx for graph qualification
+        run: |
+          llvm_cmake_dir="$(llvm-config --cmakedir)"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR="$llvm_cmake_dir" \
+            -DClang_DIR="${llvm_cmake_dir%/llvm}/clang"
+          cmake --build build --target cidx --parallel 2
+          test -x build/cidx
       - name: Install locked web dependencies
         working-directory: web
         run: npm ci --ignore-scripts

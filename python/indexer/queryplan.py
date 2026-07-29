@@ -1485,7 +1485,8 @@ def _col_expr(field_name: str, symbol_alias: str = "s",
     if field_name == "effective_count":
         return (
             "(CASE WHEN COALESCE((SELECT value FROM meta "
-            "WHERE key = 'graph_resolved_at'), '') <> '' THEN edge.count "
+            "WHERE key = 'graph_resolved_at'), '') <> '' THEN "
+            "CASE WHEN edge.count <> 0 THEN edge.count ELSE 1 END "
             "WHEN (SELECT COUNT(*) FROM edge_site WHERE edge_id = edge.id) > 0 "
             "THEN (SELECT COUNT(*) FROM edge_site WHERE edge_id = edge.id) "
             "WHEN edge.count <> 0 THEN edge.count ELSE 1 END)"
@@ -3209,7 +3210,8 @@ class Executor:
         if field_name == "effective_count" and view == "edge":
             return (
                 "(CASE WHEN COALESCE((SELECT value FROM meta "
-                "WHERE key = 'graph_resolved_at'), '') <> '' THEN edge.count "
+                "WHERE key = 'graph_resolved_at'), '') <> '' THEN "
+                "CASE WHEN edge.count <> 0 THEN edge.count ELSE 1 END "
                 "WHEN (SELECT COUNT(*) FROM edge_site WHERE edge_id = edge.id) > 0 "
                 "THEN (SELECT COUNT(*) FROM edge_site WHERE edge_id = edge.id) "
                 "WHEN edge.count <> 0 THEN edge.count ELSE 1 END)"

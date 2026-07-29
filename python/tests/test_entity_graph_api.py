@@ -204,6 +204,30 @@ def test_derived_direct_and_transitive(eg):
     assert {n.name for n in base.derived(transitive=True)} == {"app::Mid", "app::Leaf"}
 
 
+def test_entity_query_edges_hydrate_only_plan_selected_relation(eg):
+    leaf = eg.find("app::Leaf")[0]
+    mid = eg.find("app::Mid")[0]
+    unrelated = list(eg.edges(kind=EdgeKind.GENERALIZES, src=mid))
+    assert unrelated
+
+    query = eg.query(leaf).bases()
+    # A discarded legacy edge source must not be able to inject an unrelated
+    # row after the node QueryPlan has selected the relation result.
+    query._edges_src = lambda: iter(unrelated)
+    assert [(edge.src.name, edge.dst.name) for edge in query.edges()] == [
+        ("app::Leaf", "app::Mid")
+    ]
+
+
+def test_default_transitive_relation_is_plan_backed(eg):
+    query = eg.query("app::Base").derived(transitive=True)
+    assert any(
+        stage.op == "in" and stage.max_depth == 32
+        for stage in query.plan.stages
+    )
+    assert {node.name for node in query.nodes()} == {"app::Mid", "app::Leaf"}
+
+
 def test_neighbors_direction(eg):
     mid = eg.find("app::Mid")[0]
     out = {n.name for n in mid.neighbors(EdgeKind.GENERALIZES, "out")}

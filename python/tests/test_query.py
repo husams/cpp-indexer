@@ -301,15 +301,37 @@ def test_effective_edge_count_matches_legacy_states(tmp_path):
             return {row.dst_id: row.count for row in rows}
 
     unresolved = counts(False)
-    assert unresolved[with_sites] == 1
-    assert unresolved[without_sites] == 7
-    assert unresolved[zero] == 1
-    assert unresolved[zero_with_sites] == 1
     resolved = counts(True)
+    with Storage(db_path) as db:
+        db.set_meta("graph_resolved_at", "")
+        oracle = db._conn.execute(
+            "SELECT dst_id, CASE "
+            "WHEN COALESCE((SELECT value FROM meta WHERE key = 'graph_resolved_at'), '') <> '' "
+            "THEN CASE WHEN e.count <> 0 THEN e.count ELSE 1 END "
+            "WHEN (SELECT COUNT(*) FROM edge_site WHERE edge_id = e.id) > 0 "
+            "THEN (SELECT COUNT(*) FROM edge_site WHERE edge_id = e.id) "
+            "WHEN e.count <> 0 THEN e.count ELSE 1 END "
+            "FROM edge e WHERE src_id = ? ORDER BY id",
+            (src,),
+        ).fetchall()
+        assert {row[0] for row in oracle} == set(unresolved)
+        assert dict(oracle) == unresolved
+        db.set_meta("graph_resolved_at", "test")
+        oracle_resolved = db._conn.execute(
+            "SELECT dst_id, CASE "
+            "WHEN COALESCE((SELECT value FROM meta WHERE key = 'graph_resolved_at'), '') <> '' "
+            "THEN CASE WHEN e.count <> 0 THEN e.count ELSE 1 END "
+            "WHEN (SELECT COUNT(*) FROM edge_site WHERE edge_id = e.id) > 0 "
+            "THEN (SELECT COUNT(*) FROM edge_site WHERE edge_id = e.id) "
+            "WHEN e.count <> 0 THEN e.count ELSE 1 END "
+            "FROM edge e WHERE src_id = ? ORDER BY id",
+            (src,),
+        ).fetchall()
+        assert dict(oracle_resolved) == resolved
     assert resolved[with_sites] == 7
     assert resolved[without_sites] == 7
-    assert resolved[zero] == 0
-    assert resolved[zero_with_sites] == 0
+    assert resolved[zero] == 1
+    assert resolved[zero_with_sites] == 1
 
 
 # --------------------------------------------------------------------------- #

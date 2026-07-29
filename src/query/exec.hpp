@@ -7,6 +7,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <variant>
@@ -202,6 +203,24 @@ public:
 
 private:
   QueryReadPort &read_;
+};
+
+using PlanObserver = std::function<void(const Plan &)>;
+
+// Test and diagnostics hook for proving that public compatibility adapters
+// execute the plans they advertise. The observer sees the normalized plan at
+// the executor boundary; adapters still receive only hydrated compatibility
+// records.
+class ScopedPlanObserver {
+public:
+  explicit ScopedPlanObserver(PlanObserver observer);
+  ~ScopedPlanObserver();
+  ScopedPlanObserver(const ScopedPlanObserver &) = delete;
+  ScopedPlanObserver &operator=(const ScopedPlanObserver &) = delete;
+
+private:
+  PlanObserver observer_;
+  PlanObserver *previous_ = nullptr;
 };
 
 } // namespace cidx::query

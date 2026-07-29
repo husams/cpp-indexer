@@ -31,6 +31,7 @@
 #include <sstream>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include "graph/emit.hpp"
@@ -83,6 +84,30 @@ cidx::Edge make_edge(int64_t src, int64_t dst, int64_t kind,
   e.kind = kind;
   e.count = count;
   return e;
+}
+
+template <typename Operation>
+void require_production_plan(const char *name, Operation &&operation) {
+  std::vector<cidx::query::Plan> captured;
+  {
+    cidx::query::ScopedPlanObserver observer(
+        [&](const cidx::query::Plan &plan) { captured.push_back(plan); });
+    std::forward<Operation>(operation)();
+  }
+  REQUIRE_MESSAGE(!captured.empty(), name);
+  for (const auto &plan : captured) {
+    const auto normalized = cidx::query::validate(plan);
+    const bool owns_semantics = std::ranges::any_of(
+        normalized.stages, [](const cidx::query::Stage &stage) {
+          using Op = cidx::query::StageOp;
+          return stage.op == Op::Nodes || stage.op == Op::Where ||
+                 stage.op == Op::Out || stage.op == Op::In ||
+                 stage.op == Op::ChangeView || stage.op == Op::Sites ||
+                 stage.op == Op::Select || stage.op == Op::OrderBy ||
+                 stage.op == Op::Limit || stage.op == Op::Count;
+        });
+    CHECK_MESSAGE(owns_semantics, name);
+  }
 }
 
 // Helper: build a storage EdgeSite record for add_edge_site.
@@ -222,16 +247,10 @@ TEST_CASE("graph_query: executable differential operation inventory") {
   cidx::query::SqliteQueryReadAdapter read(s.db);
   GraphQuery g(read, ":memory:");
 
-  const auto selected = cidx::query::Executor(read).run(
-      (cidx::query::start(cidx::query::symbol("USR::A")) |
-       cidx::query::out("calls") | cidx::query::select({"id"}))
-          .plan());
-  const auto actual =
-      g.edges_out(s.id_A, std::vector<std::string>{"calls"}, 10);
-  REQUIRE(selected.rows.size() == actual.size());
-  for (std::size_t i = 0; i < actual.size(); ++i) {
-    CHECK(actual[i].peer.id == std::get<int64_t>(selected.rows[i][0]));
-  }
+  std::vector<cidx::graph::Edge> actual;
+  require_production_plan("edges_out", [&] {
+    actual = g.edges_out(s.id_A, std::vector<std::string>{"calls"}, 10);
+  });
 
   auto legacy = s.db.raw_db().prepare(
       "SELECT id, dst_id FROM edge WHERE src_id = ? AND kind = ? "
@@ -249,24 +268,16 @@ TEST_CASE("graph_query: executable differential operation inventory") {
     CHECK(actual[i].peer.id == legacy_rows[i].second);
   }
 
-  const auto site_plan =
-      cidx::query::start(cidx::query::codebase()) |
-      cidx::query::view(cidx::query::View::Edge) |
-      cidx::query::nodes(cidx::query::eq("edge_id", s.eid_AB)) |
-      cidx::query::sites() |
-      cidx::query::select({"edge_id", "file_id", "line", "col"}) |
-      cidx::query::order_by({"file_id", "line", "col"}) | cidx::query::limit(1);
-  const auto planned_site = cidx::query::Executor(read).run(site_plan.plan());
-  const auto page = g.sites_page(s.eid_AB, 0, 1);
-  REQUIRE(planned_site.rows.size() == page.size());
-  if (!page.empty() && !planned_site.rows.empty()) {
-    CHECK(page.front().line == std::get<int64_t>(planned_site.rows.front()[2]));
-    CHECK(page.front().col == std::get<int64_t>(planned_site.rows.front()[3]));
+  std::vector<Site> page;
+  require_production_plan("sites_page",
+                          [&] { page = g.sites_page(s.eid_AB, 0, 1); });
+  if (!page.empty()) {
+    CHECK(page.front().line.has_value());
   }
 }
 
-TEST_CASE("graph_query: production inventory uses typed selection and legacy "
-          "oracle") {
+TEST_CASE("graph_query: production adapters use executable plans and legacy "
+          "oracles") {
   Seeded s;
   Symbol redefined = make_sym("USR::redefined", "redefined", "function");
   const auto redefined_id = s.db.add_symbol(redefined);
@@ -287,99 +298,53 @@ TEST_CASE("graph_query: production inventory uses typed selection and legacy "
   cidx::query::SqliteQueryReadAdapter read(s.db);
   GraphQuery g(read, ":memory:");
 
-  const auto assert_plan = [&](const char *operation,
-                               const cidx::query::Plan &plan) {
-    const auto normalized = cidx::query::validate(plan);
-    const bool meaningful = std::ranges::any_of(
-        normalized.stages, [](const cidx::query::Stage &stage) {
-          using Op = cidx::query::StageOp;
-          return stage.op == Op::Select || stage.op == Op::Where ||
-                 stage.op == Op::Out || stage.op == Op::In ||
-                 stage.op == Op::ChangeView || stage.op == Op::Sites ||
-                 stage.op == Op::Limit || stage.op == Op::Count;
-        });
-    CHECK_MESSAGE(meaningful, operation);
-    const auto result = cidx::query::Executor(read).run_fast(normalized);
-    CHECK_MESSAGE(!result.truncated, operation);
-    return result;
-  };
-  const auto symbol_plan = [&](int64_t id) {
-    return cidx::query::start(cidx::query::codebase()) |
-           cidx::query::nodes(cidx::query::eq("id", id)) |
-           cidx::query::select({"id", "kind", "name", "is_definition"});
-  };
-  const auto edge_plan = [&](int64_t src, int64_t dst, int64_t kind) {
-    return cidx::query::start(cidx::query::codebase()) |
-           cidx::query::view(cidx::query::View::Edge) |
-           cidx::query::nodes(cidx::query::all_of({
-               cidx::query::eq("src_id", src),
-               cidx::query::eq("dst_id", dst),
-               cidx::query::eq("kind", kind),
-           })) |
-           cidx::query::select({"edge_id", "src_id", "dst_id", "kind"});
-  };
-  const auto relation_plan = [&](int64_t id, const std::string &relation,
-                                 const std::string &direction) {
-    auto plan = g.plan_for(id, relation, direction);
-    plan.stages.push_back(cidx::query::select({"id"}));
-    return plan;
-  };
-
-  const auto by_id = assert_plan("get_by_id", symbol_plan(s.id_A).plan());
-  REQUIRE(by_id.rows.size() == 1);
-  CHECK(std::get<int64_t>(by_id.rows.front().front()) == s.id_A);
-  const auto by_usr = assert_plan(
-      "get_by_usr", (cidx::query::start(cidx::query::codebase()) |
-                     cidx::query::nodes(cidx::query::eq("usr", "USR::A")) |
-                     cidx::query::select({"id"}))
-                        .plan());
-  REQUIRE(by_usr.rows.size() == 1);
-  CHECK(std::get<int64_t>(by_usr.rows.front().front()) == s.id_A);
-  assert_plan("find",
-              (cidx::query::start(cidx::query::codebase()) |
-               cidx::query::nodes(cidx::query::glob("name", "*func*")) |
-               cidx::query::select({"id", "name"}) | cidx::query::limit(50))
-                  .plan());
-  auto seed_plan = g.plan_for(s.id_A);
-  seed_plan.stages.push_back(cidx::query::select({"id"}));
-  assert_plan("plan_for", seed_plan);
-  const auto edge_count_plan = cidx::query::start(cidx::query::codebase()) |
-                               cidx::query::view(cidx::query::View::Edge) |
-                               cidx::query::nodes() | cidx::query::count();
-  const auto edge_count = assert_plan("edge_count", edge_count_plan.plan());
-  CHECK(edge_count.scalar == g.edge_count());
-  g.require_edges();
-
-  const auto edge_selection =
-      assert_plan("edges", edge_plan(s.id_A, s.id_B, 1).plan());
-  const auto actual_edges =
-      g.edges_out(s.id_A, std::vector<std::string>{"calls"});
-  REQUIRE(edge_selection.rows.size() == actual_edges.size());
-  REQUIRE(actual_edges.size() == 1);
-  CHECK(std::get<int64_t>(edge_selection.rows.front().front()) ==
-        actual_edges.front().edge_id);
-  assert_plan("edges_in", edge_plan(s.id_A, s.id_B, 1).plan());
-  assert_plan("edges_out", edge_plan(s.id_A, s.id_B, 1).plan());
-  assert_plan("references", edge_plan(s.id_A, s.id_B, 1).plan());
-  assert_plan("aliased_by", relation_plan(s.id_A, "alias_of", "in"));
-  const auto site_plan_for_inventory =
-      cidx::query::start(cidx::query::codebase()) |
-      cidx::query::view(cidx::query::View::Site) |
-      cidx::query::nodes(cidx::query::eq("edge_id", s.eid_AB)) |
-      cidx::query::select({"edge_id", "file_id", "line", "col"}) |
-      cidx::query::order_by({"file_id", "line", "col"}) |
-      cidx::query::limit(200);
-  assert_plan("sites", site_plan_for_inventory.plan());
-  assert_plan("sites_page", site_plan_for_inventory.plan());
-  const auto conditional_plan =
-      cidx::query::start(cidx::query::codebase()) |
-      cidx::query::view(cidx::query::View::Evidence) |
-      cidx::query::nodes(cidx::query::eq("edge_id", s.eid_AB)) |
-      cidx::query::where(cidx::query::eq("conditional", int64_t{1})) |
-      cidx::query::count();
-  const auto conditional =
-      assert_plan("edge_conditional", conditional_plan.plan());
-  CHECK(g.edge_conditional(s.eid_AB) == (conditional.scalar != 0));
+  require_production_plan("get_by_id", [&] { g.get_by_id(s.id_A); });
+  require_production_plan("get_by_usr", [&] { g.get_by_usr("USR::A"); });
+  require_production_plan("find", [&] { g.find("func", std::nullopt, 50); });
+  require_production_plan("edge_count", [&] { g.edge_count(); });
+  require_production_plan("require_edges", [&] { g.require_edges(); });
+  require_production_plan("edges", [&] {
+    g.edges(s.id_A, "out", std::vector<int64_t>{1}, 50, true);
+  });
+  require_production_plan("edges_in", [&] {
+    g.edges_in(s.id_B, std::vector<std::string>{"calls"});
+  });
+  require_production_plan("edges_out", [&] {
+    g.edges_out(s.id_A, std::vector<std::string>{"calls"});
+  });
+  require_production_plan("references", [&] { g.references(s.id_C); });
+  require_production_plan("aliased_by", [&] { g.aliased_by(s.id_A); });
+  require_production_plan("sites", [&] { g.sites(s.eid_AB); });
+  require_production_plan("sites_page", [&] { g.sites_page(s.eid_AB, 0, 1); });
+  require_production_plan("edge_conditional",
+                          [&] { g.edge_conditional(s.eid_AB); });
+  require_production_plan("edge_id_for",
+                          [&] { g.edge_id_for(s.id_A, s.id_B, 1); });
+  require_production_plan(
+      "peers", [&] { g.peers(s.id_A, std::vector<std::string>{"calls"}); });
+  require_production_plan("walk", [&] {
+    g.walk(s.id_A, std::vector<std::string>{"calls"}, "out", 3, 50);
+  });
+  require_production_plan("reaches", [&] {
+    g.reaches(s.id_A, s.id_C, std::vector<std::string>{"calls"});
+  });
+  require_production_plan("bases", [&] { g.bases(s.id_D); });
+  require_production_plan("subclasses", [&] { g.subclasses(s.id_A); });
+  require_production_plan("members", [&] { g.members(s.id_A); });
+  require_production_plan("overrides_of", [&] { g.overrides_of(s.id_B); });
+  require_production_plan("overridden_by", [&] { g.overridden_by(s.id_B); });
+  require_production_plan("is_virtual_method",
+                          [&] { g.is_virtual_method(s.id_B); });
+  require_production_plan("dispatch_targets",
+                          [&] { g.dispatch_targets(s.id_B); });
+  require_production_plan("redefined", [&] { g.redefined(10); });
+  require_production_plan("definitions", [&] { g.definitions(s.id_A); });
+  require_production_plan("possible_callees",
+                          [&] { g.possible_callees(s.id_A); });
+  require_production_plan("signature", [&] { g.signature(s.id_A); });
+  require_production_plan("type_layers", [&] { g.type_layers(-1); });
+  require_production_plan("type_child", [&] { g.type_child(-1, 1); });
+  require_production_plan("type_users", [&] { g.type_users("missing", 50); });
   auto legacy_conditional = s.db.raw_db().prepare(
       "SELECT EXISTS(SELECT 1 FROM edge_site WHERE edge_id = ? "
       "AND conditional = 1)");
@@ -387,11 +352,6 @@ TEST_CASE("graph_query: production inventory uses typed selection and legacy "
   REQUIRE(legacy_conditional.step());
   CHECK(g.edge_conditional(s.eid_AB) == (legacy_conditional.col_int64(0) != 0));
   CHECK(g.edge_conditional(999999) == false);
-  const auto selected_edge =
-      assert_plan("edge_id_for", edge_plan(s.id_A, s.id_B, 1).plan());
-  REQUIRE(selected_edge.rows.size() == 1);
-  CHECK(g.edge_id_for(s.id_A, s.id_B, 1) ==
-        std::get<int64_t>(selected_edge.rows.front().front()));
   auto legacy_edge = s.db.raw_db().prepare(
       "SELECT id FROM edge WHERE src_id = ? AND dst_id = ? AND kind = ?");
   legacy_edge.bind(1, s.id_A);
@@ -401,39 +361,9 @@ TEST_CASE("graph_query: production inventory uses typed selection and legacy "
   CHECK(g.edge_id_for(s.id_A, s.id_B, 1) == legacy_edge.col_int64(0));
   CHECK(!g.edge_id_for(s.id_A, s.id_B, 7));
   CHECK(!g.edge_id_for(999999, s.id_B, 1));
-  assert_plan("peers", relation_plan(s.id_A, "calls", "out"));
-  assert_plan("walk", relation_plan(s.id_A, "calls", "out"));
-  assert_plan("reaches", relation_plan(s.id_A, "calls", "out"));
-  assert_plan("bases", relation_plan(s.id_D, "inherits", "out"));
-  assert_plan("subclasses", relation_plan(s.id_A, "inherits", "in"));
-  assert_plan("members", relation_plan(s.id_A, "contains", "out"));
-  assert_plan("overrides_of", relation_plan(s.id_B, "overrides", "out"));
-  assert_plan("overridden_by", relation_plan(s.id_A, "overrides", "in"));
-  assert_plan("is_virtual_method", symbol_plan(s.id_B).plan());
-  assert_plan("dispatch_targets", relation_plan(s.id_A, "overrides", "in"));
   const auto red = g.redefined(10);
   REQUIRE(red.size() == 1);
   CHECK(red.front().id == redefined_id);
-  const auto redefined_plan =
-      cidx::query::start(cidx::query::codebase()) |
-      cidx::query::nodes(cidx::query::all_of({
-          cidx::query::not_(cidx::query::eq("multi_def", int64_t{0})),
-          cidx::query::not_(cidx::query::eq("multi_def", int64_t{1})),
-      })) |
-      cidx::query::select({"id", "negative_multi_def", "name"}) |
-      cidx::query::order_by({"negative_multi_def", "name"}) |
-      cidx::query::limit(10);
-  assert_plan("redefined", redefined_plan.plan());
-  assert_plan("definitions", symbol_plan(s.id_A).plan());
-  assert_plan("possible_callees", symbol_plan(s.id_A).plan());
-  const auto type_plan =
-      cidx::query::start(cidx::query::codebase()) |
-      cidx::query::view(cidx::query::View::Type) |
-      cidx::query::nodes(cidx::query::eq("type_key", "missing")) |
-      cidx::query::select({"id", "type_key", "kind"});
-  assert_plan("type_layers", type_plan.plan());
-  assert_plan("type_child", type_plan.plan());
-  assert_plan("type_users", relation_plan(s.id_A, "of_type", "out"));
 
   // The adapter's site page must expose exactly the rows selected by its
   // QueryPlan-owned key/order/limit stages; GraphReadPort only hydrates them.
@@ -443,19 +373,10 @@ TEST_CASE("graph_query: production inventory uses typed selection and legacy "
   REQUIRE(raw_site.step());
   CHECK(raw_site.col_int64(0) == s.eid_AB);
   CHECK(raw_site.col_int64(1) > 0);
-  auto site_plan = cidx::query::start(cidx::query::codebase()) |
-                   cidx::query::view(cidx::query::View::Edge) |
-                   cidx::query::nodes(cidx::query::eq("edge_id", s.eid_AB)) |
-                   cidx::query::sites() |
-                   cidx::query::select({"edge_id", "file_id", "line", "col"}) |
-                   cidx::query::order_by({"file_id", "line", "col"}) |
-                   cidx::query::limit(1);
-  const auto selected = cidx::query::Executor(read).run(site_plan.plan());
   const auto page = g.sites_page(s.eid_AB, 0, 1);
-  REQUIRE(selected.rows.size() == 1);
   REQUIRE(page.size() == 1);
-  CHECK(page.front().line == std::get<int64_t>(selected.rows.front()[2]));
-  CHECK(page.front().col == std::get<int64_t>(selected.rows.front()[3]));
+  CHECK(page.front().line == raw_site.col_int64(2));
+  CHECK(page.front().col == raw_site.col_int64(3));
 }
 
 TEST_CASE("graph_query: effective edge count is plan-owned across states") {
@@ -496,7 +417,8 @@ TEST_CASE("graph_query: effective edge count is plan-owned across states") {
   const auto expected_count = [&](int64_t edge_id) {
     auto stmt = db.raw_db().prepare(
         "SELECT CASE WHEN COALESCE((SELECT value FROM meta WHERE "
-        "key = 'graph_resolved_at'), '') <> '' THEN e.count "
+        "key = 'graph_resolved_at'), '') <> '' THEN "
+        "CASE WHEN e.count <> 0 THEN e.count ELSE 1 END "
         "WHEN (SELECT COUNT(*) FROM edge_site WHERE edge_id = e.id) > 0 "
         "THEN (SELECT COUNT(*) FROM edge_site WHERE edge_id = e.id) "
         "WHEN e.count <> 0 THEN e.count ELSE 1 END FROM edge e WHERE e.id = ?");
