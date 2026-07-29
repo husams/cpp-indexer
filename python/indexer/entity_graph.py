@@ -53,6 +53,7 @@ from .queryplan import (
     except_ as plan_except,
     in_ as plan_in,
     in_list,
+    not_ as plan_not,
     nodes as plan_nodes,
     out as plan_out,
     start as plan_start,
@@ -1116,17 +1117,9 @@ class EntityGraph:
         node list is built up front (consume into ``list(...)`` / ``sorted(...)``
         if you need one).
         """
-        cur = self._c.execute(
-            "SELECT DISTINCT id FROM ("
-            "  SELECT id FROM entity_node "
-            "  UNION SELECT src_id AS id FROM entity_edge "
-            "  UNION SELECT dst_id AS id FROM entity_edge"
-            ") ORDER BY id"
+        yield from self._nodes_from_plan(
+            plan_start(codebase()) | plan_nodes() | plan_view("entity")
         )
-        for r in cur:
-            node = self.entity(r[0])
-            if node is not None:
-                yield node
 
     def _in_graph(self, sym_id: int) -> bool:
         """Whether a symbol participates in the design graph: it has a
@@ -1304,11 +1297,18 @@ class EntityGraph:
         from .queryplan import select as plan_select
 
         store = Storage.from_connection(self._c, self._q.db_path)
-        result = Executor(store).run((query | plan_select(["id"])).plan)
+        executable = (query | plan_select(["id"])).plan
         ids: list[int] = []
-        for row in result.rows:
-            value = row[0] if not isinstance(row, dict) else row["id"]
-            ids.append(int(value))
+        after_id: Optional[int] = None
+        paginate = query.plan.source.kind == "codebase"
+        while True:
+            result = Executor(store).run(executable, after_id=after_id)
+            for row in result.rows:
+                value = row[0] if not isinstance(row, dict) else row["id"]
+                ids.append(int(value))
+            if not paginate or not result.truncated or not result.rows:
+                break
+            after_id = ids[-1]
         return ids
 
     def _nodes_from_plan(self, query: PlanQuery) -> Iterator[EntityNode]:
@@ -1343,6 +1343,24 @@ class EntityGraph:
         if kind is not None:
             wheres.append("kind = ?")
             params.append(int(kind))
+        plan_peer_ids: Optional[set[int]] = None
+        if kind is not None and (src is not None or dst is not None):
+            seed = src if src is not None else dst
+            node = self.entity(seed)
+            if node is not None:
+                relation = kind.name.lower()
+                direction = "out" if src is not None else "in"
+                plan = plan_start(entity(node.usr))
+                plan = plan | (
+                    plan_out(relation) if direction == "out" else plan_in(relation)
+                )
+                plan_peer_ids = set(self._run_plan_ids(plan))
+                if not plan_peer_ids:
+                    return
+                peer_column = "dst_id" if src is not None else "src_id"
+                placeholders = ",".join("?" for _ in plan_peer_ids)
+                wheres.append(f"{peer_column} IN ({placeholders})")
+                params.extend(sorted(plan_peer_ids))
         where_sql = ("WHERE " + " AND ".join(wheres)) if wheres else ""
         cur = self._c.execute(
             f"SELECT {_EDGE_COLS} FROM entity_edge {where_sql} "
@@ -1735,20 +1753,36 @@ class EntityQuery:
     def of_kind(self, *entity_kinds: EntityKind) -> "EntityQuery":
         """Keep only nodes whose entity *type* is one of ``entity_kinds``."""
         if self._plan is not None:
+            symbol_kinds = {
+                EntityKind.CLASS: "class",
+                EntityKind.STRUCT: "struct",
+                EntityKind.UNION: "union",
+                EntityKind.CLASS_TEMPLATE: "class-template",
+            }
             wanted = [
-                {
-                    EntityKind.CLASS: "class",
-                    EntityKind.STRUCT: "struct",
-                    EntityKind.UNION: "union",
-                    EntityKind.CLASS_TEMPLATE: "class-template",
-                }.get(kind)
-                for kind in entity_kinds
+                symbol_kinds[kind] for kind in entity_kinds if kind in symbol_kinds
             ]
-            wanted = [kind for kind in wanted if kind is not None]
+            if EntityKind.OTHER in entity_kinds:
+                other = plan_not(in_list("kind", list(symbol_kinds.values())))
+                query = (
+                    self._plan
+                    | plan_view("symbol")
+                    | plan_where(other)
+                    | plan_view("entity")
+                )
+                if wanted:
+                    typed = (
+                        self._plan
+                        | plan_view("symbol")
+                        | plan_where(in_list("kind", wanted))
+                        | plan_view("entity")
+                    )
+                    query = typed | plan_union(query)
+                return EntityQuery(self._g, plan=query, post_filters=self._post_filters)
             if not wanted:
                 return EntityQuery(
                     self._g,
-                    plan=self._plan | plan_where(eq("name", "__entity_query_empty__")),
+                    plan=self._g._empty_plan(),
                     post_filters=self._post_filters,
                 )
             query = (
@@ -1790,7 +1824,12 @@ class EntityQuery:
             query = self._plan | plan_where(
                 in_list(
                     "entity_type",
-                    ["abstract_class", "abstract_class_template", "interface", "interface_template"],
+                    [
+                        "abstract_class",
+                        "abstract_class_template",
+                        "interface",
+                        "interface_template",
+                    ],
                 )
             )
             return EntityQuery(self._g, plan=query, post_filters=self._post_filters)

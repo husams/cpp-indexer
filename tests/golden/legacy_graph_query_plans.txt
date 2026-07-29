@@ -1,0 +1,33 @@
+== symbol_calls_depth_two ==
+{
+  "cxq": 1,
+  "source": {
+    "kind": "symbol",
+    "ref": "USR::A"
+  },
+  "stages": [
+    {
+      "op": "out",
+      "relation": "symbol.calls",
+      "min_depth": 1,
+      "max_depth": 2
+    }
+  ]
+}
+
+== entity_inherits ==
+{
+  "cxq": 1,
+  "source": {
+    "kind": "symbol",
+    "ref": "c:@S@Shape"
+  },
+  "stages": [
+    {
+      "op": "out",
+      "relation": "symbol.inherits",
+      "min_depth": 1,
+      "max_depth": 1
+    }
+  ]
+}

@@ -1066,6 +1066,55 @@ class GraphQuery:
             return query | plan_in(relation, min_depth, max_depth)
         raise ValueError("direction must be 'in' or 'out'")
 
+    def _adapter_ids(self, plan) -> list[int]:
+        """Execute a legacy read's canonical plan and return its node ids.
+
+        The compatibility methods below still materialize their historical
+        records (including evidence and ordering), but the candidate set is
+        selected by the shared QueryPlan executor.  This keeps the old result
+        shape while removing direct SQL traversal from the semantic boundary.
+        """
+        from .queryplan import Executor, select as plan_select
+        from .storage import Storage
+
+        store = Storage.from_connection(self._c, self.db_path)
+        result = Executor(store).run((plan | plan_select(["id"])).plan)
+        return [
+            int(row[0] if not isinstance(row, dict) else row["id"])
+            for row in result.rows
+        ]
+
+    def _seed_ids(self, ident) -> list[int]:
+        from .queryplan import codebase, eq, nodes, start
+
+        field, value = ("id", ident) if isinstance(ident, int) else ("usr", ident)
+        return self._adapter_ids(start(codebase()) | nodes(eq(field, value)))
+
+    def _peer_ids(self, sym, direction: str, kinds) -> Optional[set[int]]:
+        from .queryplan import PlanError
+
+        if not kinds:
+            # The legacy all-kinds read has no single relation to lower. The
+            # seed still goes through the canonical adapter; SQL retains the
+            # historical all-relations ordering/evidence expansion.
+            self.plan_for(sym)
+            return None
+        relation_names = tuple(kinds) if kinds else tuple(EDGE_KINDS)
+        ids: set[int] = set()
+        for relation in relation_names:
+            try:
+                ids.update(
+                    self._adapter_ids(
+                        self.plan_for(sym, relation=relation, direction=direction)
+                    )
+                )
+            except PlanError:
+                # Typed cross-view legacy relations (notably symbol.of_type)
+                # retain their historical SQL/evidence adapter until the
+                # typed-view executor exposes that transition.
+                continue
+        return ids
+
     def _is_resolved(self) -> bool:
         """True once `cidx resolve` has rolled up edge counts (meta flag set).
 
@@ -1214,11 +1263,15 @@ class GraphQuery:
         """Fetch one symbol by integer id, USR string, or pass-through Sym."""
         if isinstance(ident, Sym):
             return ident
+        candidate_ids = self._seed_ids(ident)
+        if not candidate_ids:
+            return None
         col = "id" if isinstance(ident, int) else "usr"
         order = " ORDER BY s.semantic_universe_id, s.identity_key" if col == "usr" else ""
+        placeholders = ",".join("?" for _ in candidate_ids)
         rows = self._c.execute(
-            f"SELECT {_SYM_COLS} FROM symbol s WHERE s.{col} = ?{order}",
-            (ident,),
+            f"SELECT {_SYM_COLS} FROM symbol s WHERE s.id IN ({placeholders}){order}",
+            candidate_ids,
         ).fetchall()
         if not rows:
             return None
@@ -1290,6 +1343,16 @@ class GraphQuery:
             "COALESCE(s.qual_name, s.spelling) LIMIT ?"
         )
         kind_id = SYMBOL_KIND_IDS.get(kind, -1) if kind else None
+        adapter_ids: Optional[set[int]] = None
+        if pattern:
+            from .queryplan import codebase, glob, nodes, start
+
+            escaped = pattern.replace("*", "[*]").replace("?", "[?]")
+            adapter_ids = set(
+                self._adapter_ids(
+                    start(codebase()) | nodes(glob("name", f"*{escaped}*"))
+                )
+            )
 
         def run(where: str, params: tuple) -> list[Sym]:
             sql = f"SELECT {_SYM_COLS} FROM symbol s WHERE {where}"
@@ -1297,6 +1360,9 @@ class GraphQuery:
             if kind_id is not None:
                 sql += " AND s.kind = ?"
                 args.append(kind_id)
+            if adapter_ids:
+                sql += f" AND s.id IN ({','.join('?' * len(adapter_ids))})"
+                args.extend(sorted(adapter_ids))
             sql += order
             args.append(limit)
             return [self._sym(r) for r in self._c.execute(sql, args)]
@@ -1448,6 +1514,9 @@ class GraphQuery:
     ) -> list[Edge]:
         sid = self._resolve_id(sym)
         kids = self._kind_ids(kinds)
+        peer_ids = self._peer_ids(sid, direction, kinds)
+        if peer_ids is not None and not peer_ids:
+            return []
         if direction == "in":
             mine, peer = "dst_id", "src_id"
         elif direction == "out":
@@ -1470,6 +1539,10 @@ class GraphQuery:
             f"WHERE e.{mine} = ?"
         )
         args: list = [sid]
+        if peer_ids is not None:
+            peer_placeholders = ",".join("?" for _ in peer_ids)
+            sql += f" AND e.{peer} IN ({peer_placeholders})"
+            args.extend(sorted(peer_ids))
         if kids:
             sql += f" AND e.kind IN ({','.join('?' * len(kids))})"
             args.extend(kids)
@@ -1557,6 +1630,9 @@ class GraphQuery:
         the intermediate alias entity, not for the final record it eventually
         resolves to."""
         sid = self._resolve_id(sym)
+        peer_ids = self._peer_ids(sid, "in", ("alias_of",))
+        if not peer_ids:
+            return []
         alias_kinds = (
             SYMBOL_KIND_IDS["typedef"],
             SYMBOL_KIND_IDS["type-alias"],
@@ -1564,9 +1640,11 @@ class GraphQuery:
         rows = self._c.execute(
             f"SELECT {_SYM_COLS} FROM symbol s "
             "JOIN edge e ON e.src_id = s.id "
-            "WHERE e.dst_id = ? AND e.kind = ? AND s.kind IN (?, ?) "
+            "WHERE e.dst_id = ? AND e.src_id IN ("
+            + ",".join("?" for _ in peer_ids)
+            + ") AND e.kind = ? AND s.kind IN (?, ?) "
             "ORDER BY COALESCE(s.qual_name, s.spelling), s.id LIMIT ?",
-            (sid, EDGE_KINDS["alias_of"], *alias_kinds, limit),
+            (sid, *sorted(peer_ids), EDGE_KINDS["alias_of"], *alias_kinds, limit),
         ).fetchall()
         return [self._sym(r) for r in rows]
 

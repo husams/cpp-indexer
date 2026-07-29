@@ -228,6 +228,25 @@ TEST_CASE("query_plan: canonical JSON matches the shared golden") {
   CHECK(rendered == read_file(CIDX_CXQ_GOLDEN));
 }
 
+TEST_CASE("graph query adapter lowers through the shared legacy plan fixture") {
+  Storage db(":memory:");
+  SqliteQueryReadAdapter read(db);
+  Symbol symbol = make_sym("USR::A", "funcA");
+  const auto id = db.add_symbol(symbol);
+  cidx::graph::GraphQuery graph(read);
+
+  const auto plan = graph.plan_for(id, "calls", "out", 1, 2);
+  const std::string fixture = read_file(CIDX_LEGACY_GRAPH_PLAN_GOLDEN);
+  const std::string expected = fixture.substr(
+      fixture.find("== symbol_calls_depth_two ==\n") +
+      std::string("== symbol_calls_depth_two ==\n").size(),
+      fixture.find("\n== entity_inherits ==") -
+          fixture.find("== symbol_calls_depth_two ==\n") -
+          std::string("== symbol_calls_depth_two ==\n").size());
+  CHECK(canonical_json(plan) ==
+        expected.substr(0, expected.find_last_not_of("\n") + 1));
+}
+
 TEST_CASE("query_plan: CXQ text lowers to the immutable plan") {
   const Plan parsed =
       parse_cxq("codebase() | nodes(kind = class) | "

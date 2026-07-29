@@ -7,6 +7,7 @@
 
 #include "storage/sqlite_read_adapter.hpp"
 #include "storage/storage.hpp"
+#include "query/exec.hpp"
 
 #include <algorithm>
 #include <filesystem>
@@ -28,7 +29,9 @@ namespace cidx::graph {
 // ---------------------------------------------------------------------------
 
 GraphQuery::GraphQuery(storage::GraphReadPort &db, std::string db_path)
-    : db_(db), db_path_(std::move(db_path)) {}
+    : db_(db),
+      query_read_(dynamic_cast<query::QueryReadPort *>(&db)),
+      db_path_(std::move(db_path)) {}
 
 GraphQuery GraphQuery::open(const std::string &db_path) {
   // Check existence before opening (mirrors query.py:509-516 NoIndexError).
@@ -72,6 +75,59 @@ query::Plan GraphQuery::plan_for(
     return (plan | query::in_(*relation, min_depth, max_depth)).plan();
   }
   throw std::invalid_argument("direction must be 'in' or 'out'");
+}
+
+std::vector<int64_t> GraphQuery::adapter_ids(const query::Plan &plan) {
+  if (!query_read_) {
+    return {};
+  }
+  query::Executor executor(*query_read_);
+  auto selected = plan;
+  selected.stages.push_back(query::select({"id"}));
+  const auto result = executor.run(selected);
+  std::vector<int64_t> ids;
+  ids.reserve(result.rows.size());
+  for (const auto &row : result.rows) {
+    if (!row.empty()) {
+      ids.push_back(std::get<int64_t>(row.front()));
+    }
+  }
+  return ids;
+}
+
+std::optional<std::unordered_set<int64_t>>
+GraphQuery::adapter_peer_ids(
+    int64_t sym_id, const std::string &direction,
+    const std::optional<std::vector<int64_t>> &kind_ids_opt) {
+  std::unordered_set<int64_t> ids;
+  if (!query_read_) {
+    return std::nullopt;
+  }
+  if (!kind_ids_opt || kind_ids_opt->empty()) {
+    // There is no single relation for the legacy all-kinds read. Still lower
+    // the seed through the canonical adapter, while retaining the historical
+    // all-relations ordering and evidence expansion below.
+    static_cast<void>(adapter_ids(plan_for(sym_id)));
+    return std::nullopt;
+  }
+  std::vector<int64_t> relations;
+  relations = *kind_ids_opt;
+  for (const auto relation_id : relations) {
+    const auto name = edge_names_map().find(relation_id);
+    if (name == edge_names_map().end()) {
+      continue;
+    }
+    try {
+      const auto rows = adapter_ids(plan_for(
+          sym_id, name->second, direction, /*min_depth=*/1, /*max_depth=*/1));
+      ids.insert(rows.begin(), rows.end());
+    } catch (const query::PlanError &) {
+      // Cross-view typed relations (for example symbol.of_type) remain
+      // evidence-backed legacy reads until the typed executor owns that
+      // transition. Other graph relations still lower through QueryPlan.
+    }
+  }
+  return ids;
 }
 
 // ---------------------------------------------------------------------------
@@ -272,6 +328,15 @@ Site GraphQuery::make_site(const EdgeSiteRow &row) {
 // ---------------------------------------------------------------------------
 
 std::optional<Sym> GraphQuery::get_by_id(int64_t id) {
+  if (query_read_) {
+    const auto ids = adapter_ids(
+        (query::start(query::codebase()) |
+         query::nodes(query::eq("id", id)))
+            .plan());
+    if (std::ranges::find(ids, id) == ids.end()) {
+      return std::nullopt;
+    }
+  }
   auto sym = db_.graph_symbol_by_id(id);
   if (!sym) {
     return std::nullopt;
@@ -280,7 +345,26 @@ std::optional<Sym> GraphQuery::get_by_id(int64_t id) {
 }
 
 std::optional<Sym> GraphQuery::get_by_usr(const std::string &usr) {
-  const auto matches = db_.lookup_symbols_by_usr(usr);
+  std::vector<Symbol> matches;
+  if (query_read_) {
+    const auto ids = adapter_ids(
+        (query::start(query::codebase()) |
+         query::nodes(query::eq("usr", usr)))
+            .plan());
+    for (const auto id : ids) {
+      if (auto sym = db_.graph_symbol_by_id(id)) {
+        matches.push_back(*sym);
+      }
+    }
+    std::ranges::sort(matches, [](const Symbol &lhs, const Symbol &rhs) {
+      if (lhs.semantic_universe_id != rhs.semantic_universe_id) {
+        return lhs.semantic_universe_id < rhs.semantic_universe_id;
+      }
+      return lhs.identity_key < rhs.identity_key;
+    });
+  } else {
+    matches = db_.lookup_symbols_by_usr(usr);
+  }
   if (matches.empty()) {
     return std::nullopt;
   }
@@ -294,10 +378,34 @@ std::optional<Sym> GraphQuery::get_by_usr(const std::string &usr) {
 std::vector<Sym> GraphQuery::find(const std::string &pattern,
                                   const std::optional<std::string> &kind,
                                   int limit) {
+  std::optional<std::unordered_set<int64_t>> candidate_ids;
+  if (query_read_ && !pattern.empty()) {
+    std::string escaped = pattern;
+    std::string glob_pattern = "*";
+    for (const char ch : escaped) {
+      if (ch == '*' || ch == '?') {
+        glob_pattern.push_back('[');
+        glob_pattern.push_back(ch);
+        glob_pattern.push_back(']');
+      } else {
+        glob_pattern.push_back(ch);
+      }
+    }
+    glob_pattern.push_back('*');
+    const auto ids = adapter_ids(
+        (query::start(query::codebase()) |
+         query::nodes(query::glob("name", glob_pattern)))
+            .plan());
+    candidate_ids.emplace(ids.begin(), ids.end());
+  }
   auto syms = db_.find_symbols(pattern, kind, limit);
   std::vector<Sym> out;
   out.reserve(syms.size());
   for (auto &sym : syms) {
+    if (candidate_ids && !candidate_ids->empty() &&
+        !candidate_ids->contains(sym.id)) {
+      continue;
+    }
     out.push_back(make_sym_from_symbol(sym));
   }
   return out;
@@ -349,6 +457,11 @@ GraphQuery::edges(int64_t sym_id, const std::string &direction,
                   int limit, bool with_sites) {
   const std::vector<int64_t> kv =
       kind_ids_opt ? *kind_ids_opt : std::vector<int64_t>{};
+  const auto candidate_ids = adapter_peer_ids(sym_id, direction, kind_ids_opt);
+  const bool use_plan_candidates = candidate_ids.has_value();
+  if (use_plan_candidates && candidate_ids->empty()) {
+    return {};
+  }
   const bool cr = is_resolved();
   auto rows = db_.graph_edges(sym_id, direction, kv, cr, limit);
 
@@ -357,6 +470,10 @@ GraphQuery::edges(int64_t sym_id, const std::string &direction,
   out.reserve(rows.size());
 
   for (auto &row : rows) {
+    const int64_t peer_id = direction == "in" ? row.src_id : row.dst_id;
+    if (use_plan_candidates && !candidate_ids->contains(peer_id)) {
+      continue;
+    }
     Edge e;
     e.edge_id = row.eid;
     auto nit = nm.find(row.ekind);

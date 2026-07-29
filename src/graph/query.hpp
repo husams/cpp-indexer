@@ -24,6 +24,10 @@
 #include "query/plan.hpp"
 #include "storage/ports.hpp"
 
+namespace cidx::query {
+class QueryReadPort;
+} // namespace cidx::query
+
 namespace cidx::graph {
 
 // Internal format helpers used in error message construction.
@@ -286,6 +290,10 @@ public:
 
 private:
   storage::GraphReadPort &db_;
+  // SqliteQueryReadAdapter implements both read ports.  Keep the graph port
+  // constructor for existing test doubles, while using the QueryPlan executor
+  // whenever the richer adapter is available.
+  query::QueryReadPort *query_read_ = nullptr;
   std::string db_path_;
   std::optional<bool> resolved_; // memoized _is_resolved
   std::optional<std::unordered_map<
@@ -309,6 +317,11 @@ private:
 
   // Resolve site file_id to abs path using the file cache.
   Site make_site(const EdgeSiteRow &row);
+
+  std::vector<int64_t> adapter_ids(const query::Plan &plan);
+  std::optional<std::unordered_set<int64_t>>
+  adapter_peer_ids(int64_t sym_id, const std::string &direction,
+                   const std::optional<std::vector<int64_t>> &kind_ids);
 };
 
 } // namespace cidx::graph

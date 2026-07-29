@@ -21,7 +21,7 @@ from indexer.query import GraphQuery  # noqa: E402
 from indexer.clang import ast as A  # noqa: E402
 from indexer.clang import util as U  # noqa: E402
 from indexer.entity_graph import EntityGraph, EntityKind, EdgeKind  # noqa: E402
-from indexer.queryplan import eq, plan_to_dict  # noqa: E402
+from indexer.queryplan import canonical_json, eq, plan_to_dict  # noqa: E402
 
 try:
     from indexer.entity_rollup import materialize_entity_edges
@@ -59,6 +59,7 @@ struct Renderer {
 };
 
 struct __entity_query_empty__ {};
+enum EmptyKind { EmptyKindValue };
 """
 
 DEEP_SOURCE = "\n".join(
@@ -160,6 +161,13 @@ def test_of_kind_filter(eg):
     assert eg.query("Shape").derived().of_kind(EntityKind.UNION).names() == []
 
 
+def test_other_kind_preserves_legacy_symbol_kind_semantics(eg):
+    names = eg.query().of_kind(EntityKind.OTHER).names()
+    assert "EmptyKind" in names
+    assert "__entity_query_empty__" not in names
+    assert eg.query().of_kind().names() == []
+
+
 def test_named_filter(eg):
     assert eg.query("Shape").derived().named("ircl").names() == ["Circle"]
     assert eg.query("Shape").derived().named("CIRCL").names() == ["Circle"]
@@ -214,6 +222,19 @@ def test_queryplan_adapter_exposes_the_legacy_query_as_a_canonical_plan(eg):
             },
         ],
     }
+
+
+def test_graphquery_plan_adapter_matches_shared_parity_fixture(eg):
+    fixture = os.path.join(
+        os.path.dirname(__file__), "..", "..", "tests", "golden",
+        "legacy_graph_query_plans.txt",
+    )
+    text = open(fixture, encoding="utf-8").read()
+    expected = text.split("== entity_inherits ==\n", 1)[1].strip()
+    plan = eg._q.plan_for(
+        eg.find("Shape")[0].sym, relation="inherits", direction="out"
+    )
+    assert canonical_json(plan.plan) == expected
 
 
 def test_edges_terminal_carries_step_edges(eg):
