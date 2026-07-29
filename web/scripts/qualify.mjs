@@ -245,7 +245,8 @@ try {
   }]));
   await access(peerSource);
   const bankingCache = join(temporary, 'banking-cache');
-  await execute(['import', '--db', bankingSource, '--name', 'banking', '--repo', 'banking'],
+  await execute(['import', '--db', bankingSource, '--name', 'banking',
+    '--repo', 'banking', '--universe', 'qualification:banking'],
     {env: {...process.env, INDEXER_CACHE: bankingCache}});
   await execute(['index'], {env: {...process.env, INDEXER_CACHE: bankingCache}});
   await execute(['resolve'], {env: {...process.env, INDEXER_CACHE: bankingCache}});
@@ -257,7 +258,8 @@ try {
     await mkdir(multiCache, {recursive: true});
     await copyFile(workspaceDbs.get(workspace), join(multiCache, 'index.db'));
     await execute(['import', '--db', join(peerWorkspace, 'compile_commands.json'),
-      '--name', 'banking-peer', '--repo', 'banking-peer'],
+      '--name', 'banking-peer', '--repo', 'banking-peer',
+      '--universe', 'qualification:banking-peer'],
       {env: {...process.env, INDEXER_CACHE: multiCache}});
     await execute(['index', peerFile], {env: {...process.env, INDEXER_CACHE: multiCache}});
     await execute(['resolve'], {env: {...process.env, INDEXER_CACHE: multiCache}});
@@ -315,8 +317,21 @@ try {
     }
     const actualExportHash = hashText(html);
     if (actualExportHash !== scenario.expected.export_sha256) {
+      const diagnostics = {
+        actual_export_sha256: actualExportHash,
+        semantic_sha256: hashText(semantic),
+        identity: view.identity,
+        nodes: records,
+        edges: view.edges.map((edge) => ({
+          source: edge.source,
+          target: edge.target,
+          kind: edge.kind,
+          sites: edge.sites,
+        })),
+      };
       throw new Error(`${scenario.id}: exported explorer output drift ` +
-        `(expected ${scenario.expected.export_sha256}, got ${actualExportHash})`);
+        `(expected ${scenario.expected.export_sha256}, got ${actualExportHash})\n` +
+        JSON.stringify(diagnostics));
     }
   }
 } finally {
