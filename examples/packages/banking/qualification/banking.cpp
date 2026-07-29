@@ -1,7 +1,5 @@
-#include <cstdint>
-
 struct AccountState {
-  std::int32_t balance = 0;
+  int balance = 0;
 };
 
 AccountState open_account() { return {}; }

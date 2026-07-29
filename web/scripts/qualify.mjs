@@ -313,8 +313,10 @@ try {
     if (!scenario.expected.export_sha256) {
       throw new Error(`${scenario.id}: missing pinned export hash`);
     }
-    if (hashText(html) !== scenario.expected.export_sha256) {
-      throw new Error(`${scenario.id}: exported explorer output drift`);
+    const actualExportHash = hashText(html);
+    if (actualExportHash !== scenario.expected.export_sha256) {
+      throw new Error(`${scenario.id}: exported explorer output drift ` +
+        `(expected ${scenario.expected.export_sha256}, got ${actualExportHash})`);
     }
   }
 } finally {
