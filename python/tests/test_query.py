@@ -265,6 +265,53 @@ def test_count_falls_back_to_site_count_when_unresolved(index_db):
         assert edge.count == 2
 
 
+def test_effective_edge_count_matches_legacy_states(tmp_path):
+    db_path = str(tmp_path / "effective-count.db")
+    with Storage(db_path) as db:
+        component = db.add_component("count-test", str(tmp_path))
+        directory = db.add_directory(component, "")
+        file_id = db.add_file(directory, "counts.cpp")
+        src = db.add_symbol(Symbol(usr="USR::count-src", spelling="src", kind="function"))
+        with_sites = db.add_symbol(Symbol(
+            usr="USR::count-with-sites", spelling="with_sites", kind="function"
+        ))
+        without_sites = db.add_symbol(Symbol(
+            usr="USR::count-without-sites", spelling="without_sites", kind="function"
+        ))
+        zero = db.add_symbol(Symbol(
+            usr="USR::count-zero", spelling="zero", kind="function"
+        ))
+        zero_with_sites = db.add_symbol(Symbol(
+            usr="USR::count-zero-with-sites", spelling="zero_with_sites", kind="function"
+        ))
+        e_with_sites = db.add_edge(src, with_sites, 1, count=7)
+        e_without_sites = db.add_edge(src, without_sites, 1, count=7)
+        e_zero = db.add_edge(src, zero, 1, count=0)
+        e_zero_with_sites = db.add_edge(src, zero_with_sites, 1, count=0)
+        db.add_edge_site(e_with_sites, file_id, 10, 1)
+        db.add_edge_site(e_zero_with_sites, file_id, 20, 1)
+        db._conn.commit()
+
+    def counts(resolved):
+        if resolved:
+            with Storage(db_path) as db:
+                db.set_meta("graph_resolved_at", "test")
+        with GraphQuery(db_path) as query:
+            rows = query.edges_out(src, ("calls",), limit=20)
+            return {row.dst_id: row.count for row in rows}
+
+    unresolved = counts(False)
+    assert unresolved[with_sites] == 1
+    assert unresolved[without_sites] == 7
+    assert unresolved[zero] == 1
+    assert unresolved[zero_with_sites] == 1
+    resolved = counts(True)
+    assert resolved[with_sites] == 7
+    assert resolved[without_sites] == 7
+    assert resolved[zero] == 0
+    assert resolved[zero_with_sites] == 0
+
+
 # --------------------------------------------------------------------------- #
 # Navigation
 # --------------------------------------------------------------------------- #

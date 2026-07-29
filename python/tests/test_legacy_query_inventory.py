@@ -9,9 +9,9 @@ from pathlib import Path
 import pytest
 
 from indexer.entity_graph import ClassKind, EdgeKind, EntityGraph, EntityKind, EntityQuery
-from indexer.query import Definition, GraphQuery
-from indexer.queryplan import Executor, canonical_json
-from indexer.storage import Storage
+from indexer.query import EDGE_KINDS, Definition, GraphQuery
+from indexer.queryplan import Executor, canonical_json, select as plan_select
+from indexer.storage import SYMBOL_KIND_IDS, Storage
 
 
 def _inventory() -> list[tuple[str, str, str]]:
@@ -66,10 +66,186 @@ def _consume(value):
     return repr(value)
 
 
+def _semantic(value):
+    """Reduce a production result to stable identity/cardinality facts."""
+    if isinstance(value, dict):
+        return {key: _semantic(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_semantic(item) for item in value]
+    if value is None or isinstance(value, (str, bytes, int, bool, float)):
+        return value
+    if hasattr(value, "id") and not hasattr(value, "edge_id"):
+        return ("symbol", value.id)
+    if hasattr(value, "edge_id"):
+        if not hasattr(value, "src_id"):
+            caller = getattr(value, "caller", None)
+            return ("edge_context", value.edge_id,
+                    getattr(caller, "id", None))
+        return ("edge", value.edge_id, value.src_id, value.dst_id,
+                value.kind, value.count)
+    if hasattr(value, "def_id") and hasattr(value, "sym") and hasattr(value.sym, "id"):
+        return ("definition", value.sym.id, value.def_id)
+    if hasattr(value, "nodes_by_id"):
+        return ("traversal", tuple(sorted(value.nodes_by_id)))
+    if hasattr(value, "__iter__"):
+        return [_semantic(item) for item in value]
+    return _consume(value)
+
+
+def _legacy_ids(conn, sql, params=()):
+    return [row[0] for row in conn.execute(sql, params)]
+
+
+def _assert_graph_legacy_parity(operation, args, value, graph):
+    """Compare each terminal's selection/cardinality to an independent SQL oracle.
+
+    The adapter is deliberately not used by this helper: the SQL reads below
+    are the legacy semantic oracle, while the value was produced through the
+    QueryPlan-backed public operation.
+    """
+    actual = _semantic(value)
+    conn = graph._c
+    sid = getattr(args[0], "id", args[0]) if args else None
+    relation = {
+        "aliased_by": ("alias_of", "in"), "bases": ("inherits", "out"),
+        "callees": ("calls", "out"), "callers": ("calls", "in"),
+        "instantiations": ("instantiates", "in"),
+        "overridden_by": ("overrides", "in"), "overrides": ("overrides", "out"),
+        "subclasses": ("inherits", "in"),
+    }
+    if operation == "get":
+        expected = _legacy_ids(conn, "SELECT id FROM symbol WHERE id = ?", (sid,))
+        actual_ids = [actual[1]] if isinstance(actual, tuple) and actual[0] == "symbol" else []
+        assert actual_ids == expected
+        return
+    if operation in {"by_name", "by_qual_or_spelling", "records_by_name"}:
+        names = tuple(arg for arg in args if isinstance(arg, str))
+        if operation == "by_name":
+            kind = args[1] if len(args) > 1 else None
+            where = "spelling = ?"
+            params = [names[0]]
+            if kind is not None:
+                where += " AND kind = ?"
+                params.append(SYMBOL_KIND_IDS[kind])
+            expected = _legacy_ids(
+                conn, f"SELECT id FROM symbol WHERE {where} ORDER BY usr", params
+            )
+        elif operation == "records_by_name":
+            expected = _legacy_ids(
+                conn,
+                "SELECT s.id FROM symbol s JOIN entity_node en ON en.id = s.id "
+                "WHERE (s.qual_name = ? OR s.spelling = ?) AND s.kind = ? "
+                "AND en.kind = ? ORDER BY s.id",
+                (names[0], names[0], SYMBOL_KIND_IDS["class"], int(EntityKind.CLASS)),
+            ) if names else []
+        else:
+            marks = ",".join("?" * len(names))
+            expected = _legacy_ids(
+                conn,
+                f"SELECT id FROM symbol WHERE qual_name IN ({marks}) OR spelling IN ({marks}) ORDER BY id",
+                names + names,
+            ) if names else []
+        assert [item[1] for item in actual if isinstance(item, tuple) and item[0] == "symbol"] == expected
+        return
+    if operation in relation:
+        kind, direction = relation[operation]
+        column = "dst_id" if direction == "out" else "src_id"
+        expected = _legacy_ids(
+            conn,
+            f"SELECT {column} FROM edge WHERE {'src_id' if direction == 'out' else 'dst_id'} = ? "
+            "AND kind = ? ORDER BY id",
+            (sid, EDGE_KINDS[kind]),
+        )
+        actual_ids = [item[1] for item in actual if isinstance(item, tuple) and item[0] == "symbol"]
+        assert actual_ids == expected[:len(actual_ids)]
+        return
+    if operation == "dispatch_targets":
+        expected = _legacy_ids(
+            conn,
+            "WITH RECURSIVE reach(id) AS ("
+            "SELECT src_id FROM edge WHERE dst_id = ? AND kind = ? UNION "
+            "SELECT e.src_id FROM edge e JOIN reach r ON e.dst_id = r.id "
+            "WHERE e.kind = ?) SELECT id FROM reach "
+            "WHERE id IN (SELECT id FROM symbol WHERE is_pure = 0) ORDER BY id",
+            (sid, EDGE_KINDS["overrides"], EDGE_KINDS["overrides"]),
+        )
+        actual_ids = [item[1] for item in actual if item[0] == "symbol"]
+        assert set(actual_ids) == set(expected)
+        return
+    if operation == "neighbors":
+        kind_names = args[1] or tuple(EDGE_KINDS)
+        direction = args[2]
+        column = "dst_id" if direction == "out" else "src_id"
+        source_column = "src_id" if direction == "out" else "dst_id"
+        marks = ",".join("?" * len(kind_names))
+        expected = _legacy_ids(
+            conn,
+            f"SELECT {column} FROM edge WHERE {source_column} = ? AND kind IN ({marks}) ORDER BY id",
+            (sid, *(EDGE_KINDS[name] for name in kind_names)),
+        )
+        actual_ids = [item[1] for item in actual if item[0] == "symbol"]
+        assert actual_ids == expected[:len(actual_ids)]
+        return
+    if operation in {"edges_in", "edges_out", "references"}:
+        assert all(item[0] == "edge" for item in actual)
+        assert all(
+            conn.execute("SELECT 1 FROM edge WHERE id = ?", (item[1],)).fetchone()
+            for item in actual
+        )
+        return
+    if operation in {"sites", "declaration_sites"}:
+        assert all(isinstance(item, dict) for item in actual)
+        return
+    if operation == "edge_count":
+        assert actual == conn.execute("SELECT COUNT(*) FROM edge").fetchone()[0]
+        return
+    if operation == "stats":
+        assert actual["edges"] == conn.execute("SELECT COUNT(*) FROM edge").fetchone()[0]
+        assert actual["symbols"] == conn.execute("SELECT COUNT(*) FROM symbol").fetchone()[0]
+        return
+    # Every remaining public terminal still gets an independent storage
+    # invariant: hydrated identities must exist in the legacy table they claim.
+    for item in actual if isinstance(actual, list) else []:
+        if isinstance(item, tuple) and item and item[0] == "symbol":
+            assert conn.execute("SELECT 1 FROM symbol WHERE id = ?", (item[1],)).fetchone()
+        if isinstance(item, tuple) and item and item[0] == "definition":
+            assert conn.execute("SELECT 1 FROM definition WHERE id = ?", (item[2],)).fetchone()
+
+
+def _assert_entity_legacy_parity(operation, value, graph):
+    """Check EntityGraph/EntityQuery terminals against raw entity tables."""
+    actual = _semantic(value)
+    conn = graph._c
+    valid_nodes = {
+        row[0] for row in conn.execute(
+            "SELECT id FROM entity_node UNION SELECT src_id FROM entity_edge "
+            "UNION SELECT dst_id FROM entity_edge"
+        )
+    }
+    if operation == "stats":
+        assert actual == {
+            "entities": len(valid_nodes),
+            "edges": conn.execute("SELECT COUNT(*) FROM entity_edge").fetchone()[0],
+            "by_kind": {
+                EdgeKind(row[0]).verb: row[1] for row in conn.execute(
+                    "SELECT kind, COUNT(*) FROM entity_edge GROUP BY kind"
+                )
+            },
+        }
+        return
+    for item in actual if isinstance(actual, list) else []:
+        if isinstance(item, tuple) and item and item[0] == "symbol":
+            assert item[1] in valid_nodes
+        if isinstance(item, tuple) and item and item[0] == "edge":
+            assert conn.execute(
+                "SELECT 1 FROM entity_edge WHERE id = ?", (item[1],)
+            ).fetchone()
+
+
 def _assert_operation_plan(calls: list[str], before: int, operation: str):
     produced = calls[before:]
     assert produced, f"{operation} did not execute a production QueryPlan"
-    meaningful = {"select", "out", "in", "where", "view", "sites", "limit",
+    meaningful = {"nodes", "select", "out", "in", "where", "view", "sites", "limit",
                   "count", "union", "except"}
     assert any(
         meaningful.intersection(stage["op"] for stage in json.loads(plan)["stages"])
@@ -146,10 +322,9 @@ def test_python_inventory_executes_production_plans_and_legacy_oracles(
         else Definition(sym=sym, component=None, file=None, line=None, col=None, def_id=-1)
     )
 
-    # Every reflected public operation is invoked on the same seeded fixture.
-    # Builder-only methods are executed by the terminal that consumes their
-    # returned plan; make_file is record construction, not a read operation.
-    builder_only = {"plan_for", "make_file"}
+    # Every reflected public read operation is invoked on the same seeded
+    # fixture. Builder methods are immediately consumed through their real
+    # terminal; make_file is the sole record-construction operation.
     for surface, owner, operation in entries:
         if surface == "cpp_graph" or owner != "GraphQuery":
             continue
@@ -157,10 +332,16 @@ def test_python_inventory_executes_production_plans_and_legacy_oracles(
         before = len(calls)
         try:
             result = getattr(g, operation)(*args, **kwargs)
+            if operation == "plan_for":
+                result = Executor(Storage.from_connection(
+                    g._c, g.db_path
+                )).run((result | plan_select(["id"])).plan)
             _consume(result)
         except Exception as exc:  # pragma: no cover - identifies a missing case
             pytest.fail(f"{owner}.{operation} did not execute: {exc}")
-        if operation not in builder_only:
+        if operation not in {"make_file", "plan_for"}:
+            _assert_graph_legacy_parity(operation, args, result, g)
+        if operation != "make_file":
             _assert_operation_plan(calls, before, operation)
 
     # Differential production oracles for the seeded selection, ordering, and
@@ -213,10 +394,11 @@ def test_entity_inventory_executes_production_plans(g, monkeypatch):
                 value = method("Base")
             else:
                 value = method()
+            if isinstance(value, EntityQuery):
+                value = list(value.nodes())
+            _assert_entity_legacy_parity(operation, value, graph)
             _consume(value)
-            if operation not in {"query", "klass", "struct", "record", "template",
-                                 "instance", "abstract_class", "interface", "edges"}:
-                _assert_operation_plan(calls, before, f"{owner}.{operation}")
+            _assert_operation_plan(calls, before, f"{owner}.{operation}")
         elif surface == "python_entity_query":
             method = getattr(query, operation)
             if operation in {"relation", "step", "then"}:
@@ -234,10 +416,12 @@ def test_entity_inventory_executes_production_plans(g, monkeypatch):
             elif operation == "to_plan":
                 value = method()
                 Executor(Storage.from_connection(g._c, g.db_path)).run(value)
+                _assert_operation_plan(calls, before, f"{owner}.{operation}")
                 continue
             else:
                 value = method()
+            if isinstance(value, EntityQuery):
+                value = list(value.nodes())
+            _assert_entity_legacy_parity(operation, value, graph)
             _consume(value)
-            if operation not in {"query", "klass", "struct", "record", "template",
-                                 "instance", "abstract_class", "interface", "edges"}:
-                _assert_operation_plan(calls, before, f"{owner}.{operation}")
+            _assert_operation_plan(calls, before, f"{owner}.{operation}")

@@ -211,11 +211,12 @@ GraphQuery::adapter_edge_rows(int64_t sym_id, const std::string &direction,
     return rows;
   }
   const std::string field = direction == "in" ? "dst_id" : "src_id";
-  auto plan = query::start(query::codebase()) | query::view(query::View::Edge) |
-              query::nodes(query::eq(field, sym_id)) |
-              query::select({"edge_id", "src_id", "dst_id", "kind", "count",
-                             "negative_count", "base_access", "is_virtual"}) |
-              query::order_by({"negative_count", "kind", "edge_id"});
+  auto plan =
+      query::start(query::codebase()) | query::view(query::View::Edge) |
+      query::nodes(query::eq(field, sym_id)) |
+      query::select({"edge_id", "src_id", "dst_id", "kind", "effective_count",
+                     "negative_count", "base_access", "is_virtual"}) |
+      query::order_by({"negative_count", "kind", "edge_id"});
   if (limit > 0) {
     plan = plan | query::limit(limit);
   }
@@ -843,13 +844,7 @@ GraphQuery::edges(int64_t sym_id, const std::string &direction,
       continue;
     }
     e.peer = make_sym_from_symbol(*peer);
-    int64_t cnt = planned_count;
-    if (!is_resolved() || cnt == 0) {
-      const auto site_rows = db_.edge_sites_one(edge_id, -1);
-      cnt = site_rows.empty() ? (cnt == 0 ? 1 : cnt)
-                              : static_cast<int64_t>(site_rows.size());
-    }
-    e.count = cnt;
+    e.count = planned_count;
     e.base_access = base_access;
     e.is_virtual = is_virtual != 0;
     out.push_back(std::move(e));
@@ -1018,10 +1013,7 @@ bool GraphQuery::edge_conditional(int64_t edge_id) {
               query::where(query::eq("conditional", static_cast<int64_t>(1))) |
               query::count();
   query::Executor executor(*query_read_);
-  if (executor.run_fast(plan.plan()).scalar == 0) {
-    return false;
-  }
-  return db_.edge_has_conditional_site(edge_id);
+  return executor.run_fast(plan.plan()).scalar != 0;
 }
 
 std::optional<int64_t> GraphQuery::edge_id_for(int64_t src_id, int64_t dst_id,
@@ -1029,21 +1021,19 @@ std::optional<int64_t> GraphQuery::edge_id_for(int64_t src_id, int64_t dst_id,
   if (!query_read_) {
     return db_.edge_id_for(src_id, dst_id, kind);
   }
-  const auto src = db_.graph_symbol_by_id(src_id);
-  const auto dst = db_.graph_symbol_by_id(dst_id);
-  const auto relation = edge_names_map().find(kind);
-  if (!src || !dst || relation == edge_names_map().end()) {
-    return std::nullopt;
-  }
-  auto plan = query::start(query::symbol(src->usr)) |
-              query::out(relation->second) |
-              query::where(query::eq("id", dst_id)) | query::select({"id"}) |
-              query::limit(1);
+  auto plan = query::start(query::codebase()) | query::view(query::View::Edge) |
+              query::nodes(query::all_of({
+                  query::eq("src_id", src_id),
+                  query::eq("dst_id", dst_id),
+                  query::eq("kind", kind),
+              })) |
+              query::select({"edge_id"}) | query::limit(1);
   query::Executor executor(*query_read_);
-  if (executor.run_fast(plan.plan()).rows.empty()) {
+  const auto result = executor.run_fast(plan.plan());
+  if (result.rows.empty()) {
     return std::nullopt;
   }
-  return db_.edge_id_for(src_id, dst_id, kind);
+  return std::get<int64_t>(result.rows.front().front());
 }
 
 std::map<int64_t, std::vector<Site>>

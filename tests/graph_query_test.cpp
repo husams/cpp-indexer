@@ -282,43 +282,158 @@ TEST_CASE("graph_query: production inventory uses typed selection and legacy "
   site.file_id = file;
   site.line = 10;
   site.col = 5;
+  site.conditional = true;
   s.db.add_edge_site(site);
   cidx::query::SqliteQueryReadAdapter read(s.db);
   GraphQuery g(read, ":memory:");
 
-  CHECK_NOTHROW(g.get_by_id(s.id_A));
-  CHECK_NOTHROW(g.get_by_usr("USR::A"));
-  CHECK_NOTHROW(g.find("func"));
-  CHECK_NOTHROW(g.plan_for(s.id_A));
-  CHECK_NOTHROW(g.edge_count());
-  CHECK_NOTHROW(g.require_edges());
-  CHECK_NOTHROW(g.edges(s.id_A, "out", std::nullopt, 10));
-  CHECK_NOTHROW(g.edges_in(s.id_A, std::nullopt));
-  CHECK_NOTHROW(g.edges_out(s.id_A, std::nullopt));
-  CHECK_NOTHROW(g.references(s.id_A));
-  CHECK_NOTHROW(g.aliased_by(s.id_A));
-  CHECK_NOTHROW(g.sites(s.eid_AB));
-  CHECK_NOTHROW(g.sites_page(s.eid_AB, 0, 1));
-  CHECK_NOTHROW(g.edge_conditional(s.eid_AB));
-  CHECK_NOTHROW(g.edge_id_for(s.id_A, s.id_B, 1));
-  CHECK_NOTHROW(g.peers(s.id_A, std::vector<std::string>{"calls"}));
-  CHECK_NOTHROW(g.walk(s.id_A, std::vector<std::string>{"calls"}));
-  CHECK_NOTHROW(g.reaches(s.id_A, s.id_C, std::vector<std::string>{"calls"}));
-  CHECK_NOTHROW(g.bases(s.id_D));
-  CHECK_NOTHROW(g.subclasses(s.id_A));
-  CHECK_NOTHROW(g.members(s.id_A));
-  CHECK_NOTHROW(g.overrides_of(s.id_B));
-  CHECK_NOTHROW(g.overridden_by(s.id_A));
-  CHECK_NOTHROW(g.is_virtual_method(s.id_B));
-  CHECK_NOTHROW(g.dispatch_targets(s.id_A));
+  const auto assert_plan = [&](const char *operation,
+                               const cidx::query::Plan &plan) {
+    const auto normalized = cidx::query::validate(plan);
+    const bool meaningful = std::ranges::any_of(
+        normalized.stages, [](const cidx::query::Stage &stage) {
+          using Op = cidx::query::StageOp;
+          return stage.op == Op::Select || stage.op == Op::Where ||
+                 stage.op == Op::Out || stage.op == Op::In ||
+                 stage.op == Op::ChangeView || stage.op == Op::Sites ||
+                 stage.op == Op::Limit || stage.op == Op::Count;
+        });
+    CHECK_MESSAGE(meaningful, operation);
+    const auto result = cidx::query::Executor(read).run_fast(normalized);
+    CHECK_MESSAGE(!result.truncated, operation);
+    return result;
+  };
+  const auto symbol_plan = [&](int64_t id) {
+    return cidx::query::start(cidx::query::codebase()) |
+           cidx::query::nodes(cidx::query::eq("id", id)) |
+           cidx::query::select({"id", "kind", "name", "is_definition"});
+  };
+  const auto edge_plan = [&](int64_t src, int64_t dst, int64_t kind) {
+    return cidx::query::start(cidx::query::codebase()) |
+           cidx::query::view(cidx::query::View::Edge) |
+           cidx::query::nodes(cidx::query::all_of({
+               cidx::query::eq("src_id", src),
+               cidx::query::eq("dst_id", dst),
+               cidx::query::eq("kind", kind),
+           })) |
+           cidx::query::select({"edge_id", "src_id", "dst_id", "kind"});
+  };
+  const auto relation_plan = [&](int64_t id, const std::string &relation,
+                                 const std::string &direction) {
+    auto plan = g.plan_for(id, relation, direction);
+    plan.stages.push_back(cidx::query::select({"id"}));
+    return plan;
+  };
+
+  const auto by_id = assert_plan("get_by_id", symbol_plan(s.id_A).plan());
+  REQUIRE(by_id.rows.size() == 1);
+  CHECK(std::get<int64_t>(by_id.rows.front().front()) == s.id_A);
+  const auto by_usr = assert_plan(
+      "get_by_usr", (cidx::query::start(cidx::query::codebase()) |
+                     cidx::query::nodes(cidx::query::eq("usr", "USR::A")) |
+                     cidx::query::select({"id"}))
+                        .plan());
+  REQUIRE(by_usr.rows.size() == 1);
+  CHECK(std::get<int64_t>(by_usr.rows.front().front()) == s.id_A);
+  assert_plan("find",
+              (cidx::query::start(cidx::query::codebase()) |
+               cidx::query::nodes(cidx::query::glob("name", "*func*")) |
+               cidx::query::select({"id", "name"}) | cidx::query::limit(50))
+                  .plan());
+  auto seed_plan = g.plan_for(s.id_A);
+  seed_plan.stages.push_back(cidx::query::select({"id"}));
+  assert_plan("plan_for", seed_plan);
+  const auto edge_count_plan = cidx::query::start(cidx::query::codebase()) |
+                               cidx::query::view(cidx::query::View::Edge) |
+                               cidx::query::nodes() | cidx::query::count();
+  const auto edge_count = assert_plan("edge_count", edge_count_plan.plan());
+  CHECK(edge_count.scalar == g.edge_count());
+  g.require_edges();
+
+  const auto edge_selection =
+      assert_plan("edges", edge_plan(s.id_A, s.id_B, 1).plan());
+  const auto actual_edges =
+      g.edges_out(s.id_A, std::vector<std::string>{"calls"});
+  REQUIRE(edge_selection.rows.size() == actual_edges.size());
+  REQUIRE(actual_edges.size() == 1);
+  CHECK(std::get<int64_t>(edge_selection.rows.front().front()) ==
+        actual_edges.front().edge_id);
+  assert_plan("edges_in", edge_plan(s.id_A, s.id_B, 1).plan());
+  assert_plan("edges_out", edge_plan(s.id_A, s.id_B, 1).plan());
+  assert_plan("references", edge_plan(s.id_A, s.id_B, 1).plan());
+  assert_plan("aliased_by", relation_plan(s.id_A, "alias_of", "in"));
+  const auto site_plan_for_inventory =
+      cidx::query::start(cidx::query::codebase()) |
+      cidx::query::view(cidx::query::View::Site) |
+      cidx::query::nodes(cidx::query::eq("edge_id", s.eid_AB)) |
+      cidx::query::select({"edge_id", "file_id", "line", "col"}) |
+      cidx::query::order_by({"file_id", "line", "col"}) |
+      cidx::query::limit(200);
+  assert_plan("sites", site_plan_for_inventory.plan());
+  assert_plan("sites_page", site_plan_for_inventory.plan());
+  const auto conditional_plan =
+      cidx::query::start(cidx::query::codebase()) |
+      cidx::query::view(cidx::query::View::Evidence) |
+      cidx::query::nodes(cidx::query::eq("edge_id", s.eid_AB)) |
+      cidx::query::where(cidx::query::eq("conditional", int64_t{1})) |
+      cidx::query::count();
+  const auto conditional =
+      assert_plan("edge_conditional", conditional_plan.plan());
+  CHECK(g.edge_conditional(s.eid_AB) == (conditional.scalar != 0));
+  auto legacy_conditional = s.db.raw_db().prepare(
+      "SELECT EXISTS(SELECT 1 FROM edge_site WHERE edge_id = ? "
+      "AND conditional = 1)");
+  legacy_conditional.bind(1, s.eid_AB);
+  REQUIRE(legacy_conditional.step());
+  CHECK(g.edge_conditional(s.eid_AB) == (legacy_conditional.col_int64(0) != 0));
+  CHECK(g.edge_conditional(999999) == false);
+  const auto selected_edge =
+      assert_plan("edge_id_for", edge_plan(s.id_A, s.id_B, 1).plan());
+  REQUIRE(selected_edge.rows.size() == 1);
+  CHECK(g.edge_id_for(s.id_A, s.id_B, 1) ==
+        std::get<int64_t>(selected_edge.rows.front().front()));
+  auto legacy_edge = s.db.raw_db().prepare(
+      "SELECT id FROM edge WHERE src_id = ? AND dst_id = ? AND kind = ?");
+  legacy_edge.bind(1, s.id_A);
+  legacy_edge.bind(2, s.id_B);
+  legacy_edge.bind(3, int64_t{1});
+  REQUIRE(legacy_edge.step());
+  CHECK(g.edge_id_for(s.id_A, s.id_B, 1) == legacy_edge.col_int64(0));
+  CHECK(!g.edge_id_for(s.id_A, s.id_B, 7));
+  CHECK(!g.edge_id_for(999999, s.id_B, 1));
+  assert_plan("peers", relation_plan(s.id_A, "calls", "out"));
+  assert_plan("walk", relation_plan(s.id_A, "calls", "out"));
+  assert_plan("reaches", relation_plan(s.id_A, "calls", "out"));
+  assert_plan("bases", relation_plan(s.id_D, "inherits", "out"));
+  assert_plan("subclasses", relation_plan(s.id_A, "inherits", "in"));
+  assert_plan("members", relation_plan(s.id_A, "contains", "out"));
+  assert_plan("overrides_of", relation_plan(s.id_B, "overrides", "out"));
+  assert_plan("overridden_by", relation_plan(s.id_A, "overrides", "in"));
+  assert_plan("is_virtual_method", symbol_plan(s.id_B).plan());
+  assert_plan("dispatch_targets", relation_plan(s.id_A, "overrides", "in"));
   const auto red = g.redefined(10);
   REQUIRE(red.size() == 1);
   CHECK(red.front().id == redefined_id);
-  CHECK_NOTHROW(g.definitions(s.id_A));
-  CHECK_NOTHROW(g.possible_callees(s.id_A));
-  CHECK_NOTHROW(g.type_layers(1));
-  CHECK_NOTHROW(g.type_child(1, 1));
-  CHECK_NOTHROW(g.type_users("USR::A"));
+  const auto redefined_plan =
+      cidx::query::start(cidx::query::codebase()) |
+      cidx::query::nodes(cidx::query::all_of({
+          cidx::query::not_(cidx::query::eq("multi_def", int64_t{0})),
+          cidx::query::not_(cidx::query::eq("multi_def", int64_t{1})),
+      })) |
+      cidx::query::select({"id", "negative_multi_def", "name"}) |
+      cidx::query::order_by({"negative_multi_def", "name"}) |
+      cidx::query::limit(10);
+  assert_plan("redefined", redefined_plan.plan());
+  assert_plan("definitions", symbol_plan(s.id_A).plan());
+  assert_plan("possible_callees", symbol_plan(s.id_A).plan());
+  const auto type_plan =
+      cidx::query::start(cidx::query::codebase()) |
+      cidx::query::view(cidx::query::View::Type) |
+      cidx::query::nodes(cidx::query::eq("type_key", "missing")) |
+      cidx::query::select({"id", "type_key", "kind"});
+  assert_plan("type_layers", type_plan.plan());
+  assert_plan("type_child", type_plan.plan());
+  assert_plan("type_users", relation_plan(s.id_A, "of_type", "out"));
 
   // The adapter's site page must expose exactly the rows selected by its
   // QueryPlan-owned key/order/limit stages; GraphReadPort only hydrates them.
@@ -341,6 +456,73 @@ TEST_CASE("graph_query: production inventory uses typed selection and legacy "
   REQUIRE(page.size() == 1);
   CHECK(page.front().line == std::get<int64_t>(selected.rows.front()[2]));
   CHECK(page.front().col == std::get<int64_t>(selected.rows.front()[3]));
+}
+
+TEST_CASE("graph_query: effective edge count is plan-owned across states") {
+  Storage db(":memory:");
+  const auto src = db.add_symbol(make_sym("USR::count-src", "count_src"));
+  const auto with_sites_dst =
+      db.add_symbol(make_sym("USR::count-with-sites", "count_with_sites"));
+  const auto without_sites_dst = db.add_symbol(
+      make_sym("USR::count-without-sites", "count_without_sites"));
+  const auto zero_dst =
+      db.add_symbol(make_sym("USR::count-zero", "count_zero"));
+  const auto resolved_dst =
+      db.add_symbol(make_sym("USR::count-resolved", "count_resolved"));
+  const auto component = db.add_component("count-test", "/tmp/hse27-count");
+  const auto directory = db.add_directory(component, "");
+  const auto file = db.add_file(directory, "counts.cpp");
+
+  const auto with_sites = db.add_edge(make_edge(src, with_sites_dst, 1, 7));
+  const auto without_sites =
+      db.add_edge(make_edge(src, without_sites_dst, 1, 7));
+  const auto zero_count = db.add_edge(make_edge(src, zero_dst, 1, 0));
+  const auto resolved = db.add_edge(make_edge(src, resolved_dst, 1, 7));
+  cidx::EdgeSite with_sites_site;
+  with_sites_site.edge_id = with_sites;
+  with_sites_site.file_id = file;
+  with_sites_site.line = 10;
+  with_sites_site.col = 1;
+  db.add_edge_site(with_sites_site);
+  cidx::EdgeSite zero_count_site;
+  zero_count_site.edge_id = zero_count;
+  zero_count_site.file_id = file;
+  zero_count_site.line = 20;
+  zero_count_site.col = 1;
+  db.add_edge_site(zero_count_site);
+
+  cidx::query::SqliteQueryReadAdapter read(db);
+  GraphQuery graph(read, ":memory:");
+  const auto expected_count = [&](int64_t edge_id) {
+    auto stmt = db.raw_db().prepare(
+        "SELECT CASE WHEN COALESCE((SELECT value FROM meta WHERE "
+        "key = 'graph_resolved_at'), '') <> '' THEN e.count "
+        "WHEN (SELECT COUNT(*) FROM edge_site WHERE edge_id = e.id) > 0 "
+        "THEN (SELECT COUNT(*) FROM edge_site WHERE edge_id = e.id) "
+        "WHEN e.count <> 0 THEN e.count ELSE 1 END FROM edge e WHERE e.id = ?");
+    stmt.bind(1, edge_id);
+    REQUIRE(stmt.step());
+    return stmt.col_int64(0);
+  };
+  const auto actual_count = [&](int64_t dst) {
+    const auto rows =
+        graph.edges_out(src, std::vector<std::string>{"calls"}, 100);
+    const auto it = std::ranges::find_if(
+        rows, [dst](const auto &edge) { return edge.dst_id == dst; });
+    REQUIRE(it != rows.end());
+    return it->count;
+  };
+
+  CHECK(actual_count(with_sites_dst) == expected_count(with_sites));
+  CHECK(actual_count(without_sites_dst) == expected_count(without_sites));
+  CHECK(actual_count(zero_dst) == expected_count(zero_count));
+  CHECK(actual_count(resolved_dst) == expected_count(resolved));
+
+  db.stamp_graph_resolved();
+  CHECK(actual_count(with_sites_dst) == expected_count(with_sites));
+  CHECK(actual_count(without_sites_dst) == expected_count(without_sites));
+  CHECK(actual_count(zero_dst) == expected_count(zero_count));
+  CHECK(actual_count(resolved_dst) == expected_count(resolved));
 }
 
 // ---------------------------------------------------------------------------
@@ -483,6 +665,23 @@ TEST_CASE("graph_query: truncated plan candidates preserve legacy edge order") {
   REQUIRE(edges.size() == 1);
   CHECK(edges.front().peer.spelling == "caller1004");
   CHECK(edges.front().count == 999);
+}
+
+TEST_CASE("graph_query: edge_id_for exact edge survives high degree") {
+  Storage db(":memory:");
+  const auto src = db.add_symbol(make_sym("USR::edge-id-src", "edge_id_src"));
+  int64_t last_dst = -1;
+  int64_t last_edge = -1;
+  for (int index = 0; index < 1005; ++index) {
+    last_dst =
+        db.add_symbol(make_sym("USR::edge-id-dst-" + std::to_string(index),
+                               "edge_id_dst_" + std::to_string(index)));
+    last_edge = db.add_edge(make_edge(src, last_dst, 1));
+  }
+  cidx::query::SqliteQueryReadAdapter read(db);
+  GraphQuery graph(read, ":memory:");
+  CHECK(graph.edge_id_for(src, last_dst, 1) == last_edge);
+  CHECK(!graph.edge_id_for(src, last_dst, 7));
 }
 
 TEST_CASE("graph_query: find preserves legacy case-insensitive matches") {

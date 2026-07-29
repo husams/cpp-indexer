@@ -16,7 +16,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
 
-from indexer.storage import Storage  # noqa: E402
+from indexer.storage import Storage, Symbol  # noqa: E402
 from indexer.query import GraphQuery  # noqa: E402
 from indexer.clang import ast as A  # noqa: E402
 from indexer.clang import util as U  # noqa: E402
@@ -90,6 +90,15 @@ def eg():
             db.delete_edges_for_file(file_id)
             A._index_edges_notxn(db, tu, path, file_id)
         materialize_entity_edges(db)
+        isolated_id = db.add_symbol(Symbol(
+            usr="USR::Isolated", spelling="Isolated", kind="class",
+            resolved=True,
+        ))
+        db._conn.execute(
+            "INSERT INTO entity_node(id, kind) VALUES (?, ?)",
+            (isolated_id, int(EntityKind.CLASS)),
+        )
+        db._conn.commit()
 
         graph = EntityGraph(GraphQuery.from_connection(db._conn))
         yield graph
@@ -127,6 +136,12 @@ def test_entity_kind_mapping():
 
 def test_stats_and_kinds(eg):
     st = eg.stats()
+    expected_entities = eg._c.execute(
+        "SELECT COUNT(*) FROM ("
+        "SELECT id FROM entity_node UNION SELECT src_id FROM entity_edge "
+        "UNION SELECT dst_id FROM entity_edge)"
+    ).fetchone()[0]
+    assert st["entities"] == expected_entities
     assert st["edges"] >= 6
     assert "generalizes" in st["by_kind"]
     assert "composes" in st["by_kind"]
@@ -134,6 +149,29 @@ def test_stats_and_kinds(eg):
     assert EdgeKind.GENERALIZES in present
     assert EdgeKind.COMPOSES in present
     assert EdgeKind.USES in present
+
+
+def test_isolated_entity_node_is_counted_by_plan():
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Storage(os.path.join(tmp, "isolated.db"))
+        isolated_id = db.add_symbol(Symbol(
+            usr="USR::OnlyIsolated", spelling="OnlyIsolated", kind="class",
+            resolved=True,
+        ))
+        db._conn.execute(
+            "INSERT INTO entity_node(id, kind) VALUES (?, ?)",
+            (isolated_id, int(EntityKind.CLASS)),
+        )
+        db._conn.commit()
+        graph = EntityGraph(GraphQuery.from_connection(db._conn))
+        assert [node.id for node in graph.entities()] == [isolated_id]
+        assert list(graph.edges()) == []
+        assert graph.stats() == {
+            "entities": 1,
+            "edges": 0,
+            "by_kind": {},
+        }
+        db.close()
 
 
 def test_entities_and_find(eg):

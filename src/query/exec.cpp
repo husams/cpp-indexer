@@ -271,6 +271,13 @@ std::string col_expr(const std::string &field, const std::string &symbol_alias,
            "'graph_resolved_at'), '') <> '' THEN edge.count ELSE "
            "(SELECT COUNT(*) FROM edge_site WHERE edge_id = edge.id) END)";
   }
+  if (field == "effective_count") {
+    return "(CASE WHEN COALESCE((SELECT value FROM meta WHERE key = "
+           "'graph_resolved_at'), '') <> '' THEN edge.count WHEN "
+           "(SELECT COUNT(*) FROM edge_site WHERE edge_id = edge.id) > 0 "
+           "THEN (SELECT COUNT(*) FROM edge_site WHERE edge_id = edge.id) "
+           "WHEN edge.count <> 0 THEN edge.count ELSE 1 END)";
+  }
   if (field == "spelling") {
     return symbol_alias + ".spelling";
   }
@@ -1053,9 +1060,9 @@ private:
     return {};
   }
 
-  // view(entity) enforces the typed-view invariant: ids without an
-  // entity_node row are DROPPED, never surfaced as entity rows (PR #20
-  // review). view(symbol) is a pure relabel (every entity id is a symbol id).
+  // view(entity) selects the complete design-entity domain: materialized
+  // entity_node rows plus entity_edge endpoints. view(symbol) is a pure
+  // relabel (every entity id is a symbol id).
   void change_view(Stream &st, View level) {
     if (level != View::Symbol && level != View::Entity) {
       st.ids.clear();
@@ -1070,8 +1077,11 @@ private:
       std::vector<int64_t> kept;
       for (size_t at = 0; at < st.ids.size(); at += kIdChunk) {
         const size_t n = std::min(kIdChunk, st.ids.size() - at);
-        std::string sql = "SELECT id FROM entity_node WHERE id IN (" +
-                          placeholders(n) + ") ORDER BY id";
+        std::string sql =
+            "SELECT id FROM (SELECT id FROM entity_node UNION "
+            "SELECT src_id AS id FROM entity_edge UNION "
+            "SELECT dst_id AS id FROM entity_edge) WHERE id IN (" +
+            placeholders(n) + ") ORDER BY id";
         std::vector<SqlValue> args;
         args.reserve(n);
         for (size_t i = 0; i < n; ++i) {
@@ -1216,8 +1226,12 @@ private:
     }
     std::string sql = "SELECT s.id FROM symbol s";
     if (st.view == View::Entity) {
-      sql += " JOIN entity_node en ON en.id = s.id";
-    } else if (pred && pred_uses_entity_type(*pred)) {
+      sql += " JOIN (SELECT id FROM entity_node UNION "
+             "SELECT src_id AS id FROM entity_edge UNION "
+             "SELECT dst_id AS id FROM entity_edge) entity_ids "
+             "ON entity_ids.id = s.id";
+    }
+    if (pred && pred_uses_entity_type(*pred)) {
       sql += join_clause(true);
     }
     std::vector<SqlValue> args;
@@ -1251,7 +1265,8 @@ private:
       std::vector<LogicalKey> kept;
       for (const auto &key : st.keys) {
         const auto it = cells.find(key);
-        if (it != cells.end() && predicate_matches(pred, fields, it->second)) {
+        if (it != cells.end() &&
+            predicate_matches(st.view, pred, fields, it->second)) {
           kept.push_back(key);
         }
       }
@@ -1300,13 +1315,13 @@ private:
     return {pred.field};
   }
 
-  static bool predicate_matches(const Pred &pred,
+  static bool predicate_matches(View view, const Pred &pred,
                                 const std::vector<std::string> &fields,
                                 const std::vector<Cell> &cells) {
     if (pred.op == PredOp::AllOf || pred.op == PredOp::AnyOf) {
       const bool all = pred.op == PredOp::AllOf;
       for (const auto &kid : pred.kids) {
-        const bool matched = predicate_matches(kid, fields, cells);
+        const bool matched = predicate_matches(view, kid, fields, cells);
         if (all ? !matched : matched) {
           return !all;
         }
@@ -1314,7 +1329,7 @@ private:
       return all;
     }
     if (pred.op == PredOp::Not) {
-      return !predicate_matches(pred.kids.front(), fields, cells);
+      return !predicate_matches(view, pred.kids.front(), fields, cells);
     }
     const auto found = std::ranges::find(fields, pred.field);
     const auto at = std::ranges::distance(fields.begin(), found);
@@ -1334,7 +1349,17 @@ private:
         return cell_eq(value, Cell(item));
       });
     }
-    const Cell expected(pred.str_values.front());
+    Cell expected(pred.str_values.front());
+    if (view == View::Edge && pred.field == "kind") {
+      const auto relation =
+          std::ranges::find_if(catalog::kRelations, [&](const auto &item) {
+            return item.layer == catalog::View::Symbol &&
+                   item.name == pred.str_values.front();
+          });
+      if (relation != catalog::kRelations.end()) {
+        expected = Cell(static_cast<int64_t>(relation->id));
+      }
+    }
     return pred.op == PredOp::Eq ? equals(expected) : !equals(expected);
   }
 
@@ -3108,6 +3133,13 @@ private:
              "'graph_resolved_at'), '') <> '' THEN edge.count ELSE "
              "(SELECT COUNT(*) FROM edge_site WHERE edge_id = edge.id) END)";
     }
+    if (field == "effective_count" && view == View::Edge) {
+      return "(CASE WHEN COALESCE((SELECT value FROM meta WHERE key = "
+             "'graph_resolved_at'), '') <> '' THEN edge.count WHEN "
+             "(SELECT COUNT(*) FROM edge_site WHERE edge_id = edge.id) > 0 "
+             "THEN (SELECT COUNT(*) FROM edge_site WHERE edge_id = edge.id) "
+             "WHEN edge.count <> 0 THEN edge.count ELSE 1 END)";
+    }
     if ((field == "src_id" || field == "dst_id") && view == View::Site) {
       // A site row is always scoped to exactly one edge (edge_site.edge_id
       // is a foreign key into edge.id); exposing the edge's own stable
@@ -3196,9 +3228,9 @@ private:
       }
       if (view == View::Edge) {
         return std::set<std::string>{
-            "id",          "src_id",     "dst_id",
-            "kind",        "count",      "negative_count",
-            "base_access", "is_virtual", "vtable_slot"};
+            "id",         "src_id",         "dst_id",          "kind",
+            "count",      "negative_count", "effective_count", "base_access",
+            "is_virtual", "vtable_slot"};
       }
       return std::set<std::string>{};
     }();

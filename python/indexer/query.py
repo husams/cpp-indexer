@@ -1336,7 +1336,7 @@ class GraphQuery:
             start(codebase()) | view("edge") |
             nodes(all_of(predicates)) |
             plan_select([
-                "edge_id", "src_id", "dst_id", "kind", "count",
+                "edge_id", "src_id", "dst_id", "kind", "effective_count",
                 "base_access", "is_virtual", "negative_count",
             ]) |
             order_by(["negative_count", "kind", "edge_id"])
@@ -1808,17 +1808,9 @@ class GraphQuery:
             peer = self.get(src_id if direction == "in" else dst_id)
             if peer is None:
                 continue
-            cnt = count
-            site_count = self._c.execute(
-                "SELECT COUNT(*) FROM edge_site WHERE edge_id = ?", (edge_id,)
-            ).fetchone()[0]
-            if not self._is_resolved() or not cnt:
-                cnt = site_count or cnt or 1
-            elif site_count > cnt:
-                cnt = site_count
             out.append(Edge(edge_id=edge_id, kind=EDGE_NAMES[kind_id],
                             src_id=src_id, dst_id=dst_id, peer=peer,
-                            count=cnt, base_access=base_access,
+                            count=count, base_access=base_access,
                             is_virtual=is_virtual))
             if limit > 0 and len(out) >= limit:
                 break

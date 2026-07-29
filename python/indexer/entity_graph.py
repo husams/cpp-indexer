@@ -1402,15 +1402,22 @@ class EntityGraph:
 
     def stats(self) -> dict:
         """Counts: total edges, per-kind breakdown, distinct entity count."""
+        from .queryplan import count as plan_count, Executor
+        from .storage import Storage
+
+        entity_plan = (
+            plan_start(codebase()) | plan_nodes() | plan_view("entity") |
+            plan_count()
+        )
+        entity_count = Executor(
+            Storage.from_connection(self._c, self._q.db_path)
+        ).run(entity_plan.plan).scalar
         edges = list(self.edges())
         per_kind: dict[str, int] = {}
-        entity_ids: set[int] = set()
         for edge in edges:
             per_kind[edge.kind.verb] = per_kind.get(edge.kind.verb, 0) + 1
-            entity_ids.add(edge.src.id)
-            entity_ids.add(edge.dst.id)
         return {
-            "entities": len(entity_ids),
+            "entities": int(entity_count),
             "edges": len(edges),
             "by_kind": per_kind,
         }
@@ -1921,7 +1928,15 @@ class EntityQuery:
 
     def edges(self) -> Iterator[EntityEdge]:
         """Stream the edges produced by the most recent (non-transitive) step."""
-        return self._edges_src()
+        def stream() -> Iterator[EntityEdge]:
+            # Keep the terminal edge operation on the same QueryPlan boundary
+            # as nodes/count/name terminals. The edge adapter still hydrates
+            # only the exact keys emitted by the plan-backed source.
+            if self._plan is not None:
+                for _node in self._planned_nodes():
+                    pass
+            yield from self._edges_src()
+        return stream()
 
     def first(self) -> Optional[EntityNode]:
         """First entity, or ``None`` -- short-circuits the pipeline."""
