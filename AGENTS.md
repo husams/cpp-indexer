@@ -14,6 +14,43 @@ task:
 - **cidx-codebase-map** — where each concern lives across the two trees.
 - **cidx-modern-cpp** — mandatory C++23 modernization and scoped clang-tidy
   workflow for every change to project-owned C++.
+- **backlog** (`backlog-plugin:backlog`) — the only place planned work is
+  tracked; see [Backlog](#backlog-mandatory) below.
+
+## Backlog (mandatory)
+
+- **Load the `backlog` skill before planning, grooming, starting, reviewing, or
+  closing any work.** Features, stories, subtasks, acceptance criteria,
+  dependencies, review threads and PR links live there — never in Markdown
+  checklists, ad-hoc SQLite, TODO comments, or chat.
+- **Store:** shared PostgreSQL (`BACKLOG_DB=postgres`), project slug
+  `cpp-indexer`, resolved from the repository directory name. Confirm with
+  `backlog where` before acting; `backlog board` / `backlog next --actor <you>`
+  is the way in.
+- **Transition workflow:** `.backlog/workflow.yaml` — the shipped default flow
+  (Created → Ready → In Progress → In Review → Accepted → Done, with an
+  Incomplete refinement path and a Needs Work review loop). `backlog statuses`
+  prints the live per-type statuses and their gates.
+- **Never request a destination status.** Run `backlog actions <KEY>`, then
+  `backlog action <KEY> <ACTION> --actor <you>`. The workflow chooses the state
+  and runs the gates; a refusal (exit 1) is the rule, not an obstacle to work
+  around.
+- **Record Git state as it happens:** `backlog set <KEY> --branch <branch>`
+  before `work.started`, and `backlog pr set <KEY> --url <URL> --state open` as
+  soon as the PR exists — do not wait for the `pr_recorded` gate to fail.
+- **CI mirrors the PR into the backlog.** `.github/workflows/backlog.yml`
+  records `pr.*` and `check.*` actions from GitHub, but only when the branch —
+  or failing that the PR title — carries the backlog key (`S-070-short-desc`,
+  `[S-070] …`). Without a key the sync is skipped, so name the branch after the
+  backlog key, not only the Linear issue.
+- **Never merge unless `backlog gate <KEY> --for merge` exits 0**, and record
+  `backlog pr set <KEY> --state merged` immediately after merging.
+- **Every review thread needs a reply and a reviewer decision.** Use the
+  `backlog review` commands (`open` / `reply` / `inbox`); `artifact add` is for
+  durable documents, not feedback.
+- **Never touch the store directly** — no `sqlite3`, no `psql`, no SQL against
+  `.backlog/*.db` or the PostgreSQL schema. Direct access bypasses the flow,
+  the gates, and the audit trail.
 
 ## Modern C++ and clang-tidy (mandatory)
 
@@ -77,7 +114,8 @@ task:
 - When discussing or asking about design features, Sol may be used with High effort.
 - When creating a new thread, do not copy the existing context. Summarize the
   context and include only the information needed for the task.
-- For implementations involving multiple stories, track progress in Markdown
-  files or a SQLite database.
+- For implementations involving multiple stories, track progress in the backlog
+  (see [Backlog](#backlog-mandatory)) — never in Markdown files or a hand-rolled
+  database.
 - When asked for the status of a story, provide only a one-line summary. Give
   details only when explicitly requested.

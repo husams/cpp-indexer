@@ -1,0 +1,180 @@
+version: 1
+name: default
+
+states:
+  - slug: created
+    display: Created
+    category: backlog
+    initial: true
+
+  - slug: incomplete
+    display: Incomplete
+    category: backlog
+
+  - slug: ready
+    display: Ready
+    category: ready
+
+  - slug: in_progress
+    display: In Progress
+    category: active
+
+  - slug: in_review
+    display: In Review
+    category: review
+
+  - slug: needs_work
+    display: Needs Work
+    category: active
+
+  - slug: accepted
+    display: Accepted
+    category: done
+    satisfies_dependencies: true
+
+  - slug: done
+    display: Done
+    category: done
+    satisfies_dependencies: true
+    terminal: true
+
+transitions:
+  # Backlog refinement
+  - task_types: [feature, story, subtask]
+    from: created
+    action: refinement.marked_incomplete
+    to: incomplete
+
+  - task_types: [feature, story, subtask]
+    from: created
+    action: refinement.accepted
+    to: ready
+
+  - task_types: [feature, story, subtask]
+    from: incomplete
+    action: refinement.accepted
+    to: ready
+
+  # A blocker thread is not a task transition. The review subsystem emits
+  # feedback.resolved only when every blocker was accepted by a reviewer.
+  - task_types: [feature, story, subtask]
+    from: incomplete
+    action: feedback.resolved
+    to: ready
+
+  # A new or reopened blocker invalidates refinement readiness.
+  - task_types: [feature, story, subtask]
+    from: ready
+    action: feedback.posted
+    to: incomplete
+
+  - task_types: [feature, story, subtask]
+    from: ready
+    action: feedback.reopened
+    to: incomplete
+
+  # Implementation
+  - task_types: [feature, story, subtask]
+    from: ready
+    action: work.started
+    to: in_progress
+    gates: [dependencies_clear]
+
+  - task_types: [feature, story, subtask]
+    from: needs_work
+    action: work.resumed
+    to: in_progress
+
+  - task_types: [feature, story, subtask]
+    from: needs_work
+    action: work.started
+    to: in_progress
+
+  # Submission for implementation review
+  - task_types: [feature, story, subtask]
+    from: in_progress
+    action: work.completed
+    to: in_review
+
+  - task_types: [feature, story, subtask]
+    from: in_progress
+    action: review.submitted
+    to: in_review
+
+  - task_types: [story, subtask]
+    from: in_progress
+    action: pr.created
+    to: in_review
+
+  - task_types: [story, subtask]
+    from: in_progress
+    action: pr.marked_ready
+    to: in_review
+
+  # Review requested more work
+  - task_types: [feature, story, subtask]
+    from: in_review
+    action: review.changes_requested
+    to: needs_work
+
+  - task_types: [feature, story, subtask]
+    from: in_review
+    action: delivery.rejected
+    to: needs_work
+
+  - task_types: [feature, story, subtask]
+    from: in_review
+    action: check.failed
+    to: needs_work
+
+  - task_types: [story, subtask]
+    from: in_review
+    action: pr.changes_requested
+    to: needs_work
+
+  - task_types: [story, subtask]
+    from: in_review
+    action: pr.closed
+    to: needs_work
+
+  - task_types: [feature, story, subtask]
+    from: accepted
+    action: check.failed
+    to: needs_work
+
+  - task_types: [story, subtask]
+    from: accepted
+    action: pr.changes_requested
+    to: needs_work
+
+  # Implementation accepted
+  - task_types: [feature, story, subtask]
+    from: in_review
+    action: review.approved
+    to: accepted
+    gates: [review_threads_closed, children_complete, required_validations_pass]
+
+  - task_types: [feature, story, subtask]
+    from: in_review
+    action: delivery.accepted
+    to: accepted
+    gates: [review_threads_closed, children_complete, required_validations_pass]
+
+  - task_types: [story, subtask]
+    from: in_review
+    action: pr.approved
+    to: accepted
+    gates: [review_threads_closed, children_complete, required_validations_pass]
+
+  # Delivery completed
+  - task_types: [feature]
+    from: accepted
+    action: delivery.released
+    to: done
+    gates: [children_complete]
+
+  - task_types: [story, subtask]
+    from: accepted
+    action: pr.merged
+    to: done
+    gates: [review_threads_closed, children_complete, pr_merged]

@@ -1,0 +1,195 @@
+name: Sync pull requests to Backlog
+
+# Adapted from husams/backlog-plugin docs/examples/github-actions.yml.
+# Deviations from the upstream example, and why:
+#   * runs-on: cpp-indexer-runner — the self-hosted ARC scale set in the Talos
+#     cluster (namespace ci-cd-pipelines). The shared backlog lives on
+#     postgres.senussi.me, which only resolves and answers on the LAN, so a
+#     GitHub-hosted runner cannot reach it.
+#   * the runner image is minimal, so git/jq are installed explicitly (the
+#     same pattern the other workflows in this repo use).
+#   * the CI workflow that drives check.* actions is "CIDX verification".
+#   * a pull request with no backlog key in its branch or title is skipped,
+#     not failed — branches here are frequently named after the Linear issue
+#     (codex/hse-27-...) rather than the backlog key.
+#
+# NEVER add a step that checks out, downloads, or executes the pull request's
+# code: this workflow runs as pull_request_target with access to the backlog
+# credentials.
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+      - converted_to_draft
+      - closed
+  pull_request_review:
+    types:
+      - submitted
+      - dismissed
+  workflow_run:
+    workflows:
+      - CIDX verification
+    types:
+      - completed
+  # Manual smoke test: proves the runner reaches postgres.senussi.me. It stops
+  # after "Show backlog store" because a dispatch carries no pull request.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+
+concurrency:
+  group: backlog-${{ github.event.pull_request.number || github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: cpp-indexer-runner
+    env:
+      BACKLOG_DB: postgres
+      BACK_LOG_URL: ${{ secrets.BACK_LOG_URL }}
+      BACKLOG_PROJECT: ${{ vars.BACKLOG_PROJECT }}
+
+    steps:
+      - name: Install prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ca-certificates git jq
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install Backlog
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/husams/backlog-plugin \
+            "$RUNNER_TEMP/backlog-plugin"
+
+      - name: Show backlog store
+        shell: bash
+        # Prints backend, scope, project and host — never the credentials — so a
+        # connection or project-slug problem is obvious before any action runs.
+        run: |
+          "$RUNNER_TEMP/backlog-plugin/skills/backlog/bin/backlog" where
+
+      - name: Apply GitHub event
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          EVENT_FILE: ${{ github.event_path }}
+          ACTOR: github:${{ github.actor }}
+        run: |
+          set -euo pipefail
+
+          BL="$RUNNER_TEMP/backlog-plugin/skills/backlog/bin/backlog"
+
+          if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+            pr_count="$(jq '.workflow_run.pull_requests | length' "$EVENT_FILE")"
+            if [[ "$pr_count" == "0" ]]; then
+              echo "The workflow run is not associated with a pull request."
+              exit 0
+            fi
+            branch="$(jq -r '.workflow_run.head_branch' "$EVENT_FILE")"
+            title="$(jq -r '.workflow_run.display_title // ""' "$EVENT_FILE")"
+            pr_number="$(jq -r '.workflow_run.pull_requests[0].number' "$EVENT_FILE")"
+            pr_url="https://github.com/$GITHUB_REPOSITORY/pull/$pr_number"
+            conclusion="$(jq -r '.workflow_run.conclusion' "$EVENT_FILE")"
+          else
+            branch="$(jq -r '.pull_request.head.ref' "$EVENT_FILE")"
+            title="$(jq -r '.pull_request.title // ""' "$EVENT_FILE")"
+            pr_url="$(jq -r '.pull_request.html_url' "$EVENT_FILE")"
+          fi
+
+          # The backlog key may live in the branch (S-004-add-cache,
+          # feature/S-004-add-cache, T-012/write-tests) or, for branches named
+          # after the Linear issue, in the pull-request title ([S-070] ...).
+          task_key=""
+          for candidate in "$branch" "$title"; do
+            if [[ "$candidate" =~ (^|[^A-Za-z0-9])([FfSsTt]-[0-9]+)([^A-Za-z0-9]|$) ]]; then
+              task_key="$(printf '%s' "${BASH_REMATCH[2]}" | tr '[:lower:]' '[:upper:]')"
+              break
+            fi
+          done
+
+          if [[ -z "$task_key" ]]; then
+            echo "No backlog key found in branch '$branch' or title '$title'."
+            echo "Name the branch S-004-short-description, or put the key in"
+            echo "the pull-request title, for this pull request to be synced."
+            exit 0
+          fi
+
+          echo "Backlog task: $task_key"
+
+          if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+            case "$conclusion" in
+              failure) action="check.failed" ;;
+              timed_out) action="check.timed_out" ;;
+              cancelled) action="check.cancelled" ;;
+              success) action="check.passed" ;;
+              *) exit 0 ;;
+            esac
+            "$BL" action "$task_key" "$action" \
+              --actor "$ACTOR" \
+              --operation "github.workflow_run" \
+              --parameter "conclusion=$conclusion" \
+              --parameter "pull_request_url=$pr_url"
+            exit 0
+          fi
+
+          if [[ "$EVENT_NAME" == "pull_request_review" ]]; then
+            review_state="$(jq -r '.review.state' "$EVENT_FILE")"
+            case "$EVENT_ACTION:$review_state" in
+              submitted:approved)
+                "$BL" pr set "$task_key" --url "$pr_url" --review-state approved \
+                  --actor "$ACTOR"
+                ;;
+              submitted:changes_requested)
+                "$BL" pr set "$task_key" --url "$pr_url" \
+                  --review-state changes_requested --actor "$ACTOR"
+                ;;
+              dismissed:*)
+                "$BL" pr set "$task_key" --url "$pr_url" --review-state pending \
+                  --actor "$ACTOR"
+                "$BL" action "$task_key" "review.dismissed" \
+                  --actor "$ACTOR" --operation "github.pull_request_review.dismissed"
+                ;;
+              *) echo "Review recorded; no transition action applies." ;;
+            esac
+            exit 0
+          fi
+
+          case "$EVENT_ACTION" in
+            opened|reopened|synchronize|ready_for_review)
+              draft="$(jq -r '.pull_request.draft' "$EVENT_FILE")"
+              if [[ "$draft" == "true" ]]; then
+                "$BL" pr set "$task_key" --url "$pr_url" --state draft \
+                  --actor "$ACTOR"
+              else
+                "$BL" pr set "$task_key" --url "$pr_url" --state open \
+                  --actor "$ACTOR"
+              fi
+              ;;
+            converted_to_draft)
+              "$BL" pr set "$task_key" --url "$pr_url" --state draft \
+                --actor "$ACTOR"
+              ;;
+            closed)
+              merged="$(jq -r '.pull_request.merged' "$EVENT_FILE")"
+              if [[ "$merged" == "true" ]]; then
+                "$BL" pr set "$task_key" --url "$pr_url" --state merged \
+                  --actor "$ACTOR"
+              else
+                "$BL" pr set "$task_key" --url "$pr_url" --state closed \
+                  --actor "$ACTOR"
+              fi
+              ;;
+          esac
