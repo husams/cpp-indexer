@@ -21,6 +21,8 @@ struct IndexRequest {
   bool autoderive_labels = true;
   bool json = false;
   std::optional<std::string> index;
+  std::optional<std::string> profile_json;
+  std::optional<std::string> profile_sqlite_configuration;
 };
 
 enum class QueryOutput : std::uint8_t { human, json };

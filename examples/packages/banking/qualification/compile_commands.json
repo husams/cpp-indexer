@@ -1,0 +1,7 @@
+[
+  {
+    "directory": "examples/packages/banking/qualification",
+    "command": "clang++ -std=c++23 -c banking.cpp",
+    "file": "banking.cpp"
+  }
+]

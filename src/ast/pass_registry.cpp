@@ -122,6 +122,15 @@ void PassMetrics::note_emitted(std::size_t count) {
   enforce(emitted_facts, budget_.max_emitted_facts, "emitted");
 }
 
+void PassMetrics::note_fact_family(std::string_view family,
+                                   std::size_t attempted, std::size_t persisted,
+                                   std::size_t duplicates) {
+  auto &counts = fact_families[std::string(family)];
+  counts.attempted += attempted;
+  counts.persisted += persisted;
+  counts.duplicates += duplicates;
+}
+
 void PassMetrics::note_diagnostic(std::string message) {
   ++diagnostics;
   diagnostic_messages.push_back(std::move(message));
@@ -148,7 +157,9 @@ auto BudgetedStatementFactPorts::lookup_symbol_id(
 auto BudgetedStatementFactPorts::mint_symbol(const MintRequest &request)
     -> std::int64_t {
   metrics_.note_emitted();
-  return ports_.mint_symbol(request);
+  const auto id = ports_.mint_symbol(request);
+  metrics_.note_fact_family("symbols", 1, 1);
+  return id;
 }
 auto BudgetedStatementFactPorts::file_id_for_path(const std::string &path)
     -> std::optional<std::int64_t> {
@@ -167,35 +178,45 @@ auto BudgetedStatementFactPorts::symbol_ids_by_qual_name_kind(
 auto BudgetedStatementFactPorts::add_edge(const EdgeRecord &edge)
     -> std::int64_t {
   metrics_.note_emitted();
-  return ports_.add_edge(edge);
+  const auto id = ports_.add_edge(edge);
+  metrics_.note_fact_family("relations", 1, 1);
+  return id;
 }
 auto BudgetedStatementFactPorts::ensure_edge(const EdgeRecord &edge)
     -> std::int64_t {
   metrics_.note_emitted();
-  return ports_.ensure_edge(edge);
+  const auto id = ports_.ensure_edge(edge);
+  metrics_.note_fact_family("relations", 1, 1);
+  return id;
 }
 void BudgetedStatementFactPorts::add_edge_site(const EdgeSiteRecord &site) {
   metrics_.note_emitted();
   ports_.add_edge_site(site);
+  metrics_.note_fact_family("relations", 1, 1);
 }
 void BudgetedStatementFactPorts::add_call_arg(const CallArgRecord &arg) {
   metrics_.note_emitted();
   ports_.add_call_arg(arg);
+  metrics_.note_fact_family("relations", 1, 1);
 }
 void BudgetedStatementFactPorts::add_template_param(
     const TemplateParamRecord &param) {
   metrics_.note_emitted();
   ports_.add_template_param(param);
+  metrics_.note_fact_family("types", 1, 1);
 }
 void BudgetedStatementFactPorts::add_template_arg(
     const TemplateArgRecord &arg) {
   metrics_.note_emitted();
   ports_.add_template_arg(arg);
+  metrics_.note_fact_family("types", 1, 1);
 }
 auto BudgetedStatementFactPorts::intern_type_node(const TypeNodeRecord &node)
     -> std::int64_t {
   metrics_.note_emitted();
-  return ports_.intern_type_node(node);
+  const auto id = ports_.intern_type_node(node);
+  metrics_.note_fact_family("types", 1, 1);
+  return id;
 }
 void BudgetedStatementFactPorts::add_type_edge(std::int64_t src_id,
                                                std::int64_t kind,
@@ -203,21 +224,25 @@ void BudgetedStatementFactPorts::add_type_edge(std::int64_t src_id,
                                                std::int64_t dst_id) {
   metrics_.note_emitted();
   ports_.add_type_edge(src_id, kind, position, dst_id);
+  metrics_.note_fact_family("types", 1, 1);
 }
 void BudgetedStatementFactPorts::replace_parameters(
     std::int64_t owner_id, const std::vector<ParameterRecord> &parameters) {
   metrics_.note_emitted(parameters.size());
   ports_.replace_parameters(owner_id, parameters);
+  metrics_.note_fact_family("types", parameters.size(), parameters.size());
 }
 void BudgetedStatementFactPorts::add_symbol_type(std::int64_t symbol_id,
                                                  std::int64_t kind,
                                                  std::int64_t type_id) {
   metrics_.note_emitted();
   ports_.add_symbol_type(symbol_id, kind, type_id);
+  metrics_.note_fact_family("types", 1, 1);
 }
 void BudgetedStatementFactPorts::emit(const EvidenceRecord &evidence) {
   metrics_.note_emitted();
   ports_.emit(evidence);
+  metrics_.note_fact_family("evidence", 1, 1);
 }
 
 BudgetedDeclarationPassPorts::BudgetedDeclarationPassPorts(
@@ -232,7 +257,9 @@ auto BudgetedDeclarationPassPorts::lookup_symbol_id(
 auto BudgetedDeclarationPassPorts::mint_symbol(const MintRequest &request)
     -> std::int64_t {
   metrics_.note_emitted();
-  return ports_.mint_symbol(request);
+  const auto id = ports_.mint_symbol(request);
+  metrics_.note_fact_family("symbols", 1, 1);
+  return id;
 }
 auto BudgetedDeclarationPassPorts::file_id_for_path(const std::string &path)
     -> std::optional<std::int64_t> {
@@ -251,35 +278,45 @@ auto BudgetedDeclarationPassPorts::symbol_ids_by_qual_name_kind(
 auto BudgetedDeclarationPassPorts::add_edge(const EdgeRecord &edge)
     -> std::int64_t {
   metrics_.note_emitted();
-  return ports_.add_edge(edge);
+  const auto id = ports_.add_edge(edge);
+  metrics_.note_fact_family("relations", 1, 1);
+  return id;
 }
 auto BudgetedDeclarationPassPorts::ensure_edge(const EdgeRecord &edge)
     -> std::int64_t {
   metrics_.note_emitted();
-  return ports_.ensure_edge(edge);
+  const auto id = ports_.ensure_edge(edge);
+  metrics_.note_fact_family("relations", 1, 1);
+  return id;
 }
 void BudgetedDeclarationPassPorts::add_edge_site(const EdgeSiteRecord &site) {
   metrics_.note_emitted();
   ports_.add_edge_site(site);
+  metrics_.note_fact_family("relations", 1, 1);
 }
 void BudgetedDeclarationPassPorts::add_call_arg(const CallArgRecord &arg) {
   metrics_.note_emitted();
   ports_.add_call_arg(arg);
+  metrics_.note_fact_family("relations", 1, 1);
 }
 void BudgetedDeclarationPassPorts::add_template_param(
     const TemplateParamRecord &param) {
   metrics_.note_emitted();
   ports_.add_template_param(param);
+  metrics_.note_fact_family("types", 1, 1);
 }
 void BudgetedDeclarationPassPorts::add_template_arg(
     const TemplateArgRecord &arg) {
   metrics_.note_emitted();
   ports_.add_template_arg(arg);
+  metrics_.note_fact_family("types", 1, 1);
 }
 auto BudgetedDeclarationPassPorts::intern_type_node(const TypeNodeRecord &node)
     -> std::int64_t {
   metrics_.note_emitted();
-  return ports_.intern_type_node(node);
+  const auto id = ports_.intern_type_node(node);
+  metrics_.note_fact_family("types", 1, 1);
+  return id;
 }
 void BudgetedDeclarationPassPorts::add_type_edge(std::int64_t src_id,
                                                  std::int64_t kind,
@@ -287,21 +324,25 @@ void BudgetedDeclarationPassPorts::add_type_edge(std::int64_t src_id,
                                                  std::int64_t dst_id) {
   metrics_.note_emitted();
   ports_.add_type_edge(src_id, kind, position, dst_id);
+  metrics_.note_fact_family("types", 1, 1);
 }
 void BudgetedDeclarationPassPorts::replace_parameters(
     std::int64_t owner_id, const std::vector<ParameterRecord> &parameters) {
   metrics_.note_emitted(parameters.size());
   ports_.replace_parameters(owner_id, parameters);
+  metrics_.note_fact_family("types", parameters.size(), parameters.size());
 }
 void BudgetedDeclarationPassPorts::add_symbol_type(std::int64_t symbol_id,
                                                    std::int64_t kind,
                                                    std::int64_t type_id) {
   metrics_.note_emitted();
   ports_.add_symbol_type(symbol_id, kind, type_id);
+  metrics_.note_fact_family("types", 1, 1);
 }
 void BudgetedPresentationIntentEmitter::emit(const PresentationIntent &intent) {
   metrics_.note_emitted();
   emitter_.emit(intent);
+  metrics_.note_fact_family("presentation_intents", 1, 1);
 }
 
 BudgetedNamespacePassPorts::BudgetedNamespacePassPorts(
@@ -316,7 +357,9 @@ auto BudgetedNamespacePassPorts::lookup_symbol_id(
 auto BudgetedNamespacePassPorts::mint_symbol(const MintRequest &request)
     -> std::int64_t {
   metrics_.note_emitted();
-  return ports_.mint_symbol(request);
+  const auto id = ports_.mint_symbol(request);
+  metrics_.note_fact_family("symbols", 1, 1);
+  return id;
 }
 auto BudgetedNamespacePassPorts::file_id_for_path(const std::string &path)
     -> std::optional<std::int64_t> {
@@ -335,30 +378,38 @@ auto BudgetedNamespacePassPorts::symbol_ids_by_qual_name_kind(
 auto BudgetedNamespacePassPorts::add_edge(const EdgeRecord &edge)
     -> std::int64_t {
   metrics_.note_emitted();
-  return ports_.add_edge(edge);
+  const auto id = ports_.add_edge(edge);
+  metrics_.note_fact_family("relations", 1, 1);
+  return id;
 }
 auto BudgetedNamespacePassPorts::ensure_edge(const EdgeRecord &edge)
     -> std::int64_t {
   metrics_.note_emitted();
-  return ports_.ensure_edge(edge);
+  const auto id = ports_.ensure_edge(edge);
+  metrics_.note_fact_family("relations", 1, 1);
+  return id;
 }
 void BudgetedNamespacePassPorts::add_edge_site(const EdgeSiteRecord &site) {
   metrics_.note_emitted();
   ports_.add_edge_site(site);
+  metrics_.note_fact_family("relations", 1, 1);
 }
 void BudgetedNamespacePassPorts::add_call_arg(const CallArgRecord &arg) {
   metrics_.note_emitted();
   ports_.add_call_arg(arg);
+  metrics_.note_fact_family("relations", 1, 1);
 }
 void BudgetedNamespacePassPorts::add_template_param(
     const TemplateParamRecord &param) {
   metrics_.note_emitted();
   ports_.add_template_param(param);
+  metrics_.note_fact_family("types", 1, 1);
 }
 void BudgetedNamespacePassPorts::add_template_arg(
     const TemplateArgRecord &arg) {
   metrics_.note_emitted();
   ports_.add_template_arg(arg);
+  metrics_.note_fact_family("types", 1, 1);
 }
 
 BudgetedDefinitionScopeEmitter::BudgetedDefinitionScopeEmitter(
@@ -370,14 +421,17 @@ auto BudgetedDefinitionScopeEmitter::get_or_create_definition(
     std::int64_t col, std::int64_t end_line, std::int64_t end_col,
     const std::optional<std::string> &init_text) -> std::int64_t {
   metrics_.note_emitted();
-  return definitions_.get_or_create_definition(symbol_id, file_id, line, col,
-                                               end_line, end_col, init_text);
+  const auto id = definitions_.get_or_create_definition(
+      symbol_id, file_id, line, col, end_line, end_col, init_text);
+  metrics_.note_fact_family("definitions", 1, 1);
+  return id;
 }
 void BudgetedDefinitionScopeEmitter::add_def_edge(std::int64_t definition_id,
                                                   std::int64_t destination_id,
                                                   std::int64_t kind) {
   metrics_.note_emitted();
   definitions_.add_def_edge(definition_id, destination_id, kind);
+  metrics_.note_fact_family("relations", 1, 1);
 }
 auto BudgetedDefinitionScopeEmitter::body_edge_count(std::int64_t symbol_id)
     -> std::size_t {
@@ -385,8 +439,10 @@ auto BudgetedDefinitionScopeEmitter::body_edge_count(std::int64_t symbol_id)
 }
 void BudgetedDefinitionScopeEmitter::copy_body_edges_to_def_edge(
     std::int64_t definition_id, std::int64_t symbol_id) {
-  metrics_.note_emitted(body_edge_count(symbol_id));
+  const auto count = body_edge_count(symbol_id);
+  metrics_.note_emitted(count);
   definitions_.copy_body_edges_to_def_edge(definition_id, symbol_id);
+  metrics_.note_fact_family("relations", count, count);
 }
 
 auto PassExecutionReport::find(const std::string &id) const

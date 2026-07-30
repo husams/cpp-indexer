@@ -74,7 +74,12 @@ target_compile_definitions(result_protocol_test PRIVATE
 # golden shared with python/tests/test_queryplan.py (regenerate with
 # CIDX_UPDATE_GOLDEN=1 -- keep both suites in sync).
 target_compile_definitions(query_plan_test PRIVATE
-  CIDX_CXQ_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/golden/cxq_plans.txt")
+  CIDX_CXQ_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/golden/cxq_plans.txt"
+  CIDX_LEGACY_GRAPH_PLAN_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/golden/legacy_graph_query_plans.txt")
+
+target_compile_definitions(graph_query_test PRIVATE
+  CIDX_LEGACY_QUERY_INVENTORY="${CMAKE_CURRENT_SOURCE_DIR}/golden/legacy_query_operations.txt"
+  CIDX_GRAPH_QUERY_HEADER="${CMAKE_CURRENT_SOURCE_DIR}/../src/graph/query.hpp")
 
 # S02: the migration suite opens committed Python-generated fixture DBs
 # (copied to a temp dir first — the fixtures themselves stay read-only).

@@ -15,6 +15,23 @@ namespace {
 
 constexpr std::size_t kSymbolIdSetThreshold = 32;
 
+auto symbol_fact_count(const SymbolRecord &symbol) -> std::size_t {
+  return 1 + static_cast<std::size_t>(symbol.decl_line.has_value());
+}
+
+void note_symbol_attempt(PassMetrics *metrics, const SymbolRecord &symbol) {
+  if (metrics != nullptr) {
+    metrics->note_emitted(symbol_fact_count(symbol));
+  }
+}
+
+void note_symbol_persisted(PassMetrics *metrics, const SymbolRecord &symbol) {
+  if (metrics != nullptr) {
+    const auto count = symbol_fact_count(symbol);
+    metrics->note_fact_family("symbols", count, count);
+  }
+}
+
 bool record_symbol_id(std::vector<int64_t> &ids,
                       std::unordered_set<int64_t> &set, int64_t id) {
   const bool repeated = ids.size() < kSymbolIdSetThreshold
@@ -280,9 +297,7 @@ void StorageSymbolSink::emit(const SymbolRecord &s) {
     return;
   }
   FileBucket &bucket = buckets_[current_file_id_];
-  if (metrics_ != nullptr) {
-    metrics_->note_emitted(1 + (s.decl_line ? 1 : 0));
-  }
+  note_symbol_attempt(metrics_, s);
 
   const cidx::Symbol sym = make_symbol(
       s, current_file_id_,
@@ -306,6 +321,7 @@ void StorageSymbolSink::emit(const SymbolRecord &s) {
     ports_.symbols_write.add_decl_site(symbol_id, sym);
     apply_decl_site_to_cache(cached.persisted, sym);
     record_symbol_id(bucket.symbol_ids, bucket.symbol_id_set, symbol_id);
+    note_symbol_persisted(metrics_, s);
     return;
   }
   const std::optional<cidx::Symbol> existing =
@@ -326,6 +342,7 @@ void StorageSymbolSink::emit(const SymbolRecord &s) {
                                .persisted = std::move(persisted)});
     resolved_identity_cache_hashes_.insert(identity_cache_hash(sym));
   }
+  note_symbol_persisted(metrics_, s);
 }
 
 } // namespace cidx::ast

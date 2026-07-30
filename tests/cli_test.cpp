@@ -747,6 +747,34 @@ TEST_CASE("args: index collects FILE... and --source") {
   CHECK(*pa.source == "comp");
 }
 
+TEST_CASE("args: index accepts profiling paths and documents the opt-in flag") {
+  const cli::ParsedArgs parsed = cli::parse_args(
+      {"index", "a.cpp", "--profile-json", "/tmp/cidx-profile.json",
+       "--profile-sqlite-config", "/tmp/cidx-sqlite.json"});
+  CHECK(parsed.profile_json ==
+        std::optional<std::string>{"/tmp/cidx-profile.json"});
+  CHECK(parsed.profile_sqlite_configuration ==
+        std::optional<std::string>{"/tmp/cidx-sqlite.json"});
+
+  const cli::ParsedArgs help = cli::parse_args({"index", "--help"});
+  REQUIRE(help.help_text);
+  CHECK(help.help_text->find("--profile-json") != std::string::npos);
+
+  const ParseFail missing_profile =
+      parse_fail({"index", "--profile-sqlite-config", "/tmp/sqlite.json"});
+  CHECK(missing_profile.code == 2);
+  CHECK(missing_profile.msg.find("requires --profile-json") !=
+        std::string::npos);
+  CHECK(parse_fail({"index", "--profile-json"}).code == 2);
+
+  const cli::ParsedArgs resolve = cli::parse_args(
+      {"resolve", "--profile-json", "/tmp/cidx-resolve-profile.json"});
+  CHECK(resolve.profile_json ==
+        std::optional<std::string>{"/tmp/cidx-resolve-profile.json"});
+  CHECK(parse_fail({"resolve", "--profile-sqlite-config", "/tmp/sqlite.json"})
+            .code == 2);
+}
+
 TEST_CASE("args: index status and explain expose fact-set readiness") {
   cli::ParsedArgs pa =
       cli::parse_args({"index", "status", "--fact-set", "entity-graph"});
@@ -838,6 +866,19 @@ TEST_CASE("resolve compatibility adapter reports transform failure") {
   CHECK_FALSE(db.graph_resolved());
 }
 
+TEST_CASE("resolve profiling records transform wall time") {
+  const std::string cache = make_temp_dir();
+  const std::string profile_path = cache + "/resolve-profile.json";
+  const CmdResult result =
+      run_cli({"resolve", "--profile-json", profile_path}, cache);
+  REQUIRE(result.rc == 0);
+  const std::string profile = read_file(profile_path);
+  const std::string key = "\"transforms\": ";
+  const std::size_t position = profile.find(key);
+  REQUIRE(position != std::string::npos);
+  CHECK(std::stod(profile.substr(position + key.size())) > 0.0);
+}
+
 TEST_CASE("args: --version sets the version flag (top level only)") {
   // $ python3 -m indexer --version   -> "cidx 0.13.0" on stdout, exit 0
   cli::ParsedArgs pa = cli::parse_args({"--version"});
@@ -883,16 +924,22 @@ TEST_CASE("args: -h returns help text; validation beats help") {
   CHECK(pa.help_text->find("show at most N matches (0 = all; default 25)") !=
         std::string::npos);
 
-  // resolve takes no options other than -h (the destructive --rebuild flag
-  // was removed in v0.4.1 — it cleared all edges with no re-extract path).
+  // resolve exposes only telemetry options in addition to -h (the destructive
+  // --rebuild flag was removed in v0.4.1 — it cleared all edges with no
+  // re-extract path).
   pa = cli::parse_args({"resolve", "-h"});
   REQUIRE(pa.help_text);
-  CHECK(*pa.help_text ==
-        "finalize cross-repo edges and roll up edge counts\n"
-        "Usage: cidx resolve [OPTIONS]\n"
-        "\n"
-        "Options:\n"
-        "  -h,--help                   Print this help message and exit\n");
+  CHECK(
+      *pa.help_text ==
+      "finalize cross-repo edges and roll up edge counts\n"
+      "Usage: cidx resolve [OPTIONS]\n"
+      "\n"
+      "Options:\n"
+      "  -h,--help                   Print this help message and exit\n"
+      "  --profile-json TEXT         write opt-in transform telemetry to PATH\n"
+      "  --profile-sqlite-config TEXT\n"
+      "                              apply benchmark-only SQLite settings from "
+      "PATH\n");
 
   // Subcommand help carries the full "cidx file list" usage line.
   pa = cli::parse_args({"file", "list", "-h"});

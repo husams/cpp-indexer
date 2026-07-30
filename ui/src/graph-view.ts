@@ -50,6 +50,124 @@ export interface EvidenceReference {
   artifact?: string;
 }
 
+export type OverlayKind = "evidence" | "diff" | "effect" | "proof" | "counterexample";
+export type OverlayIdentityState = "added" | "removed" | "changed" | "invalidated" | "unchanged";
+export type EffectState = "known" | "unknown" | "conditional";
+export type ProofState = "proved" | "open" | "refuted" | "conditional" | "assumed" | "inferred";
+
+/** Provenance supplied by the canonical result producer; the UI only displays it. */
+export interface OverlayIdentity {
+  resultId: string;
+  evidenceId?: string;
+  source?: SourceLocation;
+  limitation?: string;
+}
+
+export interface EvidenceOverlayItem {
+  id: string;
+  label: string;
+  strength: "direct" | "bounded" | "inferred" | "assumed";
+  identity: OverlayIdentity;
+}
+
+export interface EvidencePathStep {
+  sequence: number;
+  label: string;
+  relation?: string;
+  identity: OverlayIdentity;
+}
+
+export interface EvidenceOverlay {
+  kind: "evidence";
+  title: string;
+  items: readonly EvidenceOverlayItem[];
+  path: readonly EvidencePathStep[];
+}
+
+export interface DiffOverlayEntry {
+  id: string;
+  label: string;
+  state: OverlayIdentityState;
+  oldRef?: PortableReference;
+  newRef?: PortableReference;
+  identity: OverlayIdentity;
+}
+
+export interface DiffOverlay {
+  kind: "diff";
+  title: string;
+  oldWorkspace: IdentityDescriptor;
+  newWorkspace: IdentityDescriptor;
+  oldFactSet: IdentityDescriptor;
+  newFactSet: IdentityDescriptor;
+  entries: readonly DiffOverlayEntry[];
+}
+
+export interface EffectOverlayElement {
+  id: string;
+  label: string;
+  state: EffectState;
+  identity: OverlayIdentity;
+}
+
+export interface EffectOverlay {
+  kind: "effect";
+  title: string;
+  summary: string;
+  regions: readonly EffectOverlayElement[];
+  callDependencies: readonly EffectOverlayElement[];
+  assumptions: readonly EffectOverlayElement[];
+  targetCoverage: readonly EffectOverlayElement[];
+  unknownBoundaries: readonly EffectOverlayElement[];
+}
+
+export interface ProofNode {
+  id: string;
+  parentId?: string;
+  label: string;
+  state: ProofState;
+  identity: OverlayIdentity;
+}
+
+export interface ProofOverlay {
+  kind: "proof";
+  title: string;
+  claims: readonly ProofNode[];
+  trustedModels: readonly string[];
+  assumptions: readonly string[];
+}
+
+export interface CounterexampleBinding {
+  name: string;
+  value: string;
+}
+
+export interface CounterexampleStep {
+  index: number;
+  action?: string;
+  state: readonly CounterexampleBinding[];
+  identity: OverlayIdentity;
+}
+
+export interface CounterexampleOverlay {
+  kind: "counterexample";
+  title: string;
+  specification: string;
+  violation: string;
+  steps: readonly CounterexampleStep[];
+}
+
+export type Overlay = EvidenceOverlay | DiffOverlay | EffectOverlay | ProofOverlay | CounterexampleOverlay;
+
+export interface OverlayBundle {
+  evidence?: EvidenceOverlay;
+  diff?: DiffOverlay;
+  effect?: EffectOverlay;
+  proof?: ProofOverlay;
+  counterexample?: CounterexampleOverlay;
+  exportMaxBytes: number;
+}
+
 export interface GraphElementState {
   status: GraphStatus;
   markers: readonly TruthMarker[];
@@ -147,6 +265,7 @@ export interface GraphViewResult {
   evidence: readonly EvidenceReference[];
   capabilities: readonly GraphCapability[];
   diagnostics: readonly Diagnostic[];
+  overlays?: OverlayBundle;
   continuation?: Continuation;
 }
 
@@ -322,6 +441,7 @@ export function validateGraphView(result: GraphViewResult): void {
   for (const evidence of result.evidence) {
     if (utf8ByteLength(evidence.summary) > MAX_STRING || utf8ByteLength(evidence.id) > 120) throw new Error("evidence is not bounded");
   }
+  if (result.overlays) validateOverlayBundle(result.overlays, result.resultId, evidenceIds);
 }
 
 function validateElement(element: GraphElementState & { ref: PortableReference; label?: string }, evidenceIds: ReadonlySet<string>): void {
@@ -346,6 +466,90 @@ function validateSites(sites: readonly SiteReference[]): void {
       throw new Error("edge site location is invalid");
     }
   }
+}
+
+function validateOverlayIdentity(identity: OverlayIdentity, resultId: string, evidenceIds: ReadonlySet<string>): void {
+  if (!identity.resultId || identity.resultId.length > 240 || identity.resultId !== resultId) throw new Error("overlay identity must point to the canonical result");
+  if (identity.evidenceId !== undefined && (!evidenceIds.has(identity.evidenceId) || identity.evidenceId.length > 120)) throw new Error("overlay identity references unknown evidence");
+  if (identity.source === undefined && (!identity.limitation || identity.limitation.length > MAX_STRING)) throw new Error("overlay identity requires source provenance or a named limitation");
+  if (identity.source && (!identity.source.path || identity.source.path.length > 512 || identity.source.line < 1 || (identity.source.column !== undefined && identity.source.column < 1))) throw new Error("overlay source provenance is invalid");
+}
+
+function validateOverlayElements(elements: readonly { id: string; identity: OverlayIdentity }[], resultId: string, evidenceIds: ReadonlySet<string>): void {
+  const ids = new Set<string>();
+  for (const element of elements) {
+    if (!element.id || element.id.length > 120 || ids.has(element.id)) throw new Error("overlay elements must have unique bounded ids");
+    ids.add(element.id);
+    validateOverlayIdentity(element.identity, resultId, evidenceIds);
+  }
+}
+
+export function validateOverlayBundle(bundle: OverlayBundle, resultId: string, evidenceIds: ReadonlySet<string>): void {
+  if (!Number.isInteger(bundle.exportMaxBytes) || bundle.exportMaxBytes < 512 || bundle.exportMaxBytes > 1_000_000) throw new Error("overlay export budget is invalid");
+  if (bundle.evidence) {
+    validateOverlayElements([...bundle.evidence.items, ...bundle.evidence.path.map((step) => ({ id: `path:${step.sequence}`, identity: step.identity }))], resultId, evidenceIds);
+    if (bundle.evidence.path.some((step, index) => step.sequence !== index)) throw new Error("evidence path must have deterministic contiguous steps");
+  }
+  if (bundle.diff) {
+    validateOverlayElements(bundle.diff.entries, resultId, evidenceIds);
+    if (bundle.diff.entries.some((entry) => entry.state === "added" ? entry.newRef === undefined : entry.state === "removed" ? entry.oldRef === undefined : entry.oldRef === undefined || entry.newRef === undefined)) throw new Error("diff entries must preserve their old/new identity");
+  }
+  if (bundle.effect) validateOverlayElements([...bundle.effect.regions, ...bundle.effect.callDependencies, ...bundle.effect.assumptions, ...bundle.effect.targetCoverage, ...bundle.effect.unknownBoundaries], resultId, evidenceIds);
+  if (bundle.proof) {
+    validateOverlayElements(bundle.proof.claims, resultId, evidenceIds);
+    const claimIds = new Set(bundle.proof.claims.map((claim) => claim.id));
+    if (bundle.proof.claims.some((claim) => claim.parentId !== undefined && (claim.parentId === claim.id || !claimIds.has(claim.parentId)))) throw new Error("proof claims must reference an existing parent");
+    const visiting = new Set<string>();
+    const visited = new Set<string>();
+    const hasCycle = (id: string): boolean => {
+      if (visiting.has(id)) return true;
+      if (visited.has(id)) return false;
+      visiting.add(id);
+      const parentId = bundle.proof!.claims.find((claim) => claim.id === id)?.parentId;
+      const cycle = parentId !== undefined && hasCycle(parentId);
+      visiting.delete(id);
+      visited.add(id);
+      return cycle;
+    };
+    if (bundle.proof.claims.some((claim) => hasCycle(claim.id))) throw new Error("proof claims must form an acyclic tree");
+  }
+  if (bundle.counterexample) {
+    if (bundle.counterexample.steps.length === 0) throw new Error("counterexample must contain at least one bounded step");
+    validateOverlayElements(bundle.counterexample.steps.map((step) => ({ id: `step:${step.index}`, identity: step.identity })), resultId, evidenceIds);
+    if (bundle.counterexample.steps.some((step, index) => step.index !== index || step.state.length > 16 || step.state.some((binding) => !binding.name || binding.name.length > 80 || binding.value.length > MAX_STRING))) throw new Error("counterexample steps must be bounded and ordered");
+  }
+}
+
+export function exportOverlaySnapshot(overlay: Overlay, maxBytes: number): string {
+  if (!Number.isInteger(maxBytes) || maxBytes < 512) throw new Error("overlay export budget is invalid");
+  const snapshot: Record<string, unknown> = { version: 1, bounded: true, truncated: false, overlay: structuredClone(overlay) };
+  const collectionPaths: string[][] = overlay.kind === "evidence" ? [["overlay", "items"], ["overlay", "path"]] : overlay.kind === "diff" ? [["overlay", "entries"]] : overlay.kind === "effect" ? [["overlay", "regions"], ["overlay", "callDependencies"], ["overlay", "assumptions"], ["overlay", "targetCoverage"], ["overlay", "unknownBoundaries"]] : overlay.kind === "proof" ? [["overlay", "claims"]] : [["overlay", "steps"]];
+  const read = (path: readonly string[]): unknown => path.reduce<unknown>((value, key) => (value as Record<string, unknown>)[key], snapshot);
+  const byteLength = () => utf8ByteLength(JSON.stringify(snapshot));
+  let collectionIndex = 0;
+  while (byteLength() > maxBytes && collectionIndex < collectionPaths.length) {
+    const collection = read(collectionPaths[collectionIndex]!) as unknown[];
+    if (collection.length === 0) {
+      collectionIndex += 1;
+      continue;
+    }
+    collection.pop();
+    snapshot.truncated = true;
+    if (collection.length === 0) collectionIndex += 1;
+  }
+  if (byteLength() > maxBytes) throw new Error("overlay cannot fit its bounded export snapshot");
+  return JSON.stringify(snapshot);
+}
+
+function overlayEvidenceIds(bundle: OverlayBundle | undefined): readonly string[] {
+  if (!bundle) return [];
+  const identities: OverlayIdentity[] = [];
+  if (bundle.evidence) identities.push(...bundle.evidence.items.map((item) => item.identity), ...bundle.evidence.path.map((step) => step.identity));
+  if (bundle.diff) identities.push(...bundle.diff.entries.map((entry) => entry.identity));
+  if (bundle.effect) identities.push(...[...bundle.effect.regions, ...bundle.effect.callDependencies, ...bundle.effect.assumptions, ...bundle.effect.targetCoverage, ...bundle.effect.unknownBoundaries].map((item) => item.identity));
+  if (bundle.proof) identities.push(...bundle.proof.claims.map((claim) => claim.identity));
+  if (bundle.counterexample) identities.push(...bundle.counterexample.steps.map((step) => step.identity));
+  return identities.flatMap((identity) => identity.evidenceId === undefined ? [] : [identity.evidenceId]);
 }
 
 function canonicalSite(site: SiteReference): string {
@@ -381,8 +585,11 @@ export function applyBudget(result: GraphViewResult, budget: Budget): GraphViewR
     .filter((edge) => nodeKeys.has(stablePortableId(edge.source)) && nodeKeys.has(stablePortableId(edge.target)))
     .slice(0, budget.maxEdges);
   const groups = [...result.groups].sort((a, b) => stablePortableId(a.ref).localeCompare(stablePortableId(b.ref))).slice(0, budget.maxGroups);
+  const overlayIds = new Set(overlayEvidenceIds(result.overlays));
+  if (overlayIds.size > budget.maxEvidenceRefs) throw new Error("overlay evidence exceeds the declared evidence budget");
   const evidenceIds = new Set([...nodes, ...edges, ...groups].flatMap((item) => item.evidenceRefs));
-  const evidence = [...result.evidence].filter((item) => evidenceIds.has(item.id)).sort((a, b) => a.id.localeCompare(b.id)).slice(0, budget.maxEvidenceRefs);
+  overlayIds.forEach((id) => evidenceIds.add(id));
+  const evidence = [...result.evidence].filter((item) => evidenceIds.has(item.id)).sort((a, b) => Number(overlayIds.has(b.id)) - Number(overlayIds.has(a.id)) || a.id.localeCompare(b.id)).slice(0, budget.maxEvidenceRefs);
   const keptEvidenceIds = new Set(evidence.map((item) => item.id));
   const boundedNodes = nodes.map((item) => ({ ...item, evidenceRefs: item.evidenceRefs.filter((id) => keptEvidenceIds.has(id)) }));
   const boundedEdges = edges.map((item) => ({ ...item, evidenceRefs: item.evidenceRefs.filter((id) => keptEvidenceIds.has(id)) }));
@@ -466,6 +673,7 @@ export function canonicalSemanticContent(result: GraphViewResult): string {
     markers: [...result.markers].sort(),
     nodes: [...result.nodes].map(({ ref, label, semanticKind, status, markers: stateMarkers }) => ({ ref, label, semanticKind, status, markers: [...stateMarkers].sort() })).sort((a, b) => stablePortableId(a.ref).localeCompare(stablePortableId(b.ref))),
     edges: [...result.edges].map(({ ref, source, target, relation, label, status, markers: stateMarkers, siteRefs }) => ({ ref, source, target, relation, label, status, markers: [...stateMarkers].sort(), siteRefs: [...siteRefs].sort((left, right) => left.id.localeCompare(right.id)) })).sort((a, b) => stablePortableId(a.ref).localeCompare(stablePortableId(b.ref))),
+    overlays: result.overlays,
   });
 }
 

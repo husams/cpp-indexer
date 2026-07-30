@@ -21,6 +21,7 @@ from indexer.query import GraphQuery  # noqa: E402
 from indexer.clang import ast as A  # noqa: E402
 from indexer.clang import util as U  # noqa: E402
 from indexer.entity_graph import EntityGraph, EntityKind, EdgeKind  # noqa: E402
+from indexer.queryplan import canonical_json, eq, plan_to_dict  # noqa: E402
 
 try:
     from indexer.entity_rollup import materialize_entity_edges
@@ -56,7 +57,35 @@ struct Square : Shape {
 struct Renderer {
     void render(Shape &s) { s.draw(); }       // Renderer uses Shape
 };
+
+struct __entity_query_empty__ {};
+enum EmptyKind { EmptyKindValue };
 """
+
+DEEP_SOURCE = "\n".join(
+    ["struct Deep0 {};"]
+    + [f"struct Deep{depth} : Deep{depth - 1} {{}};" for depth in range(1, 35)]
+)
+
+
+def _build_entity_graph(tmp: str, source: str) -> tuple[Storage, EntityGraph]:
+    path = os.path.join(tmp, "fixture.cpp")
+    with open(path, "w") as fh:
+        fh.write(source)
+    tu = U.parse(path, args=["-std=c++17"], check=False)
+    fatal = [d for d in tu.diagnostics if d.severity >= 3]
+    assert not fatal, "; ".join(d.spelling for d in fatal)
+
+    db = Storage(os.path.join(tmp, "i.db"))
+    db.add_component("t", tmp)
+    file_id = db.add_file_path(path)
+    with db.transaction():
+        A.index_symbols(db, tu, file_id)
+    with db.transaction():
+        db.delete_edges_for_file(file_id)
+        A._index_edges_notxn(db, tu, path, file_id)
+    materialize_entity_edges(db)
+    return db, EntityGraph(GraphQuery.from_connection(db._conn))
 
 
 @pytest.fixture
@@ -64,24 +93,17 @@ def eg():
     if not _HAS_ROLLUP:
         pytest.skip("entity_rollup not present")
     with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "fixture.cpp")
-        with open(path, "w") as fh:
-            fh.write(SOURCE)
-        tu = U.parse(path, args=["-std=c++17"], check=False)
-        fatal = [d for d in tu.diagnostics if d.severity >= 3]
-        assert not fatal, "; ".join(d.spelling for d in fatal)
+        db, graph = _build_entity_graph(tmp, SOURCE)
+        yield graph
+        db.close()
 
-        db = Storage(os.path.join(tmp, "i.db"))
-        db.add_component("t", tmp)
-        file_id = db.add_file_path(path)
-        with db.transaction():
-            A.index_symbols(db, tu, file_id)
-        with db.transaction():
-            db.delete_edges_for_file(file_id)
-            A._index_edges_notxn(db, tu, path, file_id)
-        materialize_entity_edges(db)
 
-        graph = EntityGraph(GraphQuery.from_connection(db._conn))
+@pytest.fixture
+def deep_eg():
+    if not _HAS_ROLLUP:
+        pytest.skip("entity_rollup not present")
+    with tempfile.TemporaryDirectory() as tmp:
+        db, graph = _build_entity_graph(tmp, DEEP_SOURCE)
         yield graph
         db.close()
 
@@ -139,8 +161,27 @@ def test_of_kind_filter(eg):
     assert eg.query("Shape").derived().of_kind(EntityKind.UNION).names() == []
 
 
+def test_other_kind_preserves_legacy_symbol_kind_semantics(eg):
+    names = eg.query().of_kind(EntityKind.OTHER).names()
+    assert "EmptyKind" in names
+    assert "__entity_query_empty__" not in names
+    assert eg.query().of_kind().names() == []
+
+
 def test_named_filter(eg):
     assert eg.query("Shape").derived().named("ircl").names() == ["Circle"]
+    assert eg.query("Shape").derived().named("CIRCL").names() == ["Circle"]
+
+
+def test_compatibility_filters_apply_before_following_a_relation(eg):
+    named = eg.query("Shape").derived().named("Circle").uses()
+    callback = eg.query("Shape").derived().where(
+        lambda node: node.name == "Circle"
+    ).uses()
+
+    assert named.names() == callback.names() == ["Logger"]
+    assert [edge.dst.name for edge in named.edges()] == ["Logger"]
+    assert [edge.dst.name for edge in callback.edges()] == ["Logger"]
 
 
 def test_exclude_filter(eg):
@@ -158,6 +199,42 @@ def test_multi_seed_union(eg):
 def test_node_query_entrypoint(eg):
     circle = eg.find("Circle")[0]
     assert circle.query().bases().names() == ["Shape"]
+
+
+def test_queryplan_adapter_exposes_the_legacy_query_as_a_canonical_plan(eg):
+    """The public EntityQuery surface lowers each declarative step to CXQ."""
+    query = eg.query("Shape").derived().where(eq("name", "Circle"))
+
+    assert query.names() == ["Circle"]
+    assert plan_to_dict(query.to_plan()) == {
+        "cxq": 1,
+        "source": {"kind": "entity", "ref": "c:@S@Shape"},
+        "stages": [
+            {
+                "op": "in",
+                "relation": "entity.generalizes",
+                "min_depth": 1,
+                "max_depth": 1,
+            },
+            {
+                "op": "where",
+                "pred": {"op": "eq", "field": "name", "value": "Circle"},
+            },
+        ],
+    }
+
+
+def test_graphquery_plan_adapter_matches_shared_parity_fixture(eg):
+    fixture = os.path.join(
+        os.path.dirname(__file__), "..", "..", "tests", "golden",
+        "legacy_graph_query_plans.txt",
+    )
+    text = open(fixture, encoding="utf-8").read()
+    expected = text.split("== entity_inherits ==\n", 1)[1].strip()
+    plan = eg._q.plan_for(
+        eg.find("Shape")[0].sym, relation="inherits", direction="out"
+    )
+    assert canonical_json(plan.plan) == expected
 
 
 def test_edges_terminal_carries_step_edges(eg):
@@ -179,6 +256,10 @@ def test_empty_seed_queries_all_entities(eg):
     """query() with no args seeds every entity in the graph."""
     everything = eg.query().nodes()
     assert {n.name for n in everything} >= {"Shape", "Circle", "Square", "Renderer"}
+
+
+def test_missing_seed_does_not_collide_with_an_entity_name(eg):
+    assert eg.query("does-not-exist").names() == []
 
 
 def test_streaming_terminals_are_generators(eg):
@@ -215,3 +296,15 @@ def test_terminals(eg):
     assert q.first().name == "Circle"
     assert {d["name"] for d in q.to_dict()} == {"Circle", "Square"}
     assert eg.query("Color").derived().first() is None
+
+
+def test_transitive_depth_boundaries_preserve_legacy_results(eg, deep_eg):
+    assert eg.query("Shape").relation(
+        EdgeKind.GENERALIZES, "in", transitive=True, max_depth=0
+    ).names() == []
+    assert deep_eg.query("Deep0").relation(
+        EdgeKind.GENERALIZES, "in", transitive=True, max_depth=33
+    ).count() == 33
+    assert deep_eg.query("Deep0").relation(
+        EdgeKind.GENERALIZES, "in", transitive=True
+    ).count() == 34

@@ -1,5 +1,6 @@
 #include "ast/include_facts.hpp"
 
+#include "profile/index_profile.hpp"
 #include "storage/storage.hpp"
 #include "util/errors.hpp"
 #include "util/hashing.hpp"
@@ -162,6 +163,9 @@ public:
       llvm::StringRef /*search_path*/, llvm::StringRef /*relative_path*/,
       const clang::Module * /*suggested_module*/, bool /*module_imported*/,
       clang::SrcMgr::CharacteristicKind file_type) override {
+    if (profile::active()) {
+      profile::add_counter("include_path_resolution_queries");
+    }
     const clang::SourceLocation loc = sm_.getExpansionLoc(hash_loc);
     const clang::FileID fid = sm_.getFileID(loc);
     const clang::OptionalFileEntryRef src = sm_.getFileEntryRefForID(fid);

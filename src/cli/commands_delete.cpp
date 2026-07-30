@@ -1,6 +1,7 @@
 // delete-component/dir/file/symbol and resolve.
 // Split out of commands.cpp; run_command's dispatch is unchanged.
 #include "cli/commands_detail.hpp"
+#include "profile/index_profile.hpp"
 
 namespace cidx::cli {
 
@@ -177,7 +178,10 @@ int cmd_delete_symbol(const ParsedArgs &args, Context &ctx) {
 }
 
 int cmd_resolve(const ParsedArgs &args, Context &ctx) {
-  (void)args;
+  std::optional<profile::Session> profiling;
+  if (args.profile_json) {
+    profiling.emplace(*args.profile_json, args.profile_sqlite_configuration);
+  }
   Storage db(ctx.index_path);
   int stubs = 0;
   try {
@@ -190,6 +194,9 @@ int cmd_resolve(const ParsedArgs &args, Context &ctx) {
   db.stamp_graph_resolved();
   *ctx.out << "resolve: " << stubs << " still-stub, " << cross.size()
            << " cross-repo edge(s)\n";
+  if (profiling) {
+    profiling->finish();
+  }
   return 0;
 }
 

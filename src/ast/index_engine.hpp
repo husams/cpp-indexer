@@ -49,6 +49,7 @@ struct IndexPassMetrics {
   std::size_t duplicates = 0;
   std::size_t diagnostics = 0;
   std::size_t whole_tu_traversals = 0;
+  std::map<std::string, PassMetrics::FactFamily, std::less<>> fact_families;
   std::int64_t elapsed_microseconds = 0;
   bool budget_exhausted = false;
 };

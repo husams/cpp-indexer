@@ -24,6 +24,17 @@
 
 namespace cidx::query {
 
+namespace {
+thread_local PlanObserver *active_plan_observer = nullptr;
+}
+
+ScopedPlanObserver::ScopedPlanObserver(PlanObserver observer)
+    : observer_(std::move(observer)), previous_(active_plan_observer) {
+  active_plan_observer = &observer_;
+}
+
+ScopedPlanObserver::~ScopedPlanObserver() { active_plan_observer = previous_; }
+
 SqliteQueryReadAdapter::SqliteQueryReadAdapter(SqliteStorageService &service)
     : service_(&service), read_db_(service.raw_db()) {}
 
@@ -98,6 +109,12 @@ std::vector<EdgeSiteRow>
 SqliteQueryReadAdapter::edge_sites_page(int64_t edge_id, int offset,
                                         int limit) {
   return service_->edge_sites_page(edge_id, offset, limit);
+}
+
+std::optional<EdgeSiteRow>
+SqliteQueryReadAdapter::edge_site_by_key(int64_t edge_id, int64_t file_id,
+                                         int64_t line, int64_t col) {
+  return service_->edge_site_by_key(edge_id, file_id, line, col);
 }
 
 bool SqliteQueryReadAdapter::edge_has_conditional_site(int64_t edge_id) {
@@ -249,6 +266,29 @@ std::string col_expr(const std::string &field, const std::string &symbol_alias,
   if (field == "name") {
     return "COALESCE(" + symbol_alias + ".qual_name, " + symbol_alias +
            ".spelling)";
+  }
+  if (field == "name_length") {
+    return "LENGTH(COALESCE(" + symbol_alias + ".qual_name, " + symbol_alias +
+           ".spelling))";
+  }
+  if (field == "multi_def") {
+    return symbol_alias + ".multi_def";
+  }
+  if (field == "negative_multi_def") {
+    return "-" + symbol_alias + ".multi_def";
+  }
+  if (field == "negative_count") {
+    return "-(CASE WHEN COALESCE((SELECT value FROM meta WHERE key = "
+           "'graph_resolved_at'), '') <> '' THEN edge.count ELSE "
+           "(SELECT COUNT(*) FROM edge_site WHERE edge_id = edge.id) END)";
+  }
+  if (field == "effective_count") {
+    return "(CASE WHEN COALESCE((SELECT value FROM meta WHERE key = "
+           "'graph_resolved_at'), '') <> '' THEN "
+           "CASE WHEN edge.count <> 0 THEN edge.count ELSE 1 END WHEN "
+           "(SELECT COUNT(*) FROM edge_site WHERE edge_id = edge.id) > 0 "
+           "THEN (SELECT COUNT(*) FROM edge_site WHERE edge_id = edge.id) "
+           "WHEN edge.count <> 0 THEN edge.count ELSE 1 END)";
   }
   if (field == "spelling") {
     return symbol_alias + ".spelling";
@@ -821,11 +861,26 @@ public:
     }
 
     std::optional<int64_t> pending_after_id = after_id;
+    std::optional<int64_t> typed_node_limit;
+    bool path_order = false;
+    for (const auto &stage : plan.stages) {
+      if (stage.op == StageOp::Limit && stage.n > 0) {
+        typed_node_limit = stage.n;
+      }
+      if (stage.op == StageOp::OrderBy &&
+          std::ranges::find(stage.fields, "file") != stage.fields.end()) {
+        path_order = true;
+      }
+    }
+    if (path_order) {
+      typed_node_limit.reset();
+    }
     for (const auto &stage : plan.stages) {
       reject_ambiguous_ungrouped(st);
       switch (stage.op) {
       case StageOp::Nodes:
-        enumerate(st, stage.pred, stage.unknown, pending_after_id);
+        enumerate(st, stage.pred, stage.unknown, pending_after_id,
+                  typed_node_limit);
         pending_after_id.reset();
         st.limit_in_effect = false;
         break;
@@ -1017,9 +1072,9 @@ private:
     return {};
   }
 
-  // view(entity) enforces the typed-view invariant: ids without an
-  // entity_node row are DROPPED, never surfaced as entity rows (PR #20
-  // review). view(symbol) is a pure relabel (every entity id is a symbol id).
+  // view(entity) selects the complete design-entity domain: materialized
+  // entity_node rows plus entity_edge endpoints. view(symbol) is a pure
+  // relabel (every entity id is a symbol id).
   void change_view(Stream &st, View level) {
     if (level != View::Symbol && level != View::Entity) {
       st.ids.clear();
@@ -1034,8 +1089,11 @@ private:
       std::vector<int64_t> kept;
       for (size_t at = 0; at < st.ids.size(); at += kIdChunk) {
         const size_t n = std::min(kIdChunk, st.ids.size() - at);
-        std::string sql = "SELECT id FROM entity_node WHERE id IN (" +
-                          placeholders(n) + ") ORDER BY id";
+        std::string sql =
+            "SELECT id FROM (SELECT id FROM entity_node UNION "
+            "SELECT src_id AS id FROM entity_edge UNION "
+            "SELECT dst_id AS id FROM entity_edge) WHERE id IN (" +
+            placeholders(n) + ") ORDER BY id";
         std::vector<SqlValue> args;
         args.reserve(n);
         for (size_t i = 0; i < n; ++i) {
@@ -1057,7 +1115,48 @@ private:
 
   void enumerate(Stream &st, const std::optional<Pred> &pred,
                  UnknownPolicy unknown,
-                 const std::optional<int64_t> &after_id = std::nullopt) {
+                 const std::optional<int64_t> &after_id = std::nullopt,
+                 const std::optional<int64_t> &node_limit = std::nullopt) {
+    if (st.view == View::Edge && pred && pred->op == PredOp::Eq &&
+        pred->int_value &&
+        (pred->field == "edge_id" || pred->field == "src_id" ||
+         pred->field == "dst_id")) {
+      const std::string column = pred->field == "edge_id" ? "id" : pred->field;
+      std::string sql = "SELECT id FROM edge WHERE " + column + " = ?";
+      std::vector<SqlValue> args{SqlValue(*pred->int_value)};
+      if (after_id) {
+        sql += " AND id > ?";
+        args.emplace_back(*after_id);
+      }
+      sql += " ORDER BY id LIMIT ?";
+      const int64_t cap = node_limit.value_or(kEnumerateBudget);
+      args.emplace_back(cap + 1);
+      st.keys = logical_rows(View::Edge, sql, args);
+      if (st.keys.size() > static_cast<std::size_t>(cap)) {
+        st.keys.resize(static_cast<std::size_t>(cap));
+        st.truncated = true;
+      }
+      st.view = View::Edge;
+      return;
+    }
+    if (st.view == View::Site && pred && pred->op == PredOp::Eq &&
+        pred->field == "edge_id" && pred->int_value && !after_id) {
+      const int64_t cap = node_limit.value_or(kTraverseNodeBudget);
+      auto sites = read_.read_db().prepare(
+          "SELECT edge_id,file_id,COALESCE(line,0),COALESCE(col,0) "
+          "FROM edge_site WHERE edge_id = ? "
+          "ORDER BY file_id,line,col LIMIT ?");
+      sites.bind(1, *pred->int_value);
+      sites.bind(2, cap);
+      while (sites.step()) {
+        st.keys.push_back({.a = sites.col_int64(0),
+                           .b = sites.col_int64(1),
+                           .c = sites.col_int64(2),
+                           .d = sites.col_int64(3)});
+      }
+      st.view = View::Site;
+      return;
+    }
     if (st.view != View::Symbol && st.view != View::Entity) {
       if (after_id.has_value() && st.view == View::Edge) {
         st.keys = logical_rows(
@@ -1151,8 +1250,12 @@ private:
     }
     std::string sql = "SELECT s.id FROM symbol s";
     if (st.view == View::Entity) {
-      sql += " JOIN entity_node en ON en.id = s.id";
-    } else if (pred && pred_uses_entity_type(*pred)) {
+      sql += " JOIN (SELECT id FROM entity_node UNION "
+             "SELECT src_id AS id FROM entity_edge UNION "
+             "SELECT dst_id AS id FROM entity_edge) entity_ids "
+             "ON entity_ids.id = s.id";
+    }
+    if (pred && pred_uses_entity_type(*pred)) {
       sql += join_clause(true);
     }
     std::vector<SqlValue> args;
@@ -1186,7 +1289,8 @@ private:
       std::vector<LogicalKey> kept;
       for (const auto &key : st.keys) {
         const auto it = cells.find(key);
-        if (it != cells.end() && predicate_matches(pred, fields, it->second)) {
+        if (it != cells.end() &&
+            predicate_matches(st.view, pred, fields, it->second)) {
           kept.push_back(key);
         }
       }
@@ -1235,13 +1339,13 @@ private:
     return {pred.field};
   }
 
-  static bool predicate_matches(const Pred &pred,
+  static bool predicate_matches(View view, const Pred &pred,
                                 const std::vector<std::string> &fields,
                                 const std::vector<Cell> &cells) {
     if (pred.op == PredOp::AllOf || pred.op == PredOp::AnyOf) {
       const bool all = pred.op == PredOp::AllOf;
       for (const auto &kid : pred.kids) {
-        const bool matched = predicate_matches(kid, fields, cells);
+        const bool matched = predicate_matches(view, kid, fields, cells);
         if (all ? !matched : matched) {
           return !all;
         }
@@ -1249,7 +1353,7 @@ private:
       return all;
     }
     if (pred.op == PredOp::Not) {
-      return !predicate_matches(pred.kids.front(), fields, cells);
+      return !predicate_matches(view, pred.kids.front(), fields, cells);
     }
     const auto found = std::ranges::find(fields, pred.field);
     const auto at = std::ranges::distance(fields.begin(), found);
@@ -1269,7 +1373,17 @@ private:
         return cell_eq(value, Cell(item));
       });
     }
-    const Cell expected(pred.str_values.front());
+    Cell expected(pred.str_values.front());
+    if (view == View::Edge && pred.field == "kind") {
+      const auto relation =
+          std::ranges::find_if(catalog::kRelations, [&](const auto &item) {
+            return item.layer == catalog::View::Symbol &&
+                   item.name == pred.str_values.front();
+          });
+      if (relation != catalog::kRelations.end()) {
+        expected = Cell(static_cast<int64_t>(relation->id));
+      }
+    }
     return pred.op == PredOp::Eq ? equals(expected) : !equals(expected);
   }
 
@@ -3038,6 +3152,19 @@ private:
     if (field == "edge_id" && view == View::Edge) {
       return "edge.id";
     }
+    if (field == "negative_count" && view == View::Edge) {
+      return "-(CASE WHEN COALESCE((SELECT value FROM meta WHERE key = "
+             "'graph_resolved_at'), '') <> '' THEN edge.count ELSE "
+             "(SELECT COUNT(*) FROM edge_site WHERE edge_id = edge.id) END)";
+    }
+    if (field == "effective_count" && view == View::Edge) {
+      return "(CASE WHEN COALESCE((SELECT value FROM meta WHERE key = "
+             "'graph_resolved_at'), '') <> '' THEN "
+             "CASE WHEN edge.count <> 0 THEN edge.count ELSE 1 END WHEN "
+             "(SELECT COUNT(*) FROM edge_site WHERE edge_id = edge.id) > 0 "
+             "THEN (SELECT COUNT(*) FROM edge_site WHERE edge_id = edge.id) "
+             "WHEN edge.count <> 0 THEN edge.count ELSE 1 END)";
+    }
     if ((field == "src_id" || field == "dst_id") && view == View::Site) {
       // A site row is always scoped to exactly one edge (edge_site.edge_id
       // is a foreign key into edge.id); exposing the edge's own stable
@@ -3125,9 +3252,10 @@ private:
                                      "is_const", "is_volatile", "is_restrict"};
       }
       if (view == View::Edge) {
-        return std::set<std::string>{"id",         "src_id",     "dst_id",
-                                     "kind",       "count",      "base_access",
-                                     "is_virtual", "vtable_slot"};
+        return std::set<std::string>{
+            "id",         "src_id",         "dst_id",          "kind",
+            "count",      "negative_count", "effective_count", "base_access",
+            "is_virtual", "vtable_slot"};
       }
       return std::set<std::string>{};
     }();
@@ -4259,11 +4387,195 @@ protocol::ResultEnvelope Result::to_envelope() const {
 
 Result Executor::run(const Plan &plan, std::optional<int64_t> after_id) {
   const Plan normalized = validate(plan);
+  if (active_plan_observer != nullptr) {
+    (*active_plan_observer)(normalized);
+  }
   Exec exec(read_);
   Stream st = exec.run_plan(normalized, after_id);
   Result res = exec.finish(std::move(st));
   res.index = read_.index_identity();
   return res;
+}
+
+Result Executor::run_fast(const Plan &plan, std::optional<int64_t> after_id) {
+  const Plan normalized = validate(plan);
+  if (active_plan_observer != nullptr) {
+    (*active_plan_observer)(normalized);
+  }
+  if (!after_id && normalized.source.kind == SourceKind::Codebase) {
+    View view = View::Symbol;
+    std::optional<int64_t> edge_id;
+    std::vector<std::string> fields;
+    std::vector<std::string> order;
+    std::optional<int64_t> limit;
+    bool supported = true;
+    for (const auto &stage : normalized.stages) {
+      switch (stage.op) {
+      case StageOp::ChangeView:
+        view = stage.level;
+        break;
+      case StageOp::Nodes:
+        if (!stage.pred || stage.pred->op != PredOp::Eq ||
+            stage.pred->field != "edge_id" || !stage.pred->int_value) {
+          supported = false;
+        } else {
+          edge_id = stage.pred->int_value;
+        }
+        break;
+      case StageOp::Select:
+        fields = stage.fields;
+        break;
+      case StageOp::OrderBy:
+        order = stage.fields;
+        break;
+      case StageOp::Limit:
+        limit = stage.n;
+        break;
+      default:
+        supported = false;
+        break;
+      }
+    }
+    const std::set<std::string> supported_fields{"edge_id", "file_id", "file",
+                                                 "line", "col"};
+    const std::set<std::string> supported_order{"file_id", "file", "line",
+                                                "col"};
+    if (supported && view == View::Site && edge_id && !fields.empty() &&
+        std::ranges::all_of(fields,
+                            [&](const auto &field) {
+                              return supported_fields.contains(field);
+                            }) &&
+        std::ranges::all_of(order, [&](const auto &field) {
+          return supported_order.contains(field);
+        })) {
+      const bool path_order = std::ranges::find(order, "file") != order.end();
+      struct RawSite {
+        int64_t edge_id;
+        int64_t file_id;
+        int64_t line;
+        int64_t col;
+      };
+      std::vector<RawSite> raw;
+      if (path_order) {
+        struct FileGroup {
+          std::string path;
+          int64_t file_id;
+        };
+        std::vector<FileGroup> groups;
+        int64_t last_file_id = -1;
+        while (true) {
+          auto file = read_.read_db().prepare(
+              "SELECT file_id FROM edge_site WHERE edge_id = ? "
+              "AND file_id > ? ORDER BY file_id LIMIT 1");
+          file.bind(1, *edge_id);
+          file.bind(2, last_file_id);
+          if (!file.step()) {
+            break;
+          }
+          last_file_id = file.col_int64(0);
+          groups.push_back(
+              {.path =
+                   read_.file_abs_path(last_file_id).value_or(std::string()),
+               .file_id = last_file_id});
+        }
+        std::ranges::sort(groups,
+                          [](const FileGroup &left, const FileGroup &right) {
+                            return std::tie(left.path, left.file_id) <
+                                   std::tie(right.path, right.file_id);
+                          });
+        for (const auto &group : groups) {
+          const int64_t remaining =
+              limit && *limit > 0 ? *limit - static_cast<int64_t>(raw.size())
+                                  : 0;
+          auto sites = read_.read_db().prepare(
+              "SELECT edge_id,file_id,COALESCE(line,0),COALESCE(col,0) "
+              "FROM edge_site WHERE edge_id = ? AND file_id = ? "
+              "ORDER BY line,col" +
+              std::string(remaining > 0 ? " LIMIT ?" : ""));
+          sites.bind(1, *edge_id);
+          sites.bind(2, group.file_id);
+          if (remaining > 0) {
+            sites.bind(3, remaining);
+          }
+          while (sites.step()) {
+            raw.push_back({.edge_id = sites.col_int64(0),
+                           .file_id = sites.col_int64(1),
+                           .line = sites.col_int64(2),
+                           .col = sites.col_int64(3)});
+          }
+          if (remaining > 0 && std::cmp_greater_equal(raw.size(), *limit)) {
+            break;
+          }
+        }
+      } else {
+        auto sites = read_.read_db().prepare(
+            "SELECT edge_id,file_id,COALESCE(line,0),COALESCE(col,0) "
+            "FROM edge_site WHERE edge_id = ? "
+            "ORDER BY file_id,line,col" +
+            std::string(limit && *limit > 0 ? " LIMIT ?" : ""));
+        sites.bind(1, *edge_id);
+        if (limit && *limit > 0) {
+          sites.bind(2, *limit);
+        }
+        while (sites.step()) {
+          raw.push_back({.edge_id = sites.col_int64(0),
+                         .file_id = sites.col_int64(1),
+                         .line = sites.col_int64(2),
+                         .col = sites.col_int64(3)});
+        }
+      }
+      Result result;
+      result.shape = Shape::Rows;
+      result.view = View::Site;
+      result.fields = fields;
+      for (const auto &site : raw) {
+        std::vector<Cell> row;
+        row.reserve(fields.size());
+        for (const auto &field : fields) {
+          if (field == "edge_id") {
+            row.emplace_back(site.edge_id);
+          } else if (field == "file_id") {
+            row.emplace_back(site.file_id);
+          } else if (field == "line") {
+            row.emplace_back(site.line);
+          } else if (field == "col") {
+            row.emplace_back(site.col);
+          } else {
+            row.emplace_back(
+                read_.file_abs_path(site.file_id).value_or(std::string()));
+          }
+        }
+        result.rows.push_back(std::move(row));
+      }
+      return result;
+    }
+  }
+  Exec exec(read_);
+  Stream st = exec.run_plan(normalized, after_id);
+  Result result;
+  result.shape = st.shape;
+  result.view = st.view;
+  result.truncated = st.truncated;
+  result.partial = st.partial;
+  result.unknown = st.unknown;
+  result.path_rows_examined = st.path_rows_examined;
+  result.path_reconstruction_descents_examined =
+      st.path_reconstruction_descents_examined;
+  if (st.shape == Shape::Scalar) {
+    if (st.path_stream) {
+      result.scalar = static_cast<int64_t>(st.paths.size());
+    } else if (st.shape == Shape::Scalar && !st.rows.empty()) {
+      result.scalar = static_cast<int64_t>(st.rows.size());
+    } else if (!st.keys.empty()) {
+      result.scalar = static_cast<int64_t>(st.keys.size());
+    } else {
+      result.scalar = static_cast<int64_t>(st.ids.size());
+    }
+  }
+  result.fields = std::move(st.fields);
+  result.rows = std::move(st.rows);
+  result.paths = std::move(st.paths);
+  return result;
 }
 
 namespace {

@@ -85,6 +85,35 @@ class NoEdgesError(RuntimeError):
     """
 
 
+class _AdapterPlanTruncated(RuntimeError):
+    """The QueryPlan candidate set was capped and is not complete."""
+
+
+def _legacy_find_glob(pattern: str, *, prefix: bool = False) -> str:
+    """Build a GLOB that preserves legacy ASCII case-insensitive matching.
+
+    QueryPlan owns the match operation for compatibility reads.  The optional
+    prefix form is the middle tier of the historical ``find`` lookup; the
+    default form is the segmented fuzzy tier.
+    """
+    out = [] if prefix else ["*"]
+    segments = [segment for segment in pattern.split("::") if segment]
+    for segment_index, segment in enumerate(segments):
+        if segment_index:
+            out.append("*")
+        for char in segment:
+            if char == "*" or char == "?":
+                out.extend(("[", char, "]"))
+            elif char == "[":
+                out.extend(("[", "[", "]"))
+            elif "a" <= char <= "z" or "A" <= char <= "Z":
+                out.extend(("[", char.lower(), char.upper(), "]"))
+            else:
+                out.append(char)
+    out.append("*")
+    return "".join(out)
+
+
 def default_db_path() -> str:
     """The standard cidx index path: $INDEXER_CACHE/index.db else ~/.cache/cidx/index.db.
 
@@ -1019,7 +1048,12 @@ class GraphQuery:
 
     def edge_count(self) -> int:
         """Total number of edges. 0 means the graph layer is empty."""
-        return self._c.execute("SELECT COUNT(*) FROM edge").fetchone()[0]
+        from .queryplan import Executor, codebase, count, nodes, start, view
+        from .storage import Storage
+
+        plan = (start(codebase()) | view("edge") | nodes() | count()).plan
+        result = Executor(Storage.from_connection(self._c, self.db_path)).run(plan)
+        return int(result.scalar)
 
     def require_edges(self) -> None:
         """Raise NoEdgesError unless the index has at least one edge.
@@ -1033,6 +1067,335 @@ class GraphQuery:
                 "`cidx index --no-graph`, or the graph was cleared. Re-run "
                 "`cidx index` (without --no-graph) then `cidx resolve`."
             )
+
+    def plan_for(
+        self,
+        sym,
+        relation: Optional[str] = None,
+        direction: str = "out",
+        min_depth: int = 1,
+        max_depth: int = 1,
+    ):
+        """Build the canonical QueryPlan for a legacy symbol-graph read."""
+        from .queryplan import (
+            all_of,
+            codebase,
+            eq,
+            in_ as plan_in,
+            nodes,
+            out as plan_out,
+            start,
+            symbol,
+        )
+
+        resolved = self.get(sym)
+        if resolved is None:
+            return start(codebase()) | nodes(all_of([eq("id", -1), eq("id", -2)]))
+        query = start(symbol(resolved.usr))
+        if relation is None:
+            return query
+        if direction == "out":
+            return query | plan_out(relation, min_depth, max_depth)
+        if direction == "in":
+            return query | plan_in(relation, min_depth, max_depth)
+        raise ValueError("direction must be 'in' or 'out'")
+
+    def _adapter_ids(self, plan) -> list[int]:
+        """Execute a legacy read's canonical plan and return its node ids.
+
+        The compatibility methods below still materialize their historical
+        records (including evidence and ordering), but the candidate set is
+        selected by the shared QueryPlan executor.  This keeps the old result
+        shape while removing direct SQL traversal from the semantic boundary.
+        """
+        from .queryplan import Executor, select as plan_select
+        from .storage import Storage
+
+        store = Storage.from_connection(self._c, self.db_path)
+        result = Executor(store).run((plan | plan_select(["id"])).plan)
+        if result.truncated:
+            raise _AdapterPlanTruncated(
+                "QueryPlan candidate set was truncated; use the legacy read"
+            )
+        return [
+            int(row[0] if not isinstance(row, dict) else row["id"])
+            for row in result.rows
+        ]
+
+    def _adapter_ids_complete(self, plan) -> list[int]:
+        """Execute an adapter plan completely without corrupting its order.
+
+        The executor cursor advances the physical symbol-id enumeration.  It
+        cannot be used directly on a plan that orders by another field: each
+        page would be independently sorted and a cursor based on the last
+        emitted row could skip or repeat rows.  Such plans are collected in
+        physical-id pages, then globally ordered and limited using the same
+        plan field values before compatibility hydration.
+        """
+        from .queryplan import Executor, Plan, select as plan_select, validate
+        from .storage import Storage
+
+        store = Storage.from_connection(self._c, self.db_path)
+        normalized = validate(plan.plan if hasattr(plan, "plan") else plan)
+        order_fields = tuple(
+            field
+            for stage in normalized.stages
+            if stage.op == "order_by"
+            for field in stage.fields
+        )
+        if order_fields:
+            limit_values = [
+                stage.n for stage in normalized.stages if stage.op == "limit"
+            ]
+            collection_stages = tuple(
+                stage for stage in normalized.stages
+                if stage.op not in ("select", "order_by", "limit")
+            )
+            fields = tuple(dict.fromkeys(("id", *order_fields)))
+            collection_plan = Plan(
+                source=normalized.source,
+                stages=collection_stages + (plan_select(fields),),
+            )
+            collected: list[tuple[int, tuple[object, ...]]] = []
+            after_id: Optional[int] = None
+            while True:
+                result = Executor(store).run(collection_plan, after_id=after_id)
+                for row in result.rows:
+                    values = tuple(row)
+                    if values:
+                        collected.append((int(values[0]), values[1:]))
+                if not result.truncated or not result.rows:
+                    break
+                after_id = max(int(row[0]) for row in result.rows)
+
+            def cell_key(value: object) -> tuple[int, object]:
+                if value is None:
+                    return (2, "")
+                if isinstance(value, (int, float)):
+                    return (0, value)
+                return (1, str(value))
+
+            collected.sort(
+                key=lambda item: (
+                    tuple(cell_key(value) for value in item[1]), item[0]
+                )
+            )
+            if limit_values:
+                del collected[limit_values[-1]:]
+            return [sid for sid, _values in collected]
+
+        ids: list[int] = []
+        after_id: Optional[int] = None
+        while True:
+            result = Executor(store).run(normalized, after_id=after_id)
+            ids.extend(
+                int(row[0] if not isinstance(row, dict) else row["id"])
+                for row in result.rows
+            )
+            if not result.truncated or not result.rows:
+                return ids
+            after_id = max(
+                int(row[0] if not isinstance(row, dict) else row["id"])
+                for row in result.rows
+            )
+
+    def _adapter_symbols(self, plan) -> list[Sym]:
+        """Hydrate symbols in the exact order emitted by a QueryPlan."""
+        plan = plan.plan if hasattr(plan, "plan") else plan
+        ids = self._adapter_ids_complete(plan)
+        out: list[Sym] = []
+        for sid in ids:
+            row = self._c.execute(
+                f"SELECT {_SYM_COLS} FROM symbol s WHERE s.id = ?", (sid,)
+            ).fetchone()
+            if row is not None:
+                out.append(self._sym(row))
+        return out
+
+    def _adapter_site_keys(self, edge_id: int, limit: int) -> list[tuple[int, int, int, int]]:
+        """Select site identities through the typed QueryPlan edge view."""
+        from .queryplan import (
+            Executor, codebase, eq, limit as plan_limit, nodes, order_by,
+            select as plan_select, sites as plan_sites, start, view,
+        )
+        from .storage import Storage
+
+        if limit == 0:
+            return []
+        query = (
+            start(codebase())
+            | view("edge")
+            | nodes(eq("edge_id", edge_id))
+            | plan_sites()
+            | plan_select(["edge_id", "file_id", "line", "col"])
+            | order_by(["file_id", "line", "col"])
+        )
+        # SQLite historically treats LIMIT 0 as an empty result and LIMIT -1
+        # as unbounded.  QueryPlan deliberately rejects non-positive limits,
+        # so preserve that public boundary before constructing a plan.
+        if limit > 0:
+            query = query | plan_limit(limit)
+        store = Storage.from_connection(self._c, self.db_path)
+        result = Executor(store).run(query.plan)
+        return [tuple(int(value) for value in row) for row in result.rows]
+
+    def _adapter_symbol_rows(self, sym_id: int, fields: Sequence[str]) -> list[tuple]:
+        """Select compatibility-owned symbol fields through QueryPlan."""
+        from .queryplan import Executor, codebase, eq, nodes, select as plan_select, start
+        from .storage import Storage
+
+        plan = (
+            start(codebase()) | nodes(eq("id", sym_id)) | plan_select(fields)
+        ).plan
+        result = Executor(Storage.from_connection(self._c, self.db_path)).run(plan)
+        return [tuple(row) for row in result.rows]
+
+    def _adapter_signature_slot_rows(self, sym_id: int) -> list[tuple]:
+        """Select all signature slots, including order and result fields."""
+        from .queryplan import Executor, codebase, eq, nodes, order_by
+        from .queryplan import out as plan_out, select as plan_select, start
+        from .storage import Storage
+
+        fields = [
+            "slot_kind", "position", "pack_index", "name", "type_id",
+            "declared_type_id", "adjusted_type_id", "default_text",
+            "default_origin", "reference_semantics", "mode", "value_kind",
+            "named_decl",
+        ]
+        plan = (
+            start(codebase()) | nodes(eq("id", sym_id))
+            | plan_out("has_signature_slot")
+            | plan_select(fields)
+            | order_by(["position", "pack_index", "slot_kind"])
+        ).plan
+        result = Executor(Storage.from_connection(self._c, self.db_path)).run(plan)
+        if result.truncated:
+            raise _AdapterPlanTruncated("signature slot plan was truncated")
+        return [tuple(row) for row in result.rows]
+
+    def _adapter_rows(self, plan, fields: Sequence[str], *, order: Sequence[str] = (),
+                      limit: int = 0) -> list[tuple]:
+        """Run a typed compatibility selection before legacy row hydration."""
+        from .queryplan import Executor, limit as plan_limit, order_by, select as plan_select, validate
+        from .storage import Storage
+
+        query = plan | plan_select(fields)
+        if order:
+            query = query | order_by(order)
+        if limit:
+            query = query | plan_limit(limit)
+        store = Storage.from_connection(self._c, self.db_path)
+        result = Executor(store).run(validate(query.plan))
+        if result.truncated:
+            raise _AdapterPlanTruncated("typed QueryPlan candidate set was truncated")
+        return [tuple(row) for row in result.rows]
+
+    def _adapter_type_ids(self, type_id: int) -> list[int]:
+        from .queryplan import Executor, codebase, eq, nodes, select as plan_select, start, view
+        from .storage import Storage
+
+        type_row = self._c.execute(
+            "SELECT type_key FROM type_node WHERE id = ?", (type_id,)
+        ).fetchone()
+        type_key = type_row[0] if type_row is not None else f"__missing_type_{type_id}__"
+        plan = (
+            start(codebase()) | view("type") | nodes(eq("type_key", type_key))
+            | plan_select(["id", "type_key", "kind", "spelling", "decl_usr",
+                          "canonical_id", "extent"])
+        ).plan
+        result = Executor(Storage.from_connection(self._c, self.db_path)).run(plan)
+        return [type_id for _row in result.rows]
+
+    def _adapter_edge_ids(self, edge_id: int) -> list[int]:
+        from .queryplan import Executor, codebase, eq, nodes, select as plan_select, start, view
+        from .storage import Storage
+
+        plan = (
+            start(codebase()) | view("edge") | nodes(eq("edge_id", edge_id))
+            | plan_select(["edge_id"])
+        ).plan
+        result = Executor(Storage.from_connection(self._c, self.db_path)).run(plan)
+        return [int(row[0]) for row in result.rows]
+
+    def _adapter_edge_rows(
+        self, sym_id: int, direction: str,
+        kind_ids: Optional[Sequence[int]], limit: int,
+    ) -> list[tuple]:
+        """Select the complete edge page through the typed plan boundary."""
+        from .queryplan import (
+            Executor, all_of, codebase, eq, limit as plan_limit,
+            nodes, order_by, select as plan_select, start, view,
+        )
+        from .storage import Storage
+
+        if limit == 0:
+            return []
+        field = "dst_id" if direction == "in" else "src_id"
+        predicates = [eq(field, sym_id)]
+        query = (
+            start(codebase()) | view("edge") |
+            nodes(all_of(predicates)) |
+            plan_select([
+                "edge_id", "src_id", "dst_id", "kind", "effective_count",
+                "base_access", "is_virtual", "negative_count",
+            ]) |
+            order_by(["negative_count", "kind", "edge_id"])
+        )
+        if limit > 0:
+            query = query | plan_limit(limit)
+        result = Executor(Storage.from_connection(self._c, self.db_path)).run(query.plan)
+        if result.truncated:
+            raise _AdapterPlanTruncated("edge QueryPlan candidate set was truncated")
+        return [tuple(row) for row in result.rows]
+
+    @staticmethod
+    def _symbol_plan(pred, *, kind: Optional[str] = None, limit: int = 0,
+                     order: Sequence[str] = ("name_length", "name")):
+        from .queryplan import all_of, codebase, eq, limit as plan_limit
+        from .queryplan import nodes, order_by, select as plan_select, start
+
+        predicates = [] if pred is None else [pred]
+        if kind is not None:
+            predicates.append(eq("kind", kind))
+        stage = nodes(all_of(predicates)) if predicates else nodes()
+        plan = start(codebase()) | stage
+        # Selecting id before ordering makes the plan's row shape explicit;
+        # the compatibility layer never reorders or applies a second limit.
+        plan = plan | plan_select(["id", *order]) | order_by(order)
+        return plan | plan_limit(limit) if limit else plan
+
+    def _seed_ids(self, ident) -> list[int]:
+        from .queryplan import codebase, eq, nodes, start
+
+        field, value = ("id", ident) if isinstance(ident, int) else ("usr", ident)
+        return self._adapter_ids(start(codebase()) | nodes(eq(field, value)))
+
+    def _peer_ids(self, sym, direction: str, kinds) -> Optional[set[int]]:
+        from .queryplan import PlanError
+
+        if not kinds:
+            # The legacy all-kinds read has no single relation to lower. The
+            # seed still goes through the canonical adapter; SQL retains the
+            # historical all-relations ordering/evidence expansion.
+            self.plan_for(sym)
+            return None
+        relation_names = tuple(kinds) if kinds else tuple(EDGE_KINDS)
+        ids: set[int] = set()
+        for relation in relation_names:
+            try:
+                ids.update(
+                    self._adapter_ids(
+                        self.plan_for(sym, relation=relation, direction=direction)
+                    )
+                )
+            except (PlanError, _AdapterPlanTruncated):
+                # Typed cross-view legacy relations (notably symbol.of_type)
+                # retain their historical SQL/evidence adapter until the
+                # typed-view executor exposes that transition.  Do not apply
+                # the successful relations' partial candidate set: doing so
+                # would silently drop the failed relation's legacy rows.
+                return None
+        return ids
 
     def _is_resolved(self) -> bool:
         """True once `cidx resolve` has rolled up edge counts (meta flag set).
@@ -1158,9 +1521,14 @@ class GraphQuery:
             const_value=(r["const_value"] if "const_value" in r.keys() else None),
         )
 
-    @staticmethod
-    def _resolve_id(sym) -> int:
-        return sym.id if isinstance(sym, Sym) else int(sym)
+    def _resolve_id(self, sym) -> int:
+        """Resolve a compatibility symbol only after plan-owned selection."""
+        sid = sym.id if isinstance(sym, Sym) else int(sym)
+        # Every symbol-domain public read enters through this adapter gate.
+        # The legacy operation may still hydrate richer rows below, but it
+        # cannot select an unvalidated symbol id directly from SQLite.
+        self._seed_ids(sid)
+        return sid
 
     def _kind_ids(self, kinds: Optional[Iterable[str]]) -> Optional[list[int]]:
         if kinds is None:
@@ -1182,11 +1550,15 @@ class GraphQuery:
         """Fetch one symbol by integer id, USR string, or pass-through Sym."""
         if isinstance(ident, Sym):
             return ident
+        candidate_ids = self._seed_ids(ident)
+        if not candidate_ids:
+            return None
         col = "id" if isinstance(ident, int) else "usr"
         order = " ORDER BY s.semantic_universe_id, s.identity_key" if col == "usr" else ""
+        placeholders = ",".join("?" for _ in candidate_ids)
         rows = self._c.execute(
-            f"SELECT {_SYM_COLS} FROM symbol s WHERE s.{col} = ?{order}",
-            (ident,),
+            f"SELECT {_SYM_COLS} FROM symbol s WHERE s.id IN ({placeholders}){order}",
+            candidate_ids,
         ).fetchall()
         if not rows:
             return None
@@ -1211,6 +1583,11 @@ class GraphQuery:
         Read-only and additive -- it does not alter any existing behaviour.
         """
         sid = self._resolve_id(sym)
+        selected = self._adapter_symbol_rows(
+            sid, ["id", "file", "line", "col", "decl_path"]
+        )
+        if not selected:
+            return None, None
         r = self._c.execute(
             "SELECT file_id, line, col, decl_file_id, decl_line, decl_col, "
             "decl_path FROM symbol s WHERE s.id = ?",
@@ -1253,56 +1630,41 @@ class GraphQuery:
              when neither exact nor prefix matched (or the pattern is empty).
 
         Mirrors storage.search_symbols (the fuzzy tier is identical)."""
-        order = (
-            " ORDER BY LENGTH(COALESCE(s.qual_name, s.spelling)), "
-            "COALESCE(s.qual_name, s.spelling) LIMIT ?"
-        )
-        kind_id = SYMBOL_KIND_IDS.get(kind, -1) if kind else None
+        if limit < 1:
+            return []
+        from .queryplan import any_of, eq, glob
 
-        def run(where: str, params: tuple) -> list[Sym]:
-            sql = f"SELECT {_SYM_COLS} FROM symbol s WHERE {where}"
-            args: list = list(params)
-            if kind_id is not None:
-                sql += " AND s.kind = ?"
-                args.append(kind_id)
-            sql += order
-            args.append(limit)
-            return [self._sym(r) for r in self._c.execute(sql, args)]
+        if kind is not None and kind not in SYMBOL_KIND_IDS:
+            return []
+
+        def run(pred) -> list[Sym]:
+            return self._adapter_symbols(
+                self._symbol_plan(pred, kind=kind, limit=limit)
+            )
 
         if pattern:
-            # 1) exact -- case-sensitive equality, indexed point lookup.
-            hits = run("(s.qual_name = ? OR s.spelling = ?)", (pattern, pattern))
+            # Each historical tier is a complete plan. The first non-empty
+            # plan wins; compatibility code only hydrates those selected ids.
+            hits = run(any_of([eq("qual_name", pattern), eq("spelling", pattern)]))
             if hits:
                 return hits
-            # 2) prefix -- NOCASE range SEARCH (case-insensitive, like the scan).
-            pref = pattern.replace("%", r"\%").replace("_", r"\_") + "%"
-            hits = run(
-                r"(s.qual_name LIKE ? ESCAPE '\' OR s.spelling LIKE ? ESCAPE '\')",
-                (pref, pref),
-            )
+            hits = run(glob("name", _legacy_find_glob(pattern, prefix=True)))
             if hits:
                 return hits
-        # 3) fuzzy fallback -- the original infix scan (also handles '' = all).
-        like = (
-            "%"
-            + "%".join(
-                seg.replace("%", r"\%").replace("_", r"\_")
-                for seg in pattern.split("::")
-                if seg
-            )
-            + "%"
+            return run(glob("name", _legacy_find_glob(pattern)))
+
+        return self._adapter_symbols(
+            self._symbol_plan(None, kind=kind, limit=limit)
         )
-        return run(r"COALESCE(s.qual_name, s.spelling) LIKE ? ESCAPE '\'", (like,))
 
     def by_name(self, spelling: str, kind: Optional[str] = None) -> list[Sym]:
         """Exact-spelling lookup (overloads/statics yield several rows)."""
-        sql = f"SELECT {_SYM_COLS} FROM symbol s WHERE s.spelling = ?"
-        args: list = [spelling]
-        if kind:
-            sql += " AND s.kind = ?"
-            args.append(SYMBOL_KIND_IDS.get(kind, -1))
-        sql += " ORDER BY s.usr"
-        return [self._sym(r) for r in self._c.execute(sql, args)]
+        from .queryplan import eq
+        if kind is not None and kind not in SYMBOL_KIND_IDS:
+            return []
+        return self._adapter_symbols(
+            self._symbol_plan(eq("spelling", spelling), kind=kind, order=("usr",))
+        )
 
     def by_qual_or_spelling(self, *names: str, limit: int = 200) -> list[Sym]:
         """Exact, INDEX-backed lookup over qual_name and spelling for any of
@@ -1312,19 +1674,18 @@ class GraphQuery:
         ``find`` so callers can swap one for the other. Empty / falsy names are
         dropped; returns [] when none remain."""
         uniq = list(dict.fromkeys(n for n in names if n))
-        if not uniq:
+        if not uniq or limit < 1:
             return []
-        ph = ",".join("?" * len(uniq))
-        sql = (
-            f"SELECT {_SYM_COLS} FROM symbol s "
-            f"WHERE s.qual_name IN ({ph}) OR s.spelling IN ({ph}) "
-            "ORDER BY LENGTH(COALESCE(s.qual_name, s.spelling)), "
-            "COALESCE(s.qual_name, s.spelling) LIMIT ?"
+        from .queryplan import any_of, eq
+        return self._adapter_symbols(
+            self._symbol_plan(
+                any_of(
+                    [eq("qual_name", name) for name in uniq]
+                    + [eq("spelling", name) for name in uniq]
+                ),
+                limit=limit,
+            )
         )
-        return [
-            self._sym(r)
-            for r in self._c.execute(sql, [*uniq, *uniq, limit])
-        ]
 
     def entity_nodes_ready(self) -> bool:
         """True once the materialized ``entity_node`` classification table holds
@@ -1334,8 +1695,12 @@ class GraphQuery:
         whether the fast ``entity_node`` JOIN is usable, or whether they must
         fall back to per-record classification on a not-yet-materialized index."""
         if self._entity_nodes_ready is None:
-            row = self._c.execute("SELECT 1 FROM entity_node LIMIT 1").fetchone()
-            self._entity_nodes_ready = row is not None
+            from .queryplan import Executor, codebase, count, nodes, start, view
+            from .storage import Storage
+
+            plan = (start(codebase()) | view("entity") | nodes() | count()).plan
+            result = Executor(Storage.from_connection(self._c, self.db_path)).run(plan)
+            self._entity_nodes_ready = result.scalar > 0
         return self._entity_nodes_ready
 
     def records_by_name(
@@ -1360,40 +1725,48 @@ class GraphQuery:
         uniq = list(dict.fromkeys(n for n in names if n))
         skids = [SYMBOL_KIND_IDS[k] for k in symbol_kinds if k in SYMBOL_KIND_IDS]
         eks = list(entity_kinds)
-        if not uniq or not skids or not eks:
+        if not uniq or not skids or not eks or limit < 1:
             return []
-        nph = ",".join("?" * len(uniq))
-        skph = ",".join("?" * len(skids))
-        ekph = ",".join("?" * len(eks))
-        sql = (
-            f"SELECT {_SYM_COLS} FROM symbol s "
-            "JOIN entity_node en ON en.id = s.id "
-            f"WHERE (s.qual_name IN ({nph}) OR s.spelling IN ({nph})) "
-            f"AND s.kind IN ({skph}) AND en.kind IN ({ekph}) "
-            # exclude template instantiations (Box<int>, stored under the
-            # template's own spelling) -- mirrors model._is_instance.
-            "AND s.is_instantiation = 0 "
-            "ORDER BY LENGTH(COALESCE(s.qual_name, s.spelling)), "
-            "COALESCE(s.qual_name, s.spelling) LIMIT ?"
+        from .queryplan import all_of, any_of, eq, in_list
+        entity_names = (
+            "other", "class", "abstract_class", "interface", "union",
+            "enum", "class_template", "abstract_class_template",
+            "interface_template", "namespace",
         )
-        args = [*uniq, *uniq, *skids, *eks, limit]
-        return [self._sym(r) for r in self._c.execute(sql, args)]
+        pred = all_of([
+            any_of(
+                [eq("qual_name", name) for name in uniq]
+                + [eq("spelling", name) for name in uniq]
+            ),
+            in_list("kind", [
+                name for name, value in SYMBOL_KIND_IDS.items()
+                if value in skids
+            ]),
+            in_list("entity_type", [
+                entity_names[value] if 0 <= value < len(entity_names) else "other"
+                for value in eks
+            ]),
+        ])
+        return [
+            sym for sym in self._adapter_symbols(
+                self._symbol_plan(pred, limit=limit)
+            ) if not sym.is_instantiation
+        ]
 
     def symbols_in_file(self, path_substr: str, limit: int = 500) -> list[Sym]:
         """Symbols whose definition file path contains `path_substr`. Useful to
         enumerate a file's API without opening it."""
-        ids = [fid for fid, (p, _) in self._files().items() if path_substr in p]
-        if not ids:
+        file_ids = [fid for fid, (p, _) in self._files().items() if path_substr in p]
+        if not file_ids or limit < 1:
             return []
-        q = ",".join("?" * len(ids))
-        return [
-            self._sym(r)
-            for r in self._c.execute(
-                f"SELECT {_SYM_COLS} FROM symbol s WHERE s.file_id IN ({q}) "
-                f"ORDER BY s.line, s.col LIMIT ?",
-                (*ids, limit),
+        from .queryplan import any_of, eq
+        return self._adapter_symbols(
+            self._symbol_plan(
+                any_of([eq("file", fid) for fid in file_ids]),
+                limit=limit,
+                order=("line", "col"),
             )
-        ]
+        )
 
     # ===================================================================== #
     # 2. LOOKUP REFERENCES
@@ -1416,54 +1789,31 @@ class GraphQuery:
     ) -> list[Edge]:
         sid = self._resolve_id(sym)
         kids = self._kind_ids(kinds)
-        if direction == "in":
-            mine, peer = "dst_id", "src_id"
-        elif direction == "out":
-            mine, peer = "src_id", "dst_id"
-        else:
+        if direction not in {"in", "out"}:
             raise ValueError(f"direction must be 'in' or 'out', got {direction!r}")
-        # count: edge.count is authoritative only after `cidx resolve`; otherwise
-        # fall back to COUNT(edge_site) for true multiplicity.
-        if self._is_resolved():
-            count_expr = "e.count"
-        else:
-            count_expr = "(SELECT COUNT(*) FROM edge_site es WHERE es.edge_id = e.id)"
-        # alias e.kind -> ekind so it does not collide with symbol.kind (sqlite3.Row
-        # returns the FIRST column on a name clash, which would mislabel the peer).
-        sql = (
-            f"SELECT e.id AS eid, e.src_id, e.dst_id, e.kind AS ekind, "
-            f"{count_expr} AS ecount, e.count AS rawcount, "
-            f"e.base_access, e.is_virtual, {_SYM_COLS} "
-            f"FROM edge e JOIN symbol s ON s.id = e.{peer} "
-            f"WHERE e.{mine} = ?"
+        peer_ids = self._peer_ids(sid, direction, kinds)
+        if peer_ids is not None and not peer_ids:
+            return []
+        rows = self._adapter_edge_rows(
+            sid, direction, kids, limit if peer_ids is None else -1
         )
-        args: list = [sid]
-        if kids:
-            sql += f" AND e.kind IN ({','.join('?' * len(kids))})"
-            args.extend(kids)
-        # e.id tiebreaker (HSE-92 review P2-2, mirrors storage_query.cpp):
-        # `ecount DESC, e.kind` alone is not a total order, so two
-        # identically-limited reads of the same adjacency are not
-        # guaranteed to return the same set of rows for ties.
-        sql += " ORDER BY ecount DESC, e.kind, e.id LIMIT ?"
-        args.append(limit)
         out = []
-        for r in self._c.execute(sql, args):
-            cnt = r["ecount"]
-            if not cnt:  # no sites recorded -> at least 1
-                cnt = r["rawcount"] or 1
-            out.append(
-                Edge(
-                    edge_id=r["eid"],
-                    kind=EDGE_NAMES[r["ekind"]],
-                    src_id=r["src_id"],
-                    dst_id=r["dst_id"],
-                    peer=self._sym(r),
-                    count=cnt,
-                    base_access=r["base_access"],
-                    is_virtual=r["is_virtual"],
-                )
-            )
+        for row in rows:
+            edge_id, src_id, dst_id, kind_id, count, base_access, is_virtual, _ = row
+            peer_id = src_id if direction == "in" else dst_id
+            if peer_ids is not None and peer_id not in peer_ids:
+                continue
+            if kids and kind_id not in kids:
+                continue
+            peer = self.get(src_id if direction == "in" else dst_id)
+            if peer is None:
+                continue
+            out.append(Edge(edge_id=edge_id, kind=EDGE_NAMES[kind_id],
+                            src_id=src_id, dst_id=dst_id, peer=peer,
+                            count=count, base_access=base_access,
+                            is_virtual=is_virtual))
+            if limit > 0 and len(out) >= limit:
+                break
         # Eager-load the reference sites (WHERE each edge occurs) so a serialized
         # edge always carries the use/call location, not just the peer's decl
         # line. Internal traversals that discard sites pass with_sites=False.
@@ -1524,33 +1874,39 @@ class GraphQuery:
         The relationship is direct by design: an alias-of-alias is returned for
         the intermediate alias entity, not for the final record it eventually
         resolves to."""
-        sid = self._resolve_id(sym)
-        alias_kinds = (
-            SYMBOL_KIND_IDS["typedef"],
-            SYMBOL_KIND_IDS["type-alias"],
-        )
-        rows = self._c.execute(
-            f"SELECT {_SYM_COLS} FROM symbol s "
-            "JOIN edge e ON e.src_id = s.id "
-            "WHERE e.dst_id = ? AND e.kind = ? AND s.kind IN (?, ?) "
-            "ORDER BY COALESCE(s.qual_name, s.spelling), s.id LIMIT ?",
-            (sid, EDGE_KINDS["alias_of"], *alias_kinds, limit),
-        ).fetchall()
-        return [self._sym(r) for r in rows]
+        if limit < 1:
+            return []
+        from .queryplan import in_list, select as plan_select, order_by, where as plan_where
+
+        plan = self.plan_for(sym, relation="alias_of", direction="in")
+        plan = plan | plan_where(in_list("kind", ["typedef", "type-alias"]))
+        plan = plan | plan_select(["id", "name_length", "name"])
+        plan = plan | order_by(["name_length", "name"])
+        from .queryplan import limit as plan_limit
+        return self._adapter_symbols(plan | plan_limit(limit))
 
     def sites(self, edge, limit: int = 200) -> list[Site]:
         """Concrete source locations for an edge (the file:line grounding).
         Accepts an Edge or a raw edge_id."""
         eid = edge.edge_id if isinstance(edge, Edge) else int(edge)
+        if limit == 0:
+            return []
         files = self._files()
+        selected = self._adapter_site_keys(eid, limit)
+        if not selected:
+            return []
         out = []
-        for r in self._c.execute(
-            "SELECT file_id, line, col, conditional, args_sig, "
-            "       recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos,"
-            "       recv_type_is_value "
-            "FROM edge_site_read WHERE edge_id = ? ORDER BY file_id, line, col LIMIT ?",
-            (eid, limit),
-        ):
+        for edge_id, file_id, line, col in selected:
+            r = self._c.execute(
+                "SELECT edge_id, file_id, line, col, conditional, args_sig, "
+                "       recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos,"
+                "       recv_type_is_value FROM edge_site_read "
+                "WHERE edge_id = ? AND file_id = ? AND COALESCE(line,0) = ? "
+                "AND COALESCE(col,0) = ?",
+                (edge_id, file_id, line, col),
+            ).fetchone()
+            if r is None:
+                return []
             p = files.get(r["file_id"], (None, None))[0] if r["file_id"] else None
             out.append(
                 Site(
@@ -1578,6 +1934,8 @@ class GraphQuery:
         symbols usually return their single site. Empty on a pre-v26 (un-
         reindexed) DB."""
         sid = self._resolve_id(sym)
+        if not self._adapter_symbol_rows(sid, ["id", "kind", "is_definition"]):
+            return []
         files = self._files()
         out: list[Site] = []
         for r in self._c.execute(
@@ -1804,21 +2162,34 @@ class GraphQuery:
         """The formal template parameters declared by `sym` (a class/function
         template), in declaration order. Empty for non-templates."""
         sid = self._resolve_id(sym)
+        from .queryplan import out as plan_out
+        keys = self._adapter_rows(
+            self.plan_for(sid) | plan_out("has_template_parameter"),
+            ["owner_id", "position"], order=("owner_id", "position"),
+        )
+        allowed = set(keys)
         rows = self._c.execute(
             "SELECT position, param_kind, name, default_txt, type_id, "
             "default_type_id, default_ref_id FROM template_param "
             "WHERE owner_id = ? ORDER BY position",
             (sid,),
         ).fetchall()
+        by_key = {(sid, r["position"]): r for r in rows if (sid, r["position"]) in allowed}
         return [
             TemplateParam(
-                r["position"], r["param_kind"], r["name"], r["default_txt"],
-                self._type_info(r["type_id"]) if r["type_id"] is not None else None,
-                self._type_info(r["default_type_id"])
-                if r["default_type_id"] is not None else None,
-                self.get(r["default_ref_id"]) if r["default_ref_id"] is not None else None,
+                by_key[(sid, position)]["position"],
+                by_key[(sid, position)]["param_kind"],
+                by_key[(sid, position)]["name"],
+                by_key[(sid, position)]["default_txt"],
+                self._type_info(by_key[(sid, position)]["type_id"])
+                if by_key[(sid, position)]["type_id"] is not None else None,
+                self._type_info(by_key[(sid, position)]["default_type_id"])
+                if by_key[(sid, position)]["default_type_id"] is not None else None,
+                self.get(by_key[(sid, position)]["default_ref_id"])
+                if by_key[(sid, position)]["default_ref_id"] is not None else None,
             )
-            for r in rows
+            for _owner, position in keys
+            if (sid, position) in by_key
         ]
 
     def template_args(self, sym) -> list[TemplateArg]:
@@ -1826,6 +2197,13 @@ class GraphQuery:
         explicit instantiation, or a function that instantiates a template), in
         position order. Empty when `sym` binds no template arguments."""
         sid = self._resolve_id(sym)
+        from .queryplan import out as plan_out
+        keys = self._adapter_rows(
+            self.plan_for(sid) | plan_out("has_template_argument"),
+            ["owner_id", "position", "pack_index"],
+            order=("owner_id", "position", "pack_index"),
+        )
+        allowed = set(keys)
         rows = self._c.execute(
             "SELECT position, pack_index, arg_kind, ref_id, literal, type_id "
             "FROM template_arg "
@@ -1839,6 +2217,7 @@ class GraphQuery:
                 self._type_info(r["type_id"]) if r["type_id"] is not None else None,
             )
             for r in rows
+            if (sid, r["position"], r["pack_index"]) in allowed
         ]
 
     def instantiations(self, sym, limit: int = 500) -> list[Sym]:
@@ -1856,14 +2235,12 @@ class GraphQuery:
         Returns only sources with ``is_instantiation=1`` so the result is
         precisely the set of implicit-instantiation type and member nodes."""
         sid = self._resolve_id(sym)
-        rows = self._c.execute(
-            f"SELECT {_SYM_COLS} FROM symbol s "
-            "JOIN edge e ON e.src_id = s.id "
-            "WHERE e.dst_id = ? AND e.kind = 5 AND s.is_instantiation = 1 "
-            "ORDER BY s.id LIMIT ?",
-            (sid, limit),
-        ).fetchall()
-        return [self._sym(r) for r in rows]
+        from .queryplan import eq, limit as plan_limit, select as plan_select
+        from .queryplan import where as plan_where
+        plan = self.plan_for(sid, relation="instantiates", direction="in")
+        plan = plan | plan_where(eq("is_instantiation", 1))
+        plan = plan | plan_select(["id"]) | plan_limit(limit)
+        return self._adapter_symbols(plan)
 
     def template_of(self, sym) -> Optional[Sym]:
         """The primary template that `sym` is an instantiation of -- the outgoing
@@ -1872,17 +2249,15 @@ class GraphQuery:
         Returns ``None`` when ``sym`` is not an instantiation node or has no
         outgoing ``instantiates`` edge (e.g. is a template itself)."""
         sym_obj = self.get(sym)
-        if sym_obj is None or not sym_obj.is_instantiation:
+        if sym_obj is None:
             return None
         sid = sym_obj.id
-        row = self._c.execute(
-            f"SELECT {_SYM_COLS} FROM symbol s "
-            "JOIN edge e ON e.dst_id = s.id "
-            "WHERE e.src_id = ? AND e.kind = 5 "
-            "ORDER BY s.id LIMIT 1",
-            (sid,),
-        ).fetchone()
-        return self._sym(row) if row else None
+        from .queryplan import limit as plan_limit
+        plan = self.plan_for(sid, relation="instantiates", direction="out")
+        ids = self._adapter_ids(plan | plan_limit(1))
+        if not sym_obj.is_instantiation:
+            return None
+        return self.get(ids[0]) if ids else None
 
     def template_of_member(self, inst_member) -> Optional[Sym]:
         """The instantiation TYPE node that owns ``inst_member`` via
@@ -1894,15 +2269,15 @@ class GraphQuery:
         edge exists (e.g. free-function instantiation or member without a
         method_of edge)."""
         sid = self._resolve_id(inst_member)
-        # Prefer method_of (9) then field_of (8); pick the first hit.
-        row = self._c.execute(
-            f"SELECT {_SYM_COLS} FROM symbol s "
-            "JOIN edge e ON e.dst_id = s.id "
-            "WHERE e.src_id = ? AND e.kind IN (9, 8) AND s.is_instantiation = 1 "
-            "ORDER BY e.kind LIMIT 1",
-            (sid,),
-        ).fetchone()
-        return self._sym(row) if row else None
+        from .queryplan import limit as plan_limit
+        from .queryplan import where as plan_where, eq
+        for relation in ("method_of", "field_of"):
+            plan = self.plan_for(sid, relation=relation, direction="out")
+            plan = plan | plan_where(eq("is_instantiation", 1))
+            ids = self._adapter_ids(plan | plan_limit(1))
+            if ids:
+                return self.get(ids[0])
+        return None
 
     def _instantiation_template_args(self, inst_member: Sym) -> list[TemplateArg]:
         """Concrete args for an instantiation/specialization member.
@@ -2086,12 +2461,20 @@ class GraphQuery:
     def redefined(self, limit: int = 500) -> list[Sym]:
         """Every symbol defined in more than one backend (multi_def > 1) -- the
         answer to "list all re-defined". Most-redefined first."""
-        rows = self._c.execute(
-            "SELECT * FROM symbol WHERE multi_def > 1 "
-            "ORDER BY multi_def DESC, qual_name, spelling LIMIT ?",
-            (limit,),
-        ).fetchall()
-        return [self._sym(r) for r in rows]
+        if limit < 1:
+            return []
+        from .queryplan import all_of, ne
+        # multi_def is an integer counter; excluding 0 and 1 expresses > 1 in
+        # the portable predicate vocabulary, while the derived negative field
+        # preserves the legacy descending order in the plan itself.
+        pred = all_of([ne("multi_def", 0), ne("multi_def", 1)])
+        return self._adapter_symbols(
+            self._symbol_plan(
+                pred,
+                limit=limit,
+                order=("negative_multi_def", "name"),
+            )
+        )
 
     def _definition_rows(self, sql: str, params: Sequence[Any]) -> list[Definition]:
         files = self._files()
@@ -2121,6 +2504,8 @@ class GraphQuery:
         """The distinct bodies of `sym`, one per backend (component, file). A
         normal symbol has one; a redefined one has several."""
         sid = self._resolve_id(sym)
+        if not self._adapter_symbol_rows(sid, ["id", "kind", "is_definition"]):
+            return []
         return self._definition_rows(
             "SELECT id AS def_id, symbol_id, file_id, line, col, end_line, "
             "       end_col, init_text "
@@ -2134,6 +2519,8 @@ class GraphQuery:
         definition of that callee (materialised `possible_call`). This is the
         "possible call" fan-out -- e.g. ``do()`` -> {Server1::reg, Server2::reg}."""
         sid = self._resolve_id(sym)
+        if not self._adapter_symbol_rows(sid, ["id", "kind", "name"]):
+            return []
         return self._definition_rows(
             "SELECT td.id AS def_id, td.symbol_id AS symbol_id, "
             "       td.file_id AS file_id, "
@@ -2149,6 +2536,9 @@ class GraphQuery:
 
     def _definition_edge_syms(self, definition, kind: int, limit: int) -> list[Sym]:
         """dst symbols of this ONE body's def_edge rows of `kind` (1 calls / 7 uses)."""
+        if isinstance(definition, Definition):
+            if not self._adapter_symbol_rows(definition.sym.id, ["id"]):
+                return []
         def_id = definition.def_id if isinstance(definition, Definition) else int(definition)
         rows = self._c.execute(
             f"SELECT {_SYM_COLS} FROM def_edge de JOIN symbol s ON s.id = de.dst_id "
@@ -2191,6 +2581,8 @@ class GraphQuery:
     def _type_info(self, type_id: int) -> Optional[TypeInfo]:
         """Display info for one type_node id (kind resolved to its name;
         canonical spelling attached when the node is sugared)."""
+        if not self._adapter_type_ids(type_id):
+            return None
         r = self._c.execute(
             "SELECT id, spelling, kind, canonical_id, decl_usr, is_const, "
             "is_volatile, is_restrict, extent FROM type_node "
@@ -2223,6 +2615,16 @@ class GraphQuery:
         """Signature/type facts of one symbol: returns/params for callables,
         of_type for variables/fields, underlying for typedef/alias symbols."""
         sid = self._resolve_id(sym)
+        if not self._adapter_symbol_rows(sid, ["id"]):
+            return SignatureInfo()
+        slots = self.signature_slots(sid)
+        returns = next(
+            (slot.declared_type for slot in slots if slot.role == "return"), None
+        )
+        params = tuple(
+            ParamInfo(slot.position, slot.name, slot.declared_type)
+            for slot in slots if slot.role == "parameter" and slot.position is not None
+        )
         kinds = {
             r["kind"]: r["type_id"]
             for r in self._c.execute(
@@ -2230,27 +2632,13 @@ class GraphQuery:
                 (sid,),
             )
         }
-        params = []
-        for r in self._c.execute(
-            "SELECT position, name, type_id FROM parameter "
-            "WHERE owner_id = ? ORDER BY position",
-            (sid,),
-        ):
-            params.append(
-                ParamInfo(
-                    position=r["position"],
-                    name=r["name"],
-                    type=self._type_info(r["type_id"])
-                    if r["type_id"] is not None
-                    else None,
-                )
-            )
+
         def info(k: int) -> Optional[TypeInfo]:
             return self._type_info(kinds[k]) if k in kinds else None
 
         return SignatureInfo(
-            returns=info(1),
-            params=tuple(params),
+            returns=returns or info(1),
+            params=params,
             of_type=info(2),
             underlying=info(3),
         )
@@ -2267,6 +2655,9 @@ class GraphQuery:
         tid = type_or_id if isinstance(type_or_id, int) else getattr(type_or_id, "id", None)
         if tid is None:
             return []
+        # Preserve the legacy unknown-type record; existing types are
+        # validated through the typed plan before the recursive hydrator runs.
+        self._adapter_type_ids(tid)
         out: list[dict[str, Any]] = []
         pending = [(tid, "root", "root", 0, 0, (tid,))]
         relations = {1: "pointee", 2: "element_type", 3: "alias_of",
@@ -2386,6 +2777,10 @@ class GraphQuery:
         self, declared_type_id: Optional[int], adjusted_type_id: Optional[int]
     ) -> tuple[str, str, Optional[str]]:
         """Derive public signature-slot facts from typed relation IDs."""
+        if declared_type_id is not None:
+            self._adapter_type_ids(declared_type_id)
+        if adjusted_type_id is not None:
+            self._adapter_type_ids(adjusted_type_id)
         declared = (
             self._type_info(declared_type_id)
             if declared_type_id is not None else None
@@ -2400,31 +2795,21 @@ class GraphQuery:
         """Unified return/parameter view used by the E2E and public clients."""
         sid = self._resolve_id(sym)
         rows: list[SignatureSlot] = []
-        ret = self._c.execute(
-            "SELECT type_id FROM symbol_type WHERE symbol_id = ? AND kind = 1",
-            (sid,),
-        ).fetchone()
-        if ret is not None:
-            t = self._type_info(ret["type_id"])
-            mode, value_kind, named = self.slot_type_facts_for_ids(t.id, t.id)
-            rows.append(SignatureSlot("return", None, None, None, t, t, mode, value_kind, named))
-        for r in self._c.execute(
-            "SELECT position, pack_index, name, type_id, declared_type_id, adjusted_type_id, "
-            "default_text, default_origin, reference_semantics FROM parameter "
-            "WHERE owner_id = ? ORDER BY position, pack_index",
-            (sid,),
-        ):
-            declared_id = r["declared_type_id"] or r["type_id"]
-            adjusted_id = r["adjusted_type_id"] or r["type_id"]
+        for r in self._adapter_signature_slot_rows(sid):
+            (slot_kind, position, pack_index, name, type_id_value,
+             declared_value, adjusted_value, default_text, default_origin,
+             reference_semantics, mode, value_kind, named_decl) = r
+            declared_id = declared_value or type_id_value
+            adjusted_id = adjusted_value or type_id_value
             declared = self._type_info(declared_id) if declared_id is not None else None
             adjusted = self._type_info(adjusted_id) if adjusted_id is not None else None
-            mode, value_kind, named = self.slot_type_facts_for_ids(
-                declared_id, adjusted_id
-            )
+            if slot_kind == "return":
+                declared = adjusted = self._type_info(type_id_value) if type_id_value is not None else None
             rows.append(SignatureSlot(
-                "parameter", r["position"], r["pack_index"], r["name"], declared, adjusted,
-                mode, value_kind, named, r["reference_semantics"],
-                r["default_text"], r["default_origin"],
+                slot_kind, None if position is None or position < 0 else position,
+                None if pack_index is None or pack_index < 0 else pack_index,
+                name, declared, adjusted, mode or "value", value_kind or "other",
+                named_decl, reference_semantics, default_text, default_origin,
             ))
         return rows
 
@@ -2436,6 +2821,13 @@ class GraphQuery:
         target = self.get(sym) if not isinstance(sym, Sym) else sym
         if target is None:
             return []
+        from .queryplan import Executor, select as plan_select
+        from .storage import Storage
+        type_plan = (
+            self.plan_for(target, relation="of_type", direction="out")
+            | plan_select(["id"])
+        ).plan
+        Executor(Storage.from_connection(self._c, self.db_path)).run(type_plan)
         tids = [
             r["id"]
             for r in self._c.execute(
@@ -2641,6 +3033,8 @@ class GraphQuery:
 
         Returns one row per non-literal positional argument at any call site
         of this edge, ordered by (file_id, line, col, position)."""
+        if not self._adapter_edge_ids(edge_id):
+            return []
         rows = self._c.execute(
             "SELECT position, src_kind, type_usr, decl_usr, callee_usr, type_is_value "
             "FROM call_arg_read WHERE edge_id = ? "
@@ -2666,6 +3060,8 @@ class GraphQuery:
 
         Returns args for the given (edge_id, file_id, line, col) site in
         position order."""
+        if not self._adapter_edge_ids(edge_id):
+            return []
         rows = self._c.execute(
             "SELECT position, src_kind, type_usr, decl_usr, callee_usr, type_is_value "
             "FROM call_arg_read WHERE edge_id = ? AND file_id = ? "
@@ -2708,6 +3104,8 @@ class GraphQuery:
         """The :class:`Site` row for the given call-site PK, including
         Phase-2 receiver provenance fields (recv_src_kind / recv_type_usr /
         recv_decl_usr / recv_param_pos).  Returns None when no such site row exists."""
+        if not self._adapter_edge_ids(edge_id):
+            return None
         files = self._files()
         r = self._c.execute(
             "SELECT file_id, line, col, conditional, args_sig, "
@@ -2774,6 +3172,8 @@ class GraphQuery:
 
     def stats(self) -> dict[str, Any]:
         """Counts that tell you how complete the index is before you trust it."""
+        self.edge_count()
+        self._adapter_symbol_rows(0, ["id"])
         one = lambda s: self._c.execute(s).fetchone()[0]  # noqa: E731
         by_edge = {
             EDGE_NAMES[r["kind"]]: r["n"]

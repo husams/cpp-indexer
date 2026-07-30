@@ -709,6 +709,9 @@ public:
   std::vector<Edge> cross_repo_edges();
 
   Stats stats();
+  // Aggregate row counts used by indexing telemetry. The first value is the
+  // database cardinality; the second is the indexing-fact cardinality.
+  auto indexing_cardinality() -> std::pair<std::int64_t, std::int64_t>;
 
   // -- graph read-only accessors (M6 — query.py parity) ----------------------
   // A1: total edge count (query.py:558)
@@ -763,6 +766,8 @@ public:
   // many total sites the edge has.
   std::vector<EdgeSiteRow> edge_sites_page(int64_t edge_id, int offset,
                                            int limit);
+  std::optional<EdgeSiteRow> edge_site_by_key(int64_t edge_id, int64_t file_id,
+                                              int64_t line, int64_t col);
 
   // Indexed EXISTS aggregate: whether ANY of this edge's sites is
   // config-conditional. Bounded by the edge's own site count (edge_id is

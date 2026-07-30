@@ -1,7 +1,7 @@
 import cytoscape, { type Core } from "cytoscape";
 import { toCytoscapeElements } from "./cytoscape-adapter.ts";
-import { boundedFixture, canonicalFixture } from "./fixtures.ts";
-import { applyBudget, visualSemantics, type GraphKind, type GraphViewResult, type LayoutName } from "./graph-view.ts";
+import { boundedFixture, canonicalFixture, overlayFixture, type OverlayFixture } from "./fixtures.ts";
+import { applyBudget, exportOverlaySnapshot, visualSemantics, type GraphKind, type GraphViewResult, type LayoutName, type Overlay, type OverlayIdentity } from "./graph-view.ts";
 import "./styles.css";
 
 const graphElement = document.querySelector<HTMLDivElement>("#graph")!;
@@ -16,8 +16,10 @@ const queryInput = document.querySelector<HTMLInputElement>("#query-input")!;
 const showGroupsInput = document.querySelector<HTMLInputElement>("#show-groups")!;
 const showEvidenceInput = document.querySelector<HTMLInputElement>("#show-evidence")!;
 const resetButton = document.querySelector<HTMLButtonElement>("#reset-button")!;
+const overlayElement = document.querySelector<HTMLDivElement>("#overlay-panel")!;
+const exportOverlayButton = document.querySelector<HTMLButtonElement>("#export-overlay")!;
 
-if (!graphElement || !inspectorElement || !budgetElement || !statusElement || !historyElement || !historyCountElement || !fixtureSelect || !layoutSelect || !queryInput || !showGroupsInput || !showEvidenceInput || !resetButton) {
+if (!graphElement || !inspectorElement || !budgetElement || !statusElement || !historyElement || !historyCountElement || !fixtureSelect || !layoutSelect || !queryInput || !showGroupsInput || !showEvidenceInput || !resetButton || !overlayElement || !exportOverlayButton) {
   throw new Error("GraphView prototype markup is incomplete");
 }
 
@@ -25,6 +27,7 @@ let cy: Core | undefined;
 let currentResult: GraphViewResult = boundedFixture("symbol", browserBudget());
 let currentLayout: LayoutName = "breadthfirst";
 let history: string[] = [];
+let counterexampleStep = 0;
 
 const visualTruthLegend = [
   ["complete", "●", "solid", "Complete source or catalog fact"],
@@ -41,7 +44,12 @@ function browserBudget() {
 
 function render(): void {
   const includeGroups = showGroupsInput.checked;
-  currentResult = applyBudget(canonicalFixture(fixtureSelect.value as Exclude<GraphKind, "group" | "file">), browserBudget());
+  const selectedFixture = fixtureSelect.value;
+  const overlayFixtures: readonly OverlayFixture[] = ["evidence", "diff", "effect", "proof", "counterexample"];
+  currentResult = overlayFixtures.includes(selectedFixture as OverlayFixture)
+    ? overlayFixture(selectedFixture as OverlayFixture)
+    : applyBudget(canonicalFixture(selectedFixture as Exclude<GraphKind, "group" | "file">), browserBudget());
+  counterexampleStep = 0;
   if (cy) cy.destroy();
   cy = cytoscape({
     container: graphElement,
@@ -57,6 +65,49 @@ function render(): void {
     if (!cy?.elements(":selected").length) showEmptyInspector();
   });
   updateStatus();
+  renderOverlay();
+}
+
+function overlayIdentityText(identity: OverlayIdentity): string {
+  const provenance = identity.source ? `${identity.source.path}:${identity.source.line}${identity.source.column === undefined ? "" : `:${identity.source.column}`}` : `limitation: ${identity.limitation}`;
+  return `result ${identity.resultId} · ${identity.evidenceId ?? "no evidence id"} · ${provenance}`;
+}
+
+function overlayState(state: string): string {
+  const cues: Record<string, string> = { added: "+", removed: "−", changed: "↔", invalidated: "!", unchanged: "=", known: "●", unknown: "?", conditional: "◇", proved: "✓", open: "○", refuted: "×", assumed: "◇", inferred: "≈" };
+  return `${cues[state] ?? "·"} ${state}`;
+}
+
+function overlayItem(item: { id: string; label: string; identity: OverlayIdentity; state?: string; strength?: string }): string {
+  const state = item.state ?? item.strength;
+  return `<li><div class="overlay-item-title"><strong>${escapeHtml(item.label)}</strong>${state ? `<span class="overlay-state">${escapeHtml(overlayState(state))}</span>` : ""}</div><code>${escapeHtml(overlayIdentityText(item.identity))}</code></li>`;
+}
+
+function renderOverlay(): void {
+  const selected = fixtureSelect.value as OverlayFixture;
+  const overlay: Overlay | undefined = currentResult.overlays?.[selected];
+  exportOverlayButton.disabled = !overlay;
+  if (!overlay) {
+    overlayElement.innerHTML = '<p class="muted">Choose an evidence, diff, effect, proof, or TLA+ fixture.</p>';
+    return;
+  }
+  const heading = `<p class="overlay-title"><strong>${escapeHtml(overlay.title)}</strong><span class="overlay-kind">${escapeHtml(overlay.kind)}</span></p>`;
+  if (overlay.kind === "evidence") {
+    overlayElement.innerHTML = `${heading}<p class="muted">Typed evidence and a bounded explanation path; no frontend inference is added.</p><h3>Evidence</h3><ul class="overlay-list">${overlay.items.map((item) => overlayItem(item)).join("")}</ul><h3>Path</h3><ol class="overlay-list">${overlay.path.map((step) => `<li><div class="overlay-item-title"><strong>${escapeHtml(step.label)}</strong><span class="overlay-state">${escapeHtml(step.relation ?? "step")}</span></div><code>${escapeHtml(overlayIdentityText(step.identity))}</code></li>`).join("")}</ol>`;
+  } else if (overlay.kind === "diff") {
+    overlayElement.innerHTML = `${heading}<p class="overlay-identities"><code>old ${escapeHtml(overlay.oldWorkspace.version)} / ${escapeHtml(overlay.oldFactSet.version)}</code><br><code>new ${escapeHtml(overlay.newWorkspace.version)} / ${escapeHtml(overlay.newFactSet.version)}</code></p><ul class="overlay-list">${overlay.entries.map((entry) => overlayItem(entry)).join("")}</ul>`;
+  } else if (overlay.kind === "effect") {
+    const section = (label: string, items: readonly { id: string; label: string; state: string; identity: OverlayIdentity }[]) => `<h3>${escapeHtml(label)}</h3><ul class="overlay-list">${items.map((item) => overlayItem(item)).join("") || '<li class="muted">None declared.</li>'}</ul>`;
+    overlayElement.innerHTML = `${heading}<p>${escapeHtml(overlay.summary)}</p>${section("Abstract regions", overlay.regions)}${section("Call dependencies", overlay.callDependencies)}${section("Assumptions", overlay.assumptions)}${section("Target coverage", overlay.targetCoverage)}${section("Unknown boundaries", overlay.unknownBoundaries)}`;
+  } else if (overlay.kind === "proof") {
+    const depthOf = (id: string): number => { const parent = overlay.claims.find((claim) => claim.id === id)?.parentId; return parent === undefined ? 0 : depthOf(parent) + 1; };
+    overlayElement.innerHTML = `${heading}<p class="muted">Trusted models: ${escapeHtml(overlay.trustedModels.join(", ") || "none")}</p><ul class="overlay-list proof-list">${overlay.claims.map((claim) => `<li style="margin-left:${depthOf(claim.id) * 12}px">${overlayItem(claim)}</li>`).join("")}</ul><p class="muted">Assumptions: ${escapeHtml(overlay.assumptions.join("; ") || "none")}</p>`;
+  } else {
+    const step = overlay.steps[Math.min(counterexampleStep, overlay.steps.length - 1)]!;
+    overlayElement.innerHTML = `${heading}<p><strong>${escapeHtml(overlay.specification)}</strong>: ${escapeHtml(overlay.violation)}</p><div class="trace-controls"><button id="trace-previous" type="button" ${counterexampleStep === 0 ? "disabled" : ""}>Previous</button><span>Step ${step.index + 1} / ${overlay.steps.length}</span><button id="trace-next" type="button" ${counterexampleStep >= overlay.steps.length - 1 ? "disabled" : ""}>Next</button></div><dl class="trace-state">${step.state.map((binding) => `<dt>${escapeHtml(binding.name)}</dt><dd><code>${escapeHtml(binding.value)}</code></dd>`).join("")}</dl><p class="muted">Action: ${escapeHtml(step.action ?? "state observation")}</p><p><code>${escapeHtml(overlayIdentityText(step.identity))}</code></p>`;
+    overlayElement.querySelector<HTMLButtonElement>("#trace-previous")?.addEventListener("click", () => { counterexampleStep -= 1; renderOverlay(); });
+    overlayElement.querySelector<HTMLButtonElement>("#trace-next")?.addEventListener("click", () => { counterexampleStep += 1; renderOverlay(); });
+  }
 }
 
 function graphStyle(showEvidence: boolean): cytoscape.StylesheetJson {
@@ -135,6 +186,16 @@ showGroupsInput.addEventListener("change", render);
 showEvidenceInput.addEventListener("change", render);
 resetButton.addEventListener("click", () => { currentLayout = "breadthfirst"; layoutSelect.value = currentLayout; showEmptyInspector(); render(); });
 queryInput.addEventListener("keydown", (event) => { if (event.key === "Enter") updateHistory(queryInput.value.trim() || "Untitled query"); });
+exportOverlayButton.addEventListener("click", () => {
+  const overlay = currentResult.overlays?.[fixtureSelect.value as OverlayFixture];
+  if (!overlay) return;
+  const payload = exportOverlaySnapshot(overlay, currentResult.overlays?.exportMaxBytes ?? 16_384);
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(new Blob([payload], { type: "application/json" }));
+  link.download = `cidx-${overlay.kind}-overlay.json`;
+  link.click();
+  URL.revokeObjectURL(link.href);
+});
 
 updateHistory("Symbol / calls");
 render();

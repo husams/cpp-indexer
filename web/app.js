@@ -239,7 +239,38 @@ const graphState = (() => {
   return {mergeSlices, trackFreshness, computeGroups};
 })();
 
-if (typeof module !== 'undefined') module.exports = graphState;
+const overlayState = (() => {
+  const kinds = ['evidence', 'diff', 'effect', 'proof', 'counterexample'];
+  const bundleFor = (view) => view?.overlays || view?.metadata?.overlays || {};
+  const get = (view, kind) => {
+    const bundle = bundleFor(view);
+    return kinds.includes(kind) ? bundle[kind] || null : null;
+  };
+  const identityText = (identity = {}) => {
+    const source = identity.source || identity.location;
+    const provenance = source ? `${source.path || source.file || 'source'}:${source.line ?? ''}${source.column === undefined ? '' : `:${source.column}`}` : `limitation: ${identity.limitation || 'named limitation unavailable'}`;
+    return `result ${identity.resultId || identity.result_id || 'unknown'} · ${identity.evidenceId || identity.evidence_id || 'no evidence id'} · ${provenance}`;
+  };
+  const items = (overlay) => {
+    if (!overlay) return [];
+    if (overlay.kind === 'evidence') return [...(overlay.items || []), ...(overlay.path || []).map((step) => ({...step, id: `path:${step.sequence}`, label: step.label, state: step.relation || 'step'}))];
+    if (overlay.kind === 'diff') return overlay.entries || [];
+    if (overlay.kind === 'effect') return ['regions', 'callDependencies', 'assumptions', 'targetCoverage', 'unknownBoundaries'].flatMap((name) => overlay[name] || []);
+    if (overlay.kind === 'proof') return overlay.claims || [];
+    return overlay.steps || [];
+  };
+  const snapshot = (overlay, maxBytes = 16384) => {
+    const result = {version: 1, bounded: true, truncated: false, overlay: JSON.parse(JSON.stringify(overlay))};
+    const arrays = overlay?.kind === 'evidence' ? [result.overlay.items, result.overlay.path] : overlay?.kind === 'diff' ? [result.overlay.entries] : overlay?.kind === 'effect' ? [result.overlay.regions, result.overlay.callDependencies, result.overlay.assumptions, result.overlay.targetCoverage, result.overlay.unknownBoundaries] : overlay?.kind === 'proof' ? [result.overlay.claims] : [result.overlay.steps];
+    const bytes = () => new TextEncoder().encode(JSON.stringify(result)).byteLength;
+    for (const entries of arrays) while (bytes() > maxBytes && entries.length) { entries.pop(); result.truncated = true; }
+    if (bytes() > maxBytes) throw new Error('overlay cannot fit its bounded export snapshot');
+    return JSON.stringify(result);
+  };
+  return {kinds, get, identityText, items, snapshot};
+})();
+
+if (typeof module !== 'undefined') module.exports = {...graphState, overlayState};
 if (typeof document !== 'undefined') {
 (() => {
   const embedded = window.CIDX_GRAPH_VIEW || {nodes: [], edges: [], metadata: {}};
@@ -262,12 +293,31 @@ if (typeof document !== 'undefined') {
   const expandInButton = document.getElementById('expand-in');
   const accessible = document.getElementById('accessible-nodes');
   const liveControls = document.getElementById('live-controls');
+  const overlayPanel = document.getElementById('overlay-panel');
+  const overlayKind = document.getElementById('overlay-kind');
+  const overlayExport = document.getElementById('overlay-export');
+  let overlayStep = 0;
+  // These are browser budgets, deliberately stricter than the transport's
+  // maximums. A provider or a malformed saved snapshot must be refused
+  // before Cytoscape allocates a large layout graph on the main thread.
+  const BROWSER_BUDGET = Object.freeze({
+    maxNodes: 2500, maxEdges: 5000, maxSites: 10000,
+    maxLabelChars: 250000, maxJsonBytes: 8 * 1024 * 1024,
+  });
+  const performanceEvent = (name, detail) => window.CIDX_PERFORMANCE_OBSERVER?.(name, detail);
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const badge = (name, cls) => `<span class="badge ${cls || ''}">${esc(name)}</span>`;
-  const statusBadges = (s = {}) => Object.entries(s)
+  const safeClass = (value) => String(value ?? '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32);
+  const badge = (name, cls) => `<span class="badge ${safeClass(cls)}">${esc(name)}</span>`;
+  const statusBadges = (s = {}) => Object.entries(s && typeof s === 'object' ? s : {})
     .filter(([k, v]) => v === true || v === 'partial' || v === 'unknown' || v === 'stale' || v === 'truncated' || v === 'external')
+    .slice(0, 16)
     .map(([k, v]) => badge(`${k}${v === true ? '' : `: ${v}`}`, k === 'external' ? 'external' : k))
     .join('');
+  const overlayCue = (state) => ({added: '+', removed: '−', changed: '↔', invalidated: '!', unchanged: '=', known: '●', unknown: '?', conditional: '◇', proved: '✓', open: '○', refuted: '×', assumed: '◇', inferred: '≈'}[state] || '·');
+  const renderOverlayItems = (items) => (items || []).map((item) => `<li><div class="overlay-item-title"><strong>${esc(item.label || item.name || `step ${item.index ?? ''}`)}</strong>${item.state || item.strength || item.relation ? `<span class="overlay-state">${esc(`${overlayCue(item.state || item.strength || item.relation)} ${item.state || item.strength || item.relation}`)}</span>` : ''}</div><code>${esc(overlayState.identityText(item.identity))}</code></li>`).join('');
+  const prefersReducedMotion = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+  const motionDuration = (duration) => prefersReducedMotion() ? 0 : duration;
+  const focusInspector = () => title?.focus?.({preventScroll: true});
   const sourceLocation = (item) => item?.location || (item?.file ? `${item.file}:${item.line ?? ''}:${item.col ?? ''}` : 'No location');
   const copyButton = (text) => liveToken && text
     ? `<button type="button" class="copy-location" data-copy="${esc(text)}">Copy location</button>`
@@ -286,9 +336,48 @@ if (typeof document !== 'undefined') {
     if (freshness) sessionFreshness = graphState.trackFreshness(sessionFreshness, freshness);
     updateStaleBanner();
   };
+  const browserBudgetViolation = (candidate) => {
+    if (!candidate || !Array.isArray(candidate.nodes) || !Array.isArray(candidate.edges)) return 'malformed GraphView payload';
+    if (candidate.nodes.some((node) => !node || typeof node !== 'object') || candidate.edges.some((edge) => !edge || typeof edge !== 'object' || (edge.sites !== undefined && !Array.isArray(edge.sites))) || (candidate.markers !== undefined && !Array.isArray(candidate.markers)) || (candidate.metadata?.markers !== undefined && !Array.isArray(candidate.metadata.markers))) return 'malformed GraphView payload';
+    if (candidate.nodes.length > BROWSER_BUDGET.maxNodes) return `node budget exceeds ${BROWSER_BUDGET.maxNodes}`;
+    if (candidate.edges.length > BROWSER_BUDGET.maxEdges) return `edge budget exceeds ${BROWSER_BUDGET.maxEdges}`;
+    const sites = candidate.edges.reduce((total, edge) => total + (Array.isArray(edge.sites) ? edge.sites.length : 0), 0);
+    if (sites > BROWSER_BUDGET.maxSites) return `evidence budget exceeds ${BROWSER_BUDGET.maxSites} sites`;
+    const labels = candidate.nodes.reduce((total, node) => total + String(node?.name || node?.usr || '').length, 0);
+    if (labels > BROWSER_BUDGET.maxLabelChars) return `label budget exceeds ${BROWSER_BUDGET.maxLabelChars} characters`;
+    try {
+      const serialized = JSON.stringify(candidate);
+      const bytes = typeof TextEncoder === 'undefined' ? serialized.length : new TextEncoder().encode(serialized).length;
+      if (bytes > BROWSER_BUDGET.maxJsonBytes) return `snapshot exceeds ${BROWSER_BUDGET.maxJsonBytes} bytes`;
+    } catch (_error) {
+      return 'malformed GraphView payload';
+    }
+    return null;
+  };
+  const renderAccessibleAlternative = () => {
+    const alternative = document.getElementById('text-alternative-content');
+    if (!alternative) return;
+    const status = view.status || view.metadata?.status || 'unknown';
+    const markers = [...new Set([...(Array.isArray(view.markers) ? view.markers : []), ...(Array.isArray(view.metadata?.markers) ? view.metadata.markers : [])])];
+    const statusText = `${status}${markers.length ? `; ${markers.join(', ')}` : ''}`;
+    const nodeRows = (view.nodes || []).slice(0, BROWSER_BUDGET.maxNodes).map((node) => `<tr><th scope="row"><button type="button" class="accessible-node" data-node-id="${esc(node.id)}">${esc(node.name || node.usr || 'unnamed')}</button></th><td>${esc(node.kind || 'unknown')}</td><td>${esc(node.status?.completeness || 'unknown')}</td><td>${esc(sourceLocation(node))}</td></tr>`).join('');
+    const edgeRows = (view.edges || []).slice(0, BROWSER_BUDGET.maxEdges).map((edge) => `<tr><th scope="row">${esc(edge.kind || 'relation')}</th><td>${esc(edge.source)}</td><td>${esc(edge.target)}</td><td>${esc((Array.isArray(edge.sites) ? edge.sites : []).map(sourceLocation).join('; ') || 'No bounded evidence')}</td></tr>`).join('');
+    const paths = Array.isArray(view.paths) ? view.paths : [];
+    const pathRows = paths.slice(0, 100).map((path) => `<li>${esc(Array.isArray(path.nodes) ? path.nodes.join(' → ') : path.label || JSON.stringify(path))}</li>`).join('');
+    alternative.innerHTML = `<p><strong>Result status:</strong> ${esc(statusText)}. Visual absence is never proof of nonexistence.</p><table><caption>Selected nodes (${view.nodes?.length || 0})</caption><thead><tr><th scope="col">Name</th><th scope="col">Kind</th><th scope="col">Completeness</th><th scope="col">Location</th></tr></thead><tbody>${nodeRows || '<tr><td colspan="4">No nodes in this bounded slice.</td></tr>'}</tbody></table><table><caption>Edges and evidence (${view.edges?.length || 0})</caption><thead><tr><th scope="col">Relation</th><th scope="col">From</th><th scope="col">To</th><th scope="col">Bounded sites</th></tr></thead><tbody>${edgeRows || '<tr><td colspan="4">No edges in this bounded slice.</td></tr>'}</tbody></table><h3>Paths</h3><ul>${pathRows || '<li>No path records supplied by this result.</li>'}</ul>`;
+    alternative.querySelectorAll('.accessible-node').forEach((button) => {
+      button.onclick = () => {
+        const node = nodeById.get(String(button.dataset.nodeId));
+        if (!node) return;
+        const handle = cy?.$id(String(node.id));
+        handle?.select?.();
+        showNode(node);
+      };
+    });
+  };
   const updateSummary = () => {
     const status = view.status || view.metadata?.status || 'unknown';
-    const markers = view.markers || view.metadata?.markers || [];
+    const markers = Array.isArray(view.markers) ? view.markers : (Array.isArray(view.metadata?.markers) ? view.metadata.markers : []);
     const request = view.request || {};
     const budgets = [request.node_budget, request.edge_budget, request.site_budget, request.byte_budget]
       .map((value) => Number.isFinite(Number(value)) ? Number(value) : null);
@@ -298,11 +387,43 @@ if (typeof document !== 'undefined') {
     document.getElementById('identity').textContent = `${identity.workspace || 'workspace unknown'} · ${identity.index || 'index unknown'} · ${freshness} · query ${view.query_identity || 'unknown'} · result ${view.result_id || 'unknown'}`;
     const canvasStatus = document.getElementById('canvas-status');
     canvasStatus.innerHTML = `${badge(status, status)} ${markers.map((marker) => badge(marker, marker)).join('')} ${budgets.some((value) => value !== null) ? `<span class="budget">budgets ${budgets.filter((value) => value !== null).join(' / ')}</span>` : ''}`;
+    renderAccessibleAlternative();
     const loadMoreButton = document.getElementById('load-more');
     if (loadMoreButton) {
       const continuation = view.metadata?.continuation;
       lastContinuationToken = continuation?.available && continuation?.token ? continuation.token : null;
       loadMoreButton.hidden = !lastContinuationToken;
+    }
+    renderOverlayPanel();
+  };
+  const renderOverlayPanel = () => {
+    if (!overlayPanel || !overlayKind) return;
+    const selectedKind = overlayKind.value || 'evidence';
+    const overlay = overlayState.get(view, selectedKind);
+    if (!overlay) {
+      overlayPanel.innerHTML = '<p class="muted">This result has no selected analysis overlay.</p>';
+      if (overlayExport) overlayExport.disabled = true;
+      return;
+    }
+    if (overlayExport) overlayExport.disabled = false;
+    const heading = `<p class="overlay-title"><strong>${esc(overlay.title || selectedKind)}</strong><span class="overlay-kind">${esc(overlay.kind || selectedKind)}</span></p>`;
+    if (selectedKind === 'evidence') {
+      overlayPanel.innerHTML = `${heading}<p class="muted">Canonical evidence and bounded explanation path.</p><h4>Evidence</h4><ul class="overlay-list">${renderOverlayItems(overlay.items)}</ul><h4>Path</h4><ol class="overlay-list">${renderOverlayItems(overlay.path)}</ol>`;
+    } else if (selectedKind === 'diff') {
+      const oldId = `${overlay.oldWorkspace?.version || 'unknown'} / ${overlay.oldFactSet?.version || 'unknown'}`;
+      const newId = `${overlay.newWorkspace?.version || 'unknown'} / ${overlay.newFactSet?.version || 'unknown'}`;
+      overlayPanel.innerHTML = `${heading}<p><code>old ${esc(oldId)}</code><br><code>new ${esc(newId)}</code></p><ul class="overlay-list">${renderOverlayItems(overlay.entries)}</ul>`;
+    } else if (selectedKind === 'effect') {
+      const section = (label, entries) => `<h4>${esc(label)}</h4><ul class="overlay-list">${renderOverlayItems(entries) || '<li class="muted">None declared.</li>'}</ul>`;
+      overlayPanel.innerHTML = `${heading}<p>${esc(overlay.summary || 'No effect summary supplied.')}</p>${section('Abstract regions', overlay.regions)}${section('Call dependencies', overlay.callDependencies)}${section('Assumptions', overlay.assumptions)}${section('Target coverage', overlay.targetCoverage)}${section('Unknown boundaries', overlay.unknownBoundaries)}`;
+    } else if (selectedKind === 'proof') {
+      overlayPanel.innerHTML = `${heading}<p class="muted">Trusted models: ${esc((overlay.trustedModels || []).join(', ') || 'none')}</p><ul class="overlay-list">${renderOverlayItems(overlay.claims)}</ul><p class="muted">Assumptions: ${esc((overlay.assumptions || []).join('; ') || 'none')}</p>`;
+    } else {
+      const steps = overlay.steps || [];
+      const boundedStep = steps[Math.min(overlayStep, Math.max(steps.length - 1, 0))];
+      overlayPanel.innerHTML = `${heading}<p><strong>${esc(overlay.specification || 'specification')}</strong>: ${esc(overlay.violation || 'safety violation')}</p><div class="trace-controls"><button id="overlay-prev" type="button" ${overlayStep === 0 ? 'disabled' : ''}>Previous</button><span>Step ${boundedStep ? boundedStep.index + 1 : 0} / ${steps.length}</span><button id="overlay-next" type="button" ${overlayStep >= steps.length - 1 ? 'disabled' : ''}>Next</button></div>${boundedStep ? `<dl class="trace-state">${(boundedStep.state || []).map((binding) => `<dt>${esc(binding.name)}</dt><dd><code>${esc(binding.value)}</code></dd>`).join('')}</dl><p class="muted">Action: ${esc(boundedStep.action || 'state observation')}</p><code>${esc(overlayState.identityText(boundedStep.identity))}</code>` : '<p class="muted">No bounded trace steps.</p>'}`;
+      overlayPanel.querySelector('#overlay-prev')?.addEventListener('click', () => { overlayStep -= 1; renderOverlayPanel(); });
+      overlayPanel.querySelector('#overlay-next')?.addEventListener('click', () => { overlayStep += 1; renderOverlayPanel(); });
     }
   };
   const showSnapshot = () => {
@@ -313,9 +434,11 @@ if (typeof document !== 'undefined') {
     title.textContent = 'Snapshot status';
     const identity = view.identity || view.metadata?.identity || {};
     const request = view.request || {};
-    details.innerHTML = `<dl><dt>Status</dt><dd>${statusBadges({status: view.status, ...(Object.fromEntries((view.markers || []).map((marker) => [marker, true])))}) || 'unknown'}</dd><dt>Query</dt><dd><code>${esc(view.query_identity || 'unknown')}</code></dd><dt>Result</dt><dd><code>${esc(view.result_id || 'unknown')}</code></dd><dt>Input</dt><dd>${esc(request.input_kind || 'unknown')} · <code>${esc(request.input || '')}</code></dd><dt>Fact sets</dt><dd>${esc((identity.fact_sets || []).join(', ') || 'unknown')}</dd><dt>Budgets</dt><dd>${esc(JSON.stringify({nodes: request.node_budget, edges: request.edge_budget, sites: request.site_budget, bytes: request.byte_budget}))}</dd></dl>`;
+    const markers = Array.isArray(view.markers) ? view.markers : [];
+    details.innerHTML = `<dl><dt>Status</dt><dd>${statusBadges({status: view.status, ...Object.fromEntries(markers.map((marker) => [marker, true]))}) || 'unknown'}</dd><dt>Query</dt><dd><code>${esc(view.query_identity || 'unknown')}</code></dd><dt>Result</dt><dd><code>${esc(view.result_id || 'unknown')}</code></dd><dt>Input</dt><dd>${esc(request.input_kind || 'unknown')} · <code>${esc(request.input || '')}</code></dd><dt>Fact sets</dt><dd>${esc((identity.fact_sets || []).join(', ') || 'unknown')}</dd><dt>Budgets</dt><dd>${esc(JSON.stringify({nodes: request.node_budget, edges: request.edge_budget, sites: request.site_budget, bytes: request.byte_budget}))}</dd></dl>`;
   };
   const showNode = (n) => {
+    if (!n) return;
     selectedNode = n;
     expandButton.disabled = !liveToken;
     if (expandOutButton) expandOutButton.disabled = !liveToken;
@@ -324,6 +447,7 @@ if (typeof document !== 'undefined') {
     const evidence = n.evidence?.location || 'No bounded evidence attached';
     details.innerHTML = `<dl><dt>Canonical id</dt><dd><code>${esc(n.id)}</code></dd><dt>USR</dt><dd><code>${esc(n.usr)}</code></dd><dt>Universe/key</dt><dd><code>${esc(`${n.semantic_universe || ''}/${n.identity_key || ''}`)}</code></dd><dt>Kind</dt><dd>${esc(n.kind)}</dd><dt>Component</dt><dd>${esc(n.component || 'unknown')}</dd><dt>Location</dt><dd>${esc(sourceLocation(n))} ${copyButton(sourceLocation(n))}</dd><dt>Status</dt><dd>${statusBadges(n.status) || 'No status flags'}</dd><dt>Evidence</dt><dd>${esc(evidence)}</dd></dl>`;
     wireCopyButtons();
+    focusInspector();
   };
   const showEdge = (e) => {
     selectedNode = undefined;
@@ -357,6 +481,7 @@ if (typeof document !== 'undefined') {
         }
       };
     }
+    focusInspector();
   };
   const elementForNode = (n) => ({data: {...n, id: String(n.id), label: n.name || n.usr}});
   const elementForEdge = (e) => ({data: {...e, id: String(e.id), source: String(e.source), target: String(e.target)}});
@@ -364,13 +489,14 @@ if (typeof document !== 'undefined') {
     accessible.replaceChildren();
     nodeById.forEach((n) => {
       const button = document.createElement('button');
+      button.className = 'accessible-node';
       button.type = 'button';
       button.textContent = `${n.name || n.usr} (${n.kind})`;
       button.setAttribute('aria-label', `${n.name || n.usr}, ${n.status?.completeness || 'unknown'} status`);
       button.onclick = () => {
         const node = cy.$id(String(n.id));
         node.select();
-        cy.animate({center: {eles: node}, duration: 150});
+        cy.animate({center: {eles: node}, duration: motionDuration(150)});
         showNode(n);
       };
       accessible.appendChild(button);
@@ -393,9 +519,39 @@ if (typeof document !== 'undefined') {
       memberIds.forEach((id) => byId.get(id)?.move({parent: groupId}));
     });
   };
+  const runLayout = () => {
+    if (typeof cy?.layout !== 'function') return;
+    const layout = cy.layout({name:'cose',animate:false,padding:40});
+    if (typeof layout.one === 'function') layout.one('layoutstop', () => performanceEvent('layout-complete'));
+    layout.run();
+  };
+  const renderBudgetRefusal = (candidate, reason) => {
+    const safeCandidate = candidate && typeof candidate === 'object' ? candidate : {nodes: [], edges: [], metadata: {}};
+    view = {
+      ...safeCandidate,
+      nodes: [], edges: [], status: 'partial',
+      markers: [...new Set([...(Array.isArray(safeCandidate.markers) ? safeCandidate.markers : []), 'budget_refusal'])],
+      metadata: {...(safeCandidate.metadata || {}), status: 'partial', truncated: true, budget_refused: true, budget_reason: reason},
+    };
+    selectedNode = undefined;
+    nodeById.clear();
+    edgeIds.clear();
+    cy?.destroy?.();
+    cy = undefined;
+    updateSummary();
+    showSnapshot();
+    document.getElementById('empty').hidden = false;
+    details.insertAdjacentHTML('beforeend', `<p class="muted">Explorer budget refusal: ${esc(reason)}. Narrow the request or load a smaller slice.</p>`);
+  };
   const addView = (next, append, mergeOptions = {}) => {
+    const candidate = append ? graphState.mergeSlices(view, next, mergeOptions) : next;
+    const budgetReason = browserBudgetViolation(candidate);
+    if (budgetReason) {
+      renderBudgetRefusal(candidate, budgetReason);
+      return false;
+    }
     if (append) {
-      const merged = graphState.mergeSlices(view, next, mergeOptions);
+      const merged = candidate;
       const newElements = [];
       merged.nodes.forEach((n) => {
         const id = String(n.id);
@@ -411,6 +567,7 @@ if (typeof document !== 'undefined') {
       });
       cy.add(newElements);
       view = merged;
+      performanceEvent('graph-update-complete');
     } else {
       view = next;
       nodeById.clear();
@@ -418,7 +575,8 @@ if (typeof document !== 'undefined') {
       (view.nodes || []).forEach((n) => nodeById.set(String(n.id), n));
       (view.edges || []).forEach((e) => edgeIds.add(String(e.id)));
       const elements = [...(view.nodes || []).map(elementForNode), ...(view.edges || []).map(elementForEdge)];
-      cy = cytoscape({container: document.getElementById('cy'), elements, style: [{selector:'node',style:{'background-color':'data(color)','label':'data(label)','color':'#e7edf4','font-size':10,'text-wrap':'wrap','text-max-width':120,'text-valign':'bottom','text-margin-y':7,'width':18,'height':18,'border-width':2,'border-color':'data(border)'}},{selector:'.cidx-group',style:{'background-opacity':.08,'border-width':1,'border-color':'#3a4a5c','label':'data(label)','text-valign':'top','font-size':10,'color':'#8fa0b3'}},{selector:'edge',style:{'width':1.5,'line-color':'data(color)','target-arrow-color':'data(color)','target-arrow-shape':'triangle','curve-style':'bezier','label':'data(kind)','font-size':8,'color':'#9fb0c0','text-background-color':'#0c1117','text-background-opacity':.8}},{selector:'.filtered',style:{display:'none'}},{selector:':selected',style:{'overlay-color':'#fff','overlay-opacity':.12}}], layout:{name:'cose',animate:false,padding:40}, wheelSensitivity:.25});
+      cy = cytoscape({container: document.getElementById('cy'), elements, style: [{selector:'node',style:{'background-color':'data(color)','label':'data(label)','color':'#e7edf4','font-size':10,'text-wrap':'wrap','text-max-width':120,'text-valign':'bottom','text-margin-y':7,'width':18,'height':18,'border-width':2,'border-color':'data(border)'}},{selector:'.cidx-group',style:{'background-opacity':.08,'border-width':1,'border-color':'#3a4a5c','label':'data(label)','text-valign':'top','font-size':10,'color':'#8fa0b3'}},{selector:'edge',style:{'width':1.5,'line-color':'data(color)','target-arrow-color':'data(color)','target-arrow-shape':'triangle','curve-style':'bezier','label':'data(kind)','font-size':8,'color':'#9fb0c0','text-background-color':'#0c1117','text-background-opacity':.8}},{selector:'.filtered',style:{display:'none'}},{selector:':selected',style:{'overlay-color':'#fff','overlay-opacity':.12}}], layout:{name:'preset'}, wheelSensitivity:.25});
+      runLayout();
       cy.on('tap', 'node,edge', (event) => event.target.group() === 'nodes' ? (event.target.data().cidxGroup ? undefined : showNode(nodeById.get(event.target.id()))) : showEdge(event.target.data()));
       applyGrouping();
     }
@@ -428,6 +586,9 @@ if (typeof document !== 'undefined') {
     if (!selectedNode) showSnapshot();
     document.getElementById('empty').hidden = nodeById.size !== 0;
   };
+  if (window.CIDX_PERFORMANCE_TEST) {
+    window.CIDX_PERFORMANCE_TEST.appendView = (next) => addView(next, true);
+  }
   // ---- HSE-92: typed live operations -------------------------------------
   const fetchGraph = async (params) => {
     const query = new URLSearchParams({token: liveToken, ...params});
@@ -727,13 +888,30 @@ if (typeof document !== 'undefined') {
       if (liveControls) liveControls.hidden = false;
       startFreshnessMonitor();
     }
-    document.getElementById('fit').onclick = () => cy.fit(undefined, 40);
+    document.getElementById('fit').onclick = () => { if (typeof cy.one === 'function') cy.one('viewport', () => performanceEvent('viewport-complete')); cy.fit(undefined, 40); };
     document.getElementById('expand').onclick = () => expandDirection('out');
-    document.getElementById('reset').onclick = () => { cy.elements().removeClass('filtered'); cy.layout({name:'cose',animate:false,padding:40}).run(); };
+    document.getElementById('reset').onclick = () => { cy.elements().removeClass('filtered'); runLayout(); };
     const viewKey = `cidx-view:${view.schema || 'unknown'}:${view.request?.root || view.request?.query || 'empty'}`;
     document.getElementById('save').onclick = () => { localStorage.setItem(viewKey, JSON.stringify({positions: cy.nodes().reduce((p, n) => ({...p, [n.id()]: n.position()}), {}), zoom: cy.zoom(), pan: cy.pan()})); };
     document.getElementById('restore').onclick = () => { try { const saved = JSON.parse(localStorage.getItem(viewKey) || 'null'); if (!saved) return; cy.nodes().positions((n) => saved.positions?.[n.id()] || n.position()); if (saved.zoom) cy.zoom(saved.zoom); if (saved.pan) cy.pan(saved.pan); } catch (_error) {} };
     document.getElementById('search').oninput = (event) => { const query = event.target.value.toLowerCase(); cy.nodes().forEach((n) => n.toggleClass('filtered', query && !String(n.data('label')).toLowerCase().includes(query))); };
+    if (overlayKind) overlayKind.onchange = () => { overlayStep = 0; renderOverlayPanel(); };
+    if (overlayExport) overlayExport.onclick = () => {
+      const overlay = overlayState.get(view, overlayKind?.value || 'evidence');
+      if (!overlay) return;
+      try {
+        const bundle = view.overlays || view.metadata?.overlays || {};
+        const payload = overlayState.snapshot(overlay, Number(bundle.exportMaxBytes) || 16384);
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(new Blob([payload], {type: 'application/json'}));
+        link.download = `cidx-${overlay.kind || 'overlay'}-snapshot.json`;
+        link.click();
+        performanceEvent('overlay-export-complete', payload.length);
+        URL.revokeObjectURL(link.href);
+      } catch (error) {
+        reportError(error);
+      }
+    };
     if (!liveToken) return;
     if (expandOutButton) expandOutButton.onclick = () => expandDirection('out');
     if (expandInButton) expandInButton.onclick = () => expandDirection('in');

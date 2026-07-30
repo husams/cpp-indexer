@@ -82,6 +82,9 @@ void FunctionDefinitionVisitor::index_definition(clang::FunctionDecl *decl,
   }
   const int64_t def_id = definitions_.get_or_create_definition(
       fn_sym, file_id_, start.line, start.col, end.line, end.col, std::nullopt);
+  if (metrics_ != nullptr) {
+    metrics_->note_fact_family("definitions", 1, 1);
+  }
   definitions_found_.push_back({.decl = decl,
                                 .symbol_id = fn_sym,
                                 .definition_id = def_id,
