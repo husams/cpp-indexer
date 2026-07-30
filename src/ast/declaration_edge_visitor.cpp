@@ -244,14 +244,14 @@ DeclarationEdgeVisitor::DeclarationEdgeVisitor(
     clang::ASTContext &context, DeclarationPassPorts &ports,
     std::string target_file, int64_t file_id,
     DefinitionScopeEmitter *definitions, PassMetrics *metrics,
-    PresentationIntentEmitter *presentation_intents)
+    PresentationIntentEmitter *presentation_intents, FileRouter router)
     : context_(context), source_manager_(context.getSourceManager()),
       sink_(ports), mint_(context, ports),
       targ_encoder_(context, ports, ports, ports),
       minter_(context, ports, ports, mint_, targ_encoder_),
       types_(context, ports), target_file_(std::move(target_file)),
       file_id_(file_id), definitions_(definitions), metrics_(metrics),
-      presentation_intents_(presentation_intents) {}
+      presentation_intents_(presentation_intents), router_(std::move(router)) {}
 
 bool DeclarationEdgeVisitor::VisitDecl(clang::Decl * /*decl*/) {
   if (metrics_ != nullptr) {
@@ -437,10 +437,19 @@ void DeclarationEdgeVisitor::emit_signature_types_for(
   emit_signature_types(fn, fn_sym);
 }
 
-bool DeclarationEdgeVisitor::in_walk(const clang::Decl *decl) const {
+bool DeclarationEdgeVisitor::in_walk(const clang::Decl *decl) {
   // for_file_cursors_p: expansion location in the target file...
   const ExpansionLoc loc = expansion_loc(context_, decl->getLocation());
-  if (loc.file != target_file_) {
+  if (!target_file_.empty() && loc.file != target_file_) {
+    return false;
+  }
+  if (router_) {
+    const auto file_id = router_(loc.file);
+    if (!file_id) {
+      return false;
+    }
+    file_id_ = *file_id;
+  } else if (loc.file != target_file_) {
     return false;
   }
   // ...and the walk stops at function bodies (body edges belong to the
@@ -1029,13 +1038,21 @@ bool DeclarationEdgeVisitor::VisitFunctionTemplateDecl(
 // per specialization and no node for the statement itself (see the contract
 // note in symbol_visitor.cpp), so ownership follows the specialization's
 // first materialization point in the TU.
-bool DeclarationEdgeVisitor::owns_instantiation(
-    const clang::FunctionDecl *fd) const {
+bool DeclarationEdgeVisitor::owns_instantiation(const clang::FunctionDecl *fd) {
   const clang::SourceLocation poi = fd->getPointOfInstantiation();
   if (poi.isInvalid()) {
     return false;
   }
-  return expansion_loc(context_, poi).file == target_file_;
+  const std::string file = expansion_loc(context_, poi).file;
+  if (router_) {
+    const auto file_id = router_(file);
+    if (!file_id) {
+      return false;
+    }
+    file_id_ = *file_id;
+    return true;
+  }
+  return file == target_file_;
 }
 
 // One shared helper (emit_callable_template_identity) covers flags, arguments,

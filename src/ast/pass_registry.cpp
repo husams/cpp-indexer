@@ -62,6 +62,7 @@ auto ExtractionPassDescriptor::stable_key() const -> std::string {
   key += "|budget=" + std::to_string(budget.max_visited_constructs) + ',' +
          std::to_string(budget.max_emitted_facts) + ',' +
          std::to_string(budget.max_diagnostics) + ',' +
+         std::to_string(budget.max_whole_tu_traversals) + ',' +
          std::to_string(budget.declared);
   return key;
 }
@@ -125,6 +126,14 @@ void PassMetrics::note_diagnostic(std::string message) {
   ++diagnostics;
   diagnostic_messages.push_back(std::move(message));
   enforce(diagnostics, budget_.max_diagnostics, "diagnostics");
+}
+
+void PassMetrics::note_whole_tu_traversal(std::size_t count) {
+  whole_tu_traversals += count;
+  if (whole_tu_traversals > budget_.max_whole_tu_traversals) {
+    budget_exhausted = true;
+    throw PassBudgetExceeded(pass_id_, "whole_tu_traversals");
+  }
 }
 
 BudgetedStatementFactPorts::BudgetedStatementFactPorts(
@@ -526,7 +535,8 @@ auto ExtractionPassRegistry::run(const IndexingPlan &plan,
         (budget.max_emitted_facts != 0 &&
          metrics.emitted_facts > budget.max_emitted_facts) ||
         (budget.max_diagnostics != 0 &&
-         metrics.diagnostics > budget.max_diagnostics)) {
+         metrics.diagnostics > budget.max_diagnostics) ||
+        metrics.whole_tu_traversals > budget.max_whole_tu_traversals) {
       metrics.budget_exhausted = true;
       metrics.note_diagnostic("deterministic pass budget exceeded");
     }

@@ -38,6 +38,7 @@ struct PassBudget {
   std::size_t max_visited_constructs = 0;
   std::size_t max_emitted_facts = 0;
   std::size_t max_diagnostics = 0;
+  std::size_t max_whole_tu_traversals = 0;
   bool declared = false;
 };
 
@@ -134,6 +135,7 @@ struct PassMetrics {
   std::size_t unknown_constructs = 0;
   std::size_t duplicates = 0;
   std::size_t diagnostics = 0;
+  std::size_t whole_tu_traversals = 0;
   std::chrono::microseconds elapsed{};
   bool budget_exhausted = false;
   std::vector<std::string> diagnostic_messages;
@@ -143,6 +145,7 @@ struct PassMetrics {
   void note_unknown(std::size_t count = 1) { unknown_constructs += count; }
   void note_duplicate(std::size_t count = 1) { duplicates += count; }
   void note_diagnostic(std::string message);
+  void note_whole_tu_traversal(std::size_t count = 1);
 
   void bind(std::string pass_id, PassBudget budget);
 

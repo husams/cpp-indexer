@@ -45,6 +45,24 @@ void StorageEdgeSink::reset_fact_ids() {
   definition_id_set_.clear();
 }
 
+void StorageEdgeSink::reset_all_fact_ids() {
+  reset_fact_ids();
+  file_buckets_.clear();
+}
+
+const std::vector<int64_t> &StorageEdgeSink::edge_ids(int64_t file_id) const {
+  static const std::vector<int64_t> empty;
+  const auto bucket = file_buckets_.find(file_id);
+  return bucket == file_buckets_.end() ? empty : bucket->second.edge_ids;
+}
+
+const std::vector<int64_t> &
+StorageEdgeSink::definition_ids(int64_t file_id) const {
+  static const std::vector<int64_t> empty;
+  const auto bucket = file_buckets_.find(file_id);
+  return bucket == file_buckets_.end() ? empty : bucket->second.definition_ids;
+}
+
 std::optional<int64_t> StorageEdgeSink::lookup_symbol_id(
     const std::string &usr, const std::optional<std::string> &identity_source) {
   std::string cache_key = std::to_string(current_universe_id_.value_or(-1));
@@ -158,6 +176,8 @@ int64_t StorageEdgeSink::add_edge(const EdgeRecord &edge) {
   }
   const int64_t id = ports_.facts_write.add_edge(e);
   append_unique_id(edge_ids_, edge_id_set_, id);
+  FileBucket &bucket = file_buckets_[current_file_id_];
+  append_unique_id(bucket.edge_ids, bucket.edge_id_set, id);
   return id;
 }
 
@@ -175,6 +195,8 @@ int64_t StorageEdgeSink::ensure_edge(const EdgeRecord &edge) {
   }
   const int64_t id = ports_.facts_write.ensure_edge(e);
   append_unique_id(edge_ids_, edge_id_set_, id);
+  FileBucket &bucket = file_buckets_[current_file_id_];
+  append_unique_id(bucket.edge_ids, bucket.edge_id_set, id);
   return id;
 }
 
@@ -223,6 +245,8 @@ int64_t StorageEdgeSink::get_or_create_definition(
   const int64_t id = ports_.definitions_write.get_or_create_definition(
       symbol_id, file_id, line, col, end_line, end_col, init_text);
   append_unique_id(definition_ids_, definition_id_set_, id);
+  FileBucket &bucket = file_buckets_[file_id];
+  append_unique_id(bucket.definition_ids, bucket.definition_id_set, id);
   return id;
 }
 

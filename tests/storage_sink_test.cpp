@@ -465,6 +465,48 @@ TEST_CASE("symbol sink preserves first-seen IDs while suppressing duplicates") {
   CIDX_CHECK_BOOL(fixture.db.symbols_in_file(fixture.first_file).size() == 2);
 }
 
+TEST_CASE("routed sink buckets isolate interleaved duplicate-heavy files") {
+  SinkFixture fixture;
+  cidx::ast::StorageSymbolSink symbols(fixture.ports);
+  std::vector<int64_t> first_ids;
+  std::vector<int64_t> second_ids;
+  for (int index = 0; index < 128; ++index) {
+    const bool first_file = index % 2 == 0;
+    const int64_t file_id =
+        first_file ? fixture.first_file : fixture.second_file;
+    const auto record = fixture.symbol(
+        "sink:@F@routed_" + std::to_string(index), true, file_id);
+    symbols.set_current_file_id(file_id);
+    symbols.emit(record);
+    symbols.emit(record);
+    const int64_t id = fixture.db.lookup_symbol(record.usr)->id;
+    (first_file ? first_ids : second_ids).push_back(id);
+  }
+  CIDX_REQUIRE_BOOL(symbols.symbol_ids(fixture.first_file) == first_ids);
+  CIDX_REQUIRE_BOOL(symbols.symbol_ids(fixture.second_file) == second_ids);
+
+  cidx::ast::StorageEdgeSink edges(fixture.ports);
+  std::vector<int64_t> first_edge_ids;
+  std::vector<int64_t> second_edge_ids;
+  for (int index = 0; index < 64; ++index) {
+    const bool first_file = index % 2 == 0;
+    const int64_t file_id =
+        first_file ? fixture.first_file : fixture.second_file;
+    edges.set_current_file_id(file_id);
+    const cidx::ast::EdgeRecord edge{.src_id = first_ids[index],
+                                     .dst_id = second_ids[index],
+                                     .kind = index + 1,
+                                     .count = 1,
+                                     .base_access = std::nullopt,
+                                     .is_virtual = std::nullopt};
+    const int64_t id = edges.ensure_edge(edge);
+    CIDX_CHECK_BOOL(edges.ensure_edge(edge) == id);
+    (first_file ? first_edge_ids : second_edge_ids).push_back(id);
+  }
+  CIDX_REQUIRE_BOOL(edges.edge_ids(fixture.first_file) == first_edge_ids);
+  CIDX_REQUIRE_BOOL(edges.edge_ids(fixture.second_file) == second_edge_ids);
+}
+
 TEST_CASE("edge sink caches lookups and tracks unique facts in visit order") {
   SinkFixture fixture;
   const int64_t first_id = fixture.db.add_symbol(

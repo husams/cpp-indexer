@@ -47,12 +47,16 @@ public:
                        int64_t type_id) override;
 
   void reset_fact_ids();
+  void reset_all_fact_ids();
   [[nodiscard]] const std::vector<int64_t> &edge_ids() const {
     return edge_ids_;
   }
   [[nodiscard]] const std::vector<int64_t> &definition_ids() const {
     return definition_ids_;
   }
+  [[nodiscard]] const std::vector<int64_t> &edge_ids(int64_t file_id) const;
+  [[nodiscard]] const std::vector<int64_t> &
+  definition_ids(int64_t file_id) const;
   void delete_edges_for_file(int64_t file_id) override;
   void delete_definitions_for_file(int64_t file_id) override;
   int64_t get_or_create_definition(
@@ -74,6 +78,13 @@ public:
   void emit(const EvidenceRecord &evidence) override;
 
 private:
+  struct FileBucket {
+    std::vector<int64_t> edge_ids;
+    std::vector<int64_t> definition_ids;
+    std::unordered_set<int64_t> edge_id_set;
+    std::unordered_set<int64_t> definition_id_set;
+  };
+
   cidx::storage::AstStoragePorts &ports_;
   std::vector<EvidenceRecord> *evidence_ = nullptr;
   std::vector<PresentationIntent> *presentation_intents_ = nullptr;
@@ -81,6 +92,7 @@ private:
   std::vector<int64_t> definition_ids_;
   std::unordered_set<int64_t> edge_id_set_;
   std::unordered_set<int64_t> definition_id_set_;
+  std::unordered_map<int64_t, FileBucket> file_buckets_;
   int64_t current_file_id_ = -1;
   std::optional<int64_t> current_universe_id_;
   std::optional<std::string> identity_translation_unit_;

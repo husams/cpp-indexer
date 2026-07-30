@@ -38,9 +38,10 @@ NamespaceUseVisitor::NamespaceUseVisitor(clang::ASTContext &context,
 NamespaceUseVisitor::NamespaceUseVisitor(clang::ASTContext &context,
                                          NamespacePassPorts &ports,
                                          std::string target_file,
-                                         int64_t file_id, PassMetrics *metrics)
+                                         int64_t file_id, PassMetrics *metrics,
+                                         FileRouter router)
     : context_(context), ports_(ports), target_file_(std::move(target_file)),
-      file_id_(file_id), metrics_(metrics) {}
+      file_id_(file_id), metrics_(metrics), router_(std::move(router)) {}
 
 bool NamespaceUseVisitor::VisitDecl(clang::Decl * /*decl*/) {
   if (metrics_ != nullptr) {
@@ -49,14 +50,24 @@ bool NamespaceUseVisitor::VisitDecl(clang::Decl * /*decl*/) {
   return true;
 }
 
-bool NamespaceUseVisitor::in_target_file(const clang::Decl *decl) const {
-  return expansion_loc(context_, decl->getLocation()).file == target_file_;
+bool NamespaceUseVisitor::in_target_file(const clang::Decl *decl) {
+  const std::string file = expansion_loc(context_, decl->getLocation()).file;
+  if (router_) {
+    const auto file_id = router_(file);
+    if (!file_id) {
+      return false;
+    }
+    file_id_ = *file_id;
+    target_file_ = file;
+    return true;
+  }
+  return file == target_file_;
 }
 
 // The indexed symbol id a scope-establishing decl contributes to the
 // enclosing-source stack (nullopt when not a scope, unnamed, or unindexed).
 std::optional<int64_t>
-NamespaceUseVisitor::scope_symbol_id(const clang::Decl *decl) const {
+NamespaceUseVisitor::scope_symbol_id(const clang::Decl *decl) {
   // Namespace-use sites are emitted only for the target file. Declarations
   // from included/system ASTs cannot contribute an enclosing source for such
   // a site, so avoid resolving their symbols during the scope walk.
@@ -99,7 +110,14 @@ void NamespaceUseVisitor::emit_ns_use(const clang::NamedDecl *ns_decl,
     return; // no enclosing indexed symbol (-1 root)
   }
   const ExpansionLoc eloc = expansion_loc(context_, loc);
-  if (eloc.file != target_file_) {
+  if (router_) {
+    const auto file_id = router_(eloc.file);
+    if (!file_id) {
+      return;
+    }
+    file_id_ = *file_id;
+    target_file_ = eloc.file;
+  } else if (eloc.file != target_file_) {
     return;
   }
   const std::string usr = usr_for_decl(ns_decl);

@@ -9,6 +9,7 @@
 #include "clang/AST/RecursiveASTVisitor.h"
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <set>
 #include <string>
@@ -28,19 +29,23 @@ namespace cidx::ast {
 class NamespacePassPorts;
 struct PassMetrics;
 
-class NamespaceUseVisitor : public clang::RecursiveASTVisitor<NamespaceUseVisitor> {
+class NamespaceUseVisitor
+    : public clang::RecursiveASTVisitor<NamespaceUseVisitor> {
 public:
+  using FileRouter =
+      std::function<std::optional<std::int64_t>(const std::string &)>;
+
   NamespaceUseVisitor(clang::ASTContext &context, NamespacePassPorts &ports,
-                std::string target_file, int64_t file_id);
+                      std::string target_file, int64_t file_id);
   NamespaceUseVisitor(clang::ASTContext &context, NamespacePassPorts &ports,
                       std::string target_file, int64_t file_id,
-                      PassMetrics *metrics);
+                      PassMetrics *metrics, FileRouter router = {});
 
   // Scope tracking: the nearest enclosing INDEXED symbol is the edge source.
   bool TraverseDecl(clang::Decl *decl);
   bool VisitDecl(clang::Decl *decl);
 
-  std::optional<int64_t> scope_symbol_id(const clang::Decl *decl) const;
+  std::optional<int64_t> scope_symbol_id(const clang::Decl *decl);
 
   bool TraverseNestedNameSpecifierLoc(clang::NestedNameSpecifierLoc nns);
   bool VisitUsingDirectiveDecl(clang::UsingDirectiveDecl *decl);
@@ -49,9 +54,8 @@ public:
   bool VisitTypeLoc(clang::TypeLoc tl);
 
 private:
-  bool in_target_file(const clang::Decl *decl) const;
-  void emit_ns_use(const clang::NamedDecl *ns_decl,
-                   clang::SourceLocation loc);
+  bool in_target_file(const clang::Decl *decl);
+  void emit_ns_use(const clang::NamedDecl *ns_decl, clang::SourceLocation loc);
 
   clang::ASTContext &context_;
   NamespacePassPorts &ports_;
@@ -62,6 +66,7 @@ private:
   // param decl); libclang visits each NAMESPACE_REF once — dedupe by site.
   std::set<std::tuple<int64_t, int64_t, int64_t, int64_t>> seen_;
   PassMetrics *metrics_ = nullptr;
+  FileRouter router_;
 };
 
 } // namespace cidx::ast

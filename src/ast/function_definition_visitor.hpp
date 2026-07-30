@@ -6,6 +6,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -26,17 +28,21 @@ struct PassMetrics;
 class FunctionDefinitionVisitor
     : public clang::RecursiveASTVisitor<FunctionDefinitionVisitor> {
 public:
+  using FileRouter =
+      std::function<std::optional<std::int64_t>(const std::string &)>;
+
   FunctionDefinitionVisitor(clang::ASTContext &context,
                             DeclarationIdentityResolver &identity,
                             DefinitionScopeEmitter &definitions,
                             std::string target_file, int64_t file_id,
-                            PassMetrics *metrics = nullptr);
+                            PassMetrics *metrics = nullptr,
+                            FileRouter router = {});
 
   bool VisitDecl(clang::Decl *decl);
   bool VisitFunctionDecl(clang::FunctionDecl *decl);
-  auto run_statement_pass(StatementFactPorts &ports,
-                          PassMetrics *metrics = nullptr,
-                          DefinitionScopeEmitter *statement_definitions = nullptr)
+  auto
+  run_statement_pass(StatementFactPorts &ports, PassMetrics *metrics = nullptr,
+                     DefinitionScopeEmitter *statement_definitions = nullptr)
       -> void;
   [[nodiscard]] auto definition_count() const -> std::size_t {
     return definitions_found_.size();
@@ -44,7 +50,7 @@ public:
   [[nodiscard]] auto file_id() const -> std::int64_t { return file_id_; }
 
 private:
-  bool is_indexable_definition(const clang::FunctionDecl *decl) const;
+  bool is_indexable_definition(const clang::FunctionDecl *decl);
   void index_definition(clang::FunctionDecl *decl,
                         const clang::NamedDecl *keyed, int64_t fn_sym);
 
@@ -52,6 +58,8 @@ private:
     clang::FunctionDecl *decl = nullptr;
     int64_t symbol_id = 0;
     int64_t definition_id = 0;
+    int64_t file_id = -1;
+    std::string file;
   };
 
   clang::ASTContext &context_;
@@ -61,6 +69,7 @@ private:
   int64_t file_id_;
   std::vector<DefinitionFact> definitions_found_;
   PassMetrics *metrics_ = nullptr;
+  FileRouter router_;
 };
 
 } // namespace cidx::ast

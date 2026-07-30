@@ -14,15 +14,13 @@
 
 namespace cidx::ast {
 
-FunctionDefinitionVisitor::FunctionDefinitionVisitor(clang::ASTContext &context,
-                                                     DeclarationIdentityResolver &identity,
-                                                     DefinitionScopeEmitter &definitions,
-                                                     std::string target_file,
-                                                     int64_t file_id,
-                                                     PassMetrics *metrics)
+FunctionDefinitionVisitor::FunctionDefinitionVisitor(
+    clang::ASTContext &context, DeclarationIdentityResolver &identity,
+    DefinitionScopeEmitter &definitions, std::string target_file,
+    int64_t file_id, PassMetrics *metrics, FileRouter router)
     : context_(context), identity_(identity), definitions_(definitions),
       target_file_(std::move(target_file)), file_id_(file_id),
-      metrics_(metrics) {}
+      metrics_(metrics), router_(std::move(router)) {}
 
 bool FunctionDefinitionVisitor::VisitDecl(clang::Decl * /*decl*/) {
   if (metrics_ != nullptr) {
@@ -35,24 +33,37 @@ bool FunctionDefinitionVisitor::VisitDecl(clang::Decl * /*decl*/) {
 // another function (a LOCAL class's methods are covered by the enclosing
 // function's descent), and sits in the target file.
 bool FunctionDefinitionVisitor::is_indexable_definition(
-    const clang::FunctionDecl *decl) const {
+    const clang::FunctionDecl *decl) {
   if (!decl->doesThisDeclarationHaveABody()) {
     return false;
   }
   if (decl->getParentFunctionOrMethod() != nullptr) {
     return false;
   }
-  return expansion_loc(context_, decl->getLocation()).file == target_file_;
+  const std::string file = expansion_loc(context_, decl->getLocation()).file;
+  if (router_) {
+    const auto file_id = router_(file);
+    if (!file_id) {
+      return false;
+    }
+    file_id_ = *file_id;
+    target_file_ = file;
+    return true;
+  }
+  return file == target_file_;
 }
 
-void FunctionDefinitionVisitor::run_statement_pass(StatementFactPorts &ports,
-                                                    PassMetrics *metrics,
-                                                    DefinitionScopeEmitter *statement_definitions) {
+void FunctionDefinitionVisitor::run_statement_pass(
+    StatementFactPorts &ports, PassMetrics *metrics,
+    DefinitionScopeEmitter *statement_definitions) {
   DefinitionScopeEmitter &definitions =
       statement_definitions != nullptr ? *statement_definitions : definitions_;
   for (const DefinitionFact &fact : definitions_found_) {
-    StatementEdgeVisitor body(context_, ports, fact.symbol_id, file_id_,
-                              target_file_, metrics);
+    if (router_) {
+      router_(fact.file);
+    }
+    StatementEdgeVisitor body(context_, ports, fact.symbol_id, fact.file_id,
+                              fact.file, metrics);
     body.walk(fact.decl);
     definitions.copy_body_edges_to_def_edge(fact.definition_id, fact.symbol_id);
   }
@@ -71,8 +82,11 @@ void FunctionDefinitionVisitor::index_definition(clang::FunctionDecl *decl,
   }
   const int64_t def_id = definitions_.get_or_create_definition(
       fn_sym, file_id_, start.line, start.col, end.line, end.col, std::nullopt);
-  definitions_found_.push_back(
-      {.decl = decl, .symbol_id = fn_sym, .definition_id = def_id});
+  definitions_found_.push_back({.decl = decl,
+                                .symbol_id = fn_sym,
+                                .definition_id = def_id,
+                                .file_id = file_id_,
+                                .file = target_file_});
 }
 
 bool FunctionDefinitionVisitor::VisitFunctionDecl(clang::FunctionDecl *decl) {

@@ -26,6 +26,8 @@
 
 #include "clang/AST/RecursiveASTVisitor.h"
 
+#include <functional>
+
 namespace clang {
 class ASTContext;
 class Decl;
@@ -43,12 +45,14 @@ struct PassMetrics;
 
 class SymbolVisitor : public clang::RecursiveASTVisitor<SymbolVisitor> {
 public:
+  using FileRouter = std::function<bool(const std::string &)>;
+
   // target_file empty: emit every non-system file's decls (the TSV probe's
   // whole-TU mode). Non-empty: emit ONLY decls of that file — the per-file
   // walk the interleaved indexer uses (index_file_notxn analogue).
   SymbolVisitor(clang::ASTContext &context, SymbolEmitter &out,
                 std::string target_file = std::string(),
-                PassMetrics *metrics = nullptr);
+                PassMetrics *metrics = nullptr, FileRouter router = {});
 
   bool VisitDecl(clang::Decl *decl);
   bool VisitNamedDecl(clang::NamedDecl *decl);
@@ -56,7 +60,7 @@ public:
   bool VisitClassTemplateDecl(clang::ClassTemplateDecl *decl);
 
 private:
-  bool should_emit(const clang::NamedDecl *decl) const;
+  bool should_emit(const clang::NamedDecl *decl);
   void emit_explicit_instantiation(const clang::FunctionDecl *fd);
 
   clang::ASTContext &context_;
@@ -65,6 +69,7 @@ private:
   SymbolEmitter &out_;
   std::string target_file_;
   PassMetrics *metrics_ = nullptr;
+  FileRouter router_;
 };
 
 } // namespace cidx::ast

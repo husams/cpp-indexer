@@ -291,6 +291,14 @@ TEST_CASE("pass descriptors require metadata and bind every budget") {
                     context.metrics.note_diagnostic("first");
                     context.metrics.note_diagnostic("second");
                   });
+  run_over_budget({.max_visited_constructs = 10,
+                   .max_emitted_facts = 10,
+                   .max_diagnostics = 10,
+                   .max_whole_tu_traversals = 0,
+                   .declared = true},
+                  [](PassExecutionContext &context) {
+                    context.metrics.note_whole_tu_traversal();
+                  });
 }
 
 TEST_CASE(
