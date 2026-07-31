@@ -47,6 +47,10 @@ class AgentToolsTests(unittest.TestCase):
                 )
                 self.assertEqual(result["response"]["result"]["rows"][0]["file"], None)
                 self.assertEqual(result["response"]["status"], "partial")
+                self.assertEqual(
+                    result["response"]["diagnostics"][-1]["code"],
+                    "missing_evidence",
+                )
 
                 complete = tools.invoke(
                     AgentRequest(

@@ -781,6 +781,9 @@ TEST_CASE("agent catalog and versioned read-only budget contract") {
   CHECK(response.completeness.truncated);
   CHECK(response.completeness.budget == std::optional<int64_t>{1});
   CHECK(response.status == cidx::protocol::Status::Partial);
+  CHECK(std::any_of(
+      response.diagnostics.begin(), response.diagnostics.end(),
+      [](const auto &diagnostic) { return diagnostic.code == "missing_evidence"; }));
   CHECK(cidx::json_out::dumps_indent2(response.result).find("\"index\"") !=
         std::string::npos);
   const auto encoded = tools.encode_response(request, response);

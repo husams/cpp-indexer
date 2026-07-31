@@ -99,8 +99,7 @@ protocol::ResultEnvelope failure(const IndexIdentity &index,
 }
 
 void require_row_evidence(protocol::ResultEnvelope &result) {
-  if (result.completeness.truncated ||
-      result.result.t != json_out::Value::T::Obj) {
+  if (result.result.t != json_out::Value::T::Obj) {
     return;
   }
   const json_out::Value *rows = field(result.result, "rows");
@@ -112,8 +111,10 @@ void require_row_evidence(protocol::ResultEnvelope &result) {
     const json_out::Value *line = field(row, "line");
     if (file == nullptr || file->t == json_out::Value::T::Null ||
         line == nullptr || line->t == json_out::Value::T::Null) {
-      result.status = protocol::Status::Unknown;
-      result.completeness.state = "unknown";
+      if (!result.completeness.truncated) {
+        result.status = protocol::Status::Unknown;
+        result.completeness.state = "unknown";
+      }
       result.diagnostics.push_back(protocol::Diagnostic{
           .code = "missing_evidence",
           .severity = "warning",

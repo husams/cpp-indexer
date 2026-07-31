@@ -190,11 +190,12 @@ class AgentTools:
         if request.tool == "query":
             envelope = executor.run(plan, result_cap=request.max_results).to_envelope_dict()
             rows = envelope["result"].get("rows", [])
-            if not envelope["completeness"]["truncated"] and any(
+            if any(
                 row.get("file") is None or row.get("line") is None for row in rows
             ):
-                envelope["status"] = "unknown"
-                envelope["completeness"]["state"] = "unknown"
+                if not envelope["completeness"]["truncated"]:
+                    envelope["status"] = "unknown"
+                    envelope["completeness"]["state"] = "unknown"
                 envelope["diagnostics"].append(
                     {
                         "code": "missing_evidence",
