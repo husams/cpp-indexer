@@ -42,6 +42,7 @@
 #include <memory>
 #include <stdexcept>
 #include <tuple>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace cidx::ast {
@@ -933,18 +934,95 @@ private:
   IndexFailurePoint target_;
 };
 
+class IndexSession::Impl {
+public:
+  Impl(cidx::Storage &db, cidx::Logger &log)
+      : db_(db), workspace_data_(db), toolchain_(log) {
+    rebuild();
+  }
+
+  void rebuild() {
+    descriptor_cache_.clear();
+    configuration_id_cache_.clear();
+    context_ = std::make_unique<WorkspaceContext>(WorkspaceContext::borrow(
+        workspace_data_, WorkspaceReadWriteMode::read_write));
+    resolver_ = std::make_unique<TranslationUnitConfigurationService>(
+        *context_, toolchain_);
+    ++metrics_.generation;
+    ++metrics_.snapshot_rebuilds;
+    ++metrics_.component_scans;
+  }
+
+  const TranslationUnitDescriptor &descriptor(const std::string &path) {
+    const std::string key = pathutil::normpath(pathutil::abspath(path));
+    if (const auto found = descriptor_cache_.find(key);
+        found != descriptor_cache_.end()) {
+      ++metrics_.descriptor_hits;
+      return found->second;
+    }
+    ++metrics_.descriptor_misses;
+    return descriptor_cache_.emplace(key, resolver_->resolve(key))
+        .first->second;
+  }
+
+  int64_t configuration_id(const TranslationUnitDescriptor &descriptor) {
+    if (const auto found =
+            configuration_id_cache_.find(descriptor.semantic_hash);
+        found != configuration_id_cache_.end()) {
+      ++metrics_.configuration_id_hits;
+      return found->second;
+    }
+    ++metrics_.configuration_id_misses;
+    const int64_t id =
+        db_.add_translation_unit_config(descriptor.configuration);
+    configuration_id_cache_.emplace(descriptor.semantic_hash, id);
+    return id;
+  }
+
+  [[nodiscard]] IndexSessionMetrics metrics() const {
+    IndexSessionMetrics result = metrics_;
+    const ToolchainMetrics &toolchain = toolchain_.metrics();
+    result.configuration_hits = toolchain.configuration_hits;
+    result.configuration_misses = toolchain.configuration_misses;
+    result.driver_subprocesses = toolchain.driver_subprocesses;
+    return result;
+  }
+
+  cidx::Storage &db_;
+  cidx::StorageWorkspaceAdapter workspace_data_;
+  Toolchain toolchain_;
+  std::unique_ptr<WorkspaceContext> context_;
+  std::unique_ptr<TranslationUnitConfigurationService> resolver_;
+  std::unordered_map<std::string, TranslationUnitDescriptor> descriptor_cache_;
+  std::unordered_map<std::string, int64_t> configuration_id_cache_;
+  IndexSessionMetrics metrics_;
+};
+
+IndexSession::IndexSession(cidx::Storage &db, cidx::Logger &log)
+    : impl_(std::make_unique<Impl>(db, log)) {}
+IndexSession::~IndexSession() = default;
+IndexSession::IndexSession(IndexSession &&) noexcept = default;
+IndexSession &IndexSession::operator=(IndexSession &&) noexcept = default;
+
+void IndexSession::invalidate() { impl_->rebuild(); }
+
+IndexSessionMetrics IndexSession::metrics() const { return impl_->metrics(); }
+
 IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
                               const std::string &path, bool graph_enabled,
                               IndexFailurePoint failure) {
+  IndexSession session(db);
+  return run_index_one(db, session, rec, path, graph_enabled, failure);
+}
+
+IndexOneOutcome run_index_one(cidx::Storage &db, IndexSession &session,
+                              const cidx::File &rec, const std::string &path,
+                              bool graph_enabled, IndexFailurePoint failure) {
   IndexOneOutcome out;
   const SourceSnapshot source = SourceSnapshot::capture(path);
+  ++session.impl_->metrics_.file_hash_reads;
   out.source_md5 = source.md5;
-  cidx::StorageWorkspaceAdapter workspace_data(db);
-  WorkspaceContext context = WorkspaceContext::borrow(
-      workspace_data, WorkspaceReadWriteMode::read_write);
-  Toolchain toolchain;
-  TranslationUnitConfigurationService resolver(context, toolchain);
-  const TranslationUnitDescriptor descriptor = resolver.resolve(path);
+  const TranslationUnitDescriptor &descriptor = session.impl_->descriptor(path);
   const TranslationUnitConfig &resolved = descriptor.configuration;
   const std::vector<std::string> args =
       TranslationUnitConfigurationService::invocation_arguments(path,
@@ -982,7 +1060,7 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
   state.out = &out;
   state.config = &config;
   state.unit = ports.unit_of_work().begin();
-  state.normalized_config_id = db.add_translation_unit_config(resolved);
+  state.normalized_config_id = session.impl_->configuration_id(descriptor);
 
   IndexFrontendActionFactory factory(state);
   try {
@@ -994,9 +1072,12 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
   if (!state.tu_handled) {
     out.parse_failed = true;
     out.error = "cannot parse " + path;
+    out.session_metrics = session.metrics();
     return out;
   }
   apply_diagnostic_policy(path, state.strict, args, out);
+  ++session.impl_->metrics_.source_change_checks;
+  ++session.impl_->metrics_.file_hash_reads;
   if (!source.matches(path)) {
     out.source_changed = true;
     out.error = path + ": source changed during indexing; retry required";
@@ -1006,6 +1087,7 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
   if (!out.parse_failed && !out.source_changed) {
     state.unit->commit();
   }
+  out.session_metrics = session.metrics();
   return out;
 }
 

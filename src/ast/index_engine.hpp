@@ -17,7 +17,9 @@
 #include "ast/header_stats.hpp" // HeaderStats
 #include "ast/pass_registry.hpp"
 #include "storage/records.hpp"
+#include "util/logger.hpp"
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -27,6 +29,8 @@ class Storage;
 }
 
 namespace cidx::ast {
+
+enum class IndexFailurePoint : std::uint8_t;
 
 struct SourceSnapshot {
   std::optional<std::string> md5;
@@ -52,6 +56,23 @@ struct IndexPassMetrics {
   bool budget_exhausted = false;
 };
 
+struct IndexSessionMetrics {
+  std::size_t generation = 0;
+  std::size_t snapshot_rebuilds = 0;
+  std::size_t descriptor_hits = 0;
+  std::size_t descriptor_misses = 0;
+  std::size_t configuration_id_hits = 0;
+  std::size_t configuration_id_misses = 0;
+  std::size_t configuration_hits = 0;
+  std::size_t configuration_misses = 0;
+  std::size_t driver_subprocesses = 0;
+  std::size_t cache_evictions = 0;
+  std::size_t file_stat_reads = 0;
+  std::size_t file_hash_reads = 0;
+  std::size_t source_change_checks = 0;
+  std::size_t component_scans = 0;
+};
+
 struct IndexOneOutcome {
   int stored = 0;            // main-file symbols stored (index_symbols)
   cidx::HeaderStats headers; // header two-pass counters
@@ -63,6 +84,29 @@ struct IndexOneOutcome {
   std::vector<std::string> failed_flags; // final args, for the log dump
   std::vector<IndexPassMetrics> pass_metrics;
   std::vector<EvidenceRecord> evidence;
+  IndexSessionMetrics session_metrics;
+};
+
+class IndexSession final {
+public:
+  explicit IndexSession(cidx::Storage &db,
+                        cidx::Logger &log = cidx::Logger::root());
+  ~IndexSession();
+  IndexSession(IndexSession &&) noexcept;
+  IndexSession &operator=(IndexSession &&) noexcept;
+  IndexSession(const IndexSession &) = delete;
+  IndexSession &operator=(const IndexSession &) = delete;
+
+  void invalidate();
+  [[nodiscard]] IndexSessionMetrics metrics() const;
+
+private:
+  class Impl;
+  std::unique_ptr<Impl> impl_;
+  friend IndexOneOutcome
+  run_index_one(cidx::Storage &db, IndexSession &session,
+                const cidx::File &rec, const std::string &path,
+                bool graph_enabled, IndexFailurePoint failure);
 };
 
 // Deterministic fault points used by the production TU pipeline tests. The
@@ -79,6 +123,11 @@ enum class IndexFailurePoint : std::uint8_t {
 IndexOneOutcome
 run_index_one(cidx::Storage &db, const cidx::File &rec, const std::string &path,
               bool graph_enabled,
+              IndexFailurePoint failure = IndexFailurePoint::none);
+
+IndexOneOutcome
+run_index_one(cidx::Storage &db, IndexSession &session, const cidx::File &rec,
+              const std::string &path, bool graph_enabled,
               IndexFailurePoint failure = IndexFailurePoint::none);
 
 } // namespace cidx::ast

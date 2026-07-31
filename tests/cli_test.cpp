@@ -2012,6 +2012,46 @@ TEST_CASE("query-only invocations never create cidx.log (G27/D7)") {
 
 TEST_SUITE("clang") {
 
+  TEST_CASE("index session reuses one snapshot toolchain and configuration") {
+    const std::string dir = make_temp_dir();
+    const std::string source = dir + "/session.cpp";
+    write_file(source, "int session_symbol() { return 1; }\n");
+
+    Storage db(":memory:");
+    db.add_component("session", dir);
+    const int64_t file_id = db.add_file_path(
+        source, std::nullopt, std::nullopt,
+        std::vector<std::string>{"-std=c++23"}, std::string("clang++"));
+    const auto file = db.get_file_by_id(file_id);
+    REQUIRE(file.has_value());
+
+    cidx::ast::IndexSession session(db);
+    const auto first =
+        cidx::ast::run_index_one(db, session, *file, source, true);
+    REQUIRE(!first.parse_failed);
+    const auto after_first = session.metrics();
+    CHECK(after_first.generation == 1);
+    CHECK(after_first.snapshot_rebuilds == 1);
+    CHECK(after_first.descriptor_misses == 1);
+    CHECK(after_first.configuration_id_misses == 1);
+
+    const auto second =
+        cidx::ast::run_index_one(db, session, *file, source, true);
+    REQUIRE(!second.parse_failed);
+    const auto after_second = session.metrics();
+    CHECK(after_second.snapshot_rebuilds == 1);
+    CHECK(after_second.descriptor_hits == 1);
+    CHECK(after_second.configuration_id_hits == 1);
+    CHECK(after_second.driver_subprocesses == after_first.driver_subprocesses);
+    CHECK(after_second.file_hash_reads == 4);
+    CHECK(after_second.source_change_checks == 2);
+
+    session.invalidate();
+    const auto invalidated = session.metrics();
+    CHECK(invalidated.generation == 2);
+    CHECK(invalidated.snapshot_rebuilds == 2);
+  }
+
   TEST_CASE("index TU publication is atomic at every injected failure point") {
     const std::string dir = make_temp_dir();
     const std::string source = dir + "/source.cpp";
