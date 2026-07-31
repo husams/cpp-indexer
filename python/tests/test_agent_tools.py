@@ -164,6 +164,114 @@ class AgentToolsTests(unittest.TestCase):
         finally:
             path.unlink(missing_ok=True)
 
+    def test_shared_golden_matrix_covers_agent_cpp_python_and_cli(self) -> None:
+        matrix_path = Path(__file__).parents[2] / "tests" / "golden" / "agent_tools_matrix.json"
+        matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+        path = self._database()
+        try:
+            environment = {
+                **os.environ,
+                "PYTHONPATH": str(Path(__file__).parents[1]),
+            }
+            with AgentTools.from_path(path) as tools:
+                for case in matrix["cases"]:
+                    case_id = case["id"]
+                    surfaces = set(case["surfaces"])
+                    request = {
+                        "version": 1,
+                        "tool": case["tool"],
+                        "cxq": case["cxq"],
+                        "budget": {"max_results": case["max_results"]},
+                    }
+                    request_line = json.dumps(request, separators=(",", ":")) + "\n"
+
+                    if case["tool"] == "query" and case_id != "rejected_cxq":
+                        library = tools.invoke(request)
+                    else:
+                        library = None
+
+                    python_process = subprocess.run(
+                        [sys.executable, "-m", "indexer.agent_tools", "--index", str(path)],
+                        input=request_line,
+                        text=True,
+                        capture_output=True,
+                        check=True,
+                        env=environment,
+                    )
+                    cpp_process = subprocess.run(
+                        [str(Path(__file__).parents[2] / "build" / "cidx-agent"), "--index", str(path)],
+                        input=request_line,
+                        text=True,
+                        capture_output=True,
+                        check=True,
+                    )
+                    python_frame = json.loads(python_process.stdout)
+                    cpp_frame = json.loads(cpp_process.stdout)
+
+                    self.assertIn("python", surfaces, case_id)
+                    self._assert_matrix_frame(case, python_frame, case_id)
+                    self.assertIn("cpp", surfaces, case_id)
+                    self._assert_matrix_frame(case, cpp_frame, case_id)
+                    if library is not None:
+                        self.assertEqual(library, tools.invoke(request), case_id)
+                        self.assertEqual(
+                            library["response"]["result"],
+                            python_frame["response"]["result"],
+                            case_id,
+                        )
+
+                    if "cli" in surfaces:
+                        cli_args = [
+                            str(Path(__file__).parents[2] / "build" / "cidx"),
+                            "query",
+                            case["cxq"],
+                            "--db",
+                            str(path),
+                            "--json",
+                        ]
+                        if case["cli_mode"] == "explain":
+                            cli_args.append("--explain")
+                        cli_process = subprocess.run(
+                            cli_args,
+                            text=True,
+                            capture_output=True,
+                            check=False,
+                        )
+                        if "cli_error" in case:
+                            self.assertNotEqual(cli_process.returncode, 0, case_id)
+                            self.assertIn(case["cli_error"], cli_process.stderr, case_id)
+                        else:
+                            self.assertEqual(cli_process.returncode, 0, case_id)
+                            cli_result = json.loads(cli_process.stdout)
+                            self.assertEqual(
+                                cli_result,
+                                python_frame["response"]["result"],
+                                case_id,
+                            )
+        finally:
+            path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _assert_matrix_frame(case: dict, frame: dict, case_id: str) -> None:
+        response = frame["response"]
+        expected = case
+        assert response["status"] == expected["expected_status"], case_id
+        assert response["completeness"]["truncated"] == expected["expected_truncated"], case_id
+        assert response["completeness"]["budget"] == expected["expected_budget"], case_id
+        result = response["result"]
+        if expected["expected_shape"] is not None:
+            shape_key = "execution_shape" if case["tool"] == "explain" else "shape"
+            assert result[shape_key] == expected["expected_shape"], case_id
+        if expected["expected_count"] is not None:
+            assert result["count"] == expected["expected_count"], case_id
+        for key in expected["expected_result_keys"]:
+            assert key in result, (case_id, key)
+        diagnostic_codes = {item["code"] for item in response["diagnostics"]}
+        assert set(expected["expected_diagnostics"]).issubset(diagnostic_codes), case_id
+        assert not diagnostic_codes.intersection(expected.get("forbidden_diagnostics", [])), case_id
+        if expected["expected_row_file_null"]:
+            assert result["rows"][0]["file"] is None, case_id
+
 
 if __name__ == "__main__":
     unittest.main()

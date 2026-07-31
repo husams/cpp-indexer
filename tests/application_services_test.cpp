@@ -2,8 +2,10 @@
 #include "doctest/doctest.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -17,6 +19,7 @@
 #include "query/exec.hpp"
 #include "storage/storage.hpp"
 #include "util/files.hpp"
+#include "util/json_read.hpp"
 
 namespace {
 
@@ -117,6 +120,81 @@ std::size_t count_occurrences(std::string_view value, std::string_view needle) {
     offset += needle.size();
   }
   return count;
+}
+
+std::string read_file(const std::string &path) {
+  std::ifstream input(path, std::ios::binary);
+  std::ostringstream output;
+  output << input.rdbuf();
+  return output.str();
+}
+
+const cidx::json_out::Value *object_field(const cidx::json_out::Value &object,
+                                          std::string_view name) {
+  if (object.t != cidx::json_out::Value::T::Obj) {
+    return nullptr;
+  }
+  for (const auto &[key, value] : object.o) {
+    if (key == name) {
+      return &value;
+    }
+  }
+  return nullptr;
+}
+
+std::string string_field(const cidx::json_out::Value &object,
+                         std::string_view name) {
+  const auto *value = object_field(object, name);
+  REQUIRE(value != nullptr);
+  REQUIRE(value->t == cidx::json_out::Value::T::Str);
+  return value->s;
+}
+
+std::int64_t integer_field(const cidx::json_out::Value &object,
+                           std::string_view name) {
+  const auto *value = object_field(object, name);
+  REQUIRE(value != nullptr);
+  REQUIRE(value->t == cidx::json_out::Value::T::Int);
+  return value->i;
+}
+
+std::optional<std::int64_t>
+optional_integer_field(const cidx::json_out::Value &object,
+                      std::string_view name) {
+  const auto *value = object_field(object, name);
+  REQUIRE(value != nullptr);
+  if (value->t == cidx::json_out::Value::T::Null) {
+    return std::nullopt;
+  }
+  REQUIRE(value->t == cidx::json_out::Value::T::Int);
+  return value->i;
+}
+
+std::vector<std::string>
+string_array_field(const cidx::json_out::Value &object,
+                  std::string_view name) {
+  const auto *value = object_field(object, name);
+  REQUIRE(value != nullptr);
+  REQUIRE(value->t == cidx::json_out::Value::T::Arr);
+  std::vector<std::string> result;
+  for (const auto &item : value->a) {
+    REQUIRE(item.t == cidx::json_out::Value::T::Str);
+    result.push_back(item.s);
+  }
+  return result;
+}
+
+bool has_string(const std::vector<std::string> &values, std::string_view needle) {
+  return std::find(values.begin(), values.end(), needle) != values.end();
+}
+
+std::vector<std::string> diagnostic_codes(
+    const cidx::protocol::ResultEnvelope &response) {
+  std::vector<std::string> result;
+  for (const auto &diagnostic : response.diagnostics) {
+    result.push_back(diagnostic.code);
+  }
+  return result;
 }
 
 void check_canonical_truncation(const cidx::protocol::ResultEnvelope &result) {
@@ -811,6 +889,94 @@ TEST_CASE("agent catalog and versioned read-only budget contract") {
   CHECK_THROWS_WITH(
       decode_invalid_version(),
       "E_PROTOCOL_VERSION: unsupported agent protocol version 99");
+}
+
+TEST_CASE("agent tools share the cross-surface golden fixture matrix") {
+  const auto fixture = cidx::json_read::parse(
+      read_file(CIDX_AGENT_MATRIX_GOLDEN));
+  const auto *cases = object_field(fixture, "cases");
+  REQUIRE(cases != nullptr);
+  REQUIRE(cases->t == cidx::json_out::Value::T::Arr);
+
+  cidx::Storage db(":memory:");
+  cidx::Symbol first;
+  first.usr = "USR::one";
+  first.spelling = "one";
+  first.kind = "function";
+  first.is_definition = true;
+  first.resolved = true;
+  cidx::Symbol second = first;
+  second.usr = "USR::two";
+  second.spelling = "two";
+  db.add_symbol(first);
+  db.add_symbol(second);
+
+  cidx::StorageWorkspaceAdapter workspace_data(db);
+  cidx::WorkspaceContext workspace =
+      cidx::WorkspaceContext::borrow(workspace_data);
+  cidx::query::SqliteQueryReadAdapter query_read(db);
+  cidx::application::ApplicationReadPorts read_ports{.query = &query_read};
+  cidx::application::ApplicationContext context(
+      workspace,
+      cidx::application::ApplicationPolicy{
+          .access = cidx::application::AccessMode::read_only,
+          .capabilities = cidx::application::capability_bit(
+              cidx::application::Capability::index_read)},
+      read_ports);
+
+  for (const auto &golden : cases->a) {
+    const std::string tool_name = string_field(golden, "tool");
+    cidx::agent::Request request;
+    request.tool = tool_name == "explain" ? cidx::agent::Tool::explain
+                                            : cidx::agent::Tool::query;
+    request.query.expression = string_field(golden, "cxq");
+    request.budget.max_results = integer_field(golden, "max_results");
+    const auto response = cidx::agent::ToolService::invoke(request, context);
+    const auto response_json = response.to_json();
+    const auto result = object_field(response_json, "result");
+    REQUIRE(result != nullptr);
+
+    CHECK(string_field(response_json, "status") ==
+          string_field(golden, "expected_status"));
+    CHECK(response.completeness.truncated ==
+          (object_field(golden, "expected_truncated")->b));
+    CHECK(response.completeness.budget ==
+          optional_integer_field(golden, "expected_budget"));
+
+    const auto expected_shape = object_field(golden, "expected_shape");
+    if (expected_shape->t == cidx::json_out::Value::T::Str) {
+      const auto shape_name = tool_name == "explain" ? "execution_shape" : "shape";
+      CHECK(string_field(*result, shape_name) == expected_shape->s);
+    }
+    const auto expected_count = object_field(golden, "expected_count");
+    if (expected_count->t == cidx::json_out::Value::T::Int) {
+      CHECK(integer_field(*result, "count") == expected_count->i);
+    }
+    for (const auto &key : string_array_field(golden, "expected_result_keys")) {
+      CHECK(object_field(*result, key) != nullptr);
+    }
+
+    const auto codes = diagnostic_codes(response);
+    for (const auto &code : string_array_field(golden, "expected_diagnostics")) {
+      CHECK(has_string(codes, code));
+    }
+    if (const auto *forbidden = object_field(golden, "forbidden_diagnostics");
+        forbidden != nullptr) {
+      REQUIRE(forbidden->t == cidx::json_out::Value::T::Arr);
+      for (const auto &item : forbidden->a) {
+        REQUIRE(item.t == cidx::json_out::Value::T::Str);
+        CHECK_FALSE(has_string(codes, item.s));
+      }
+    }
+    if (object_field(golden, "expected_row_file_null")->b) {
+      const auto *rows = object_field(*result, "rows");
+      REQUIRE(rows != nullptr);
+      REQUIRE(!rows->a.empty());
+      const auto *file = object_field(rows->a.front(), "file");
+      REQUIRE(file != nullptr);
+      CHECK(file->t == cidx::json_out::Value::T::Null);
+    }
+  }
 }
 
 int main(int argc, char **argv) {
