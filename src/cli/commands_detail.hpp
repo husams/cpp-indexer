@@ -217,13 +217,14 @@ const char kDirNeedsComponent[] =
 // `del tu` in index_source's finally (one-AST peak memory, design §7).
 inline int index_one(Storage &db, ast::IndexSession &session, const File &rec,
                      const std::string &path, bool graph_enabled,
-                     Context &ctx) {
+                     bool no_front_end_reuse, Context &ctx) {
   // All indexing runs through the LibTooling engine (parity-proven visitors
   // over the Clang C++ API): same DB effects, counters, and per-file output
   // line as the retired libclang cursor walk.
   {
     ast::IndexOneOutcome out =
-        ast::run_index_one(db, session, rec, path, graph_enabled);
+        ast::run_index_one(db, session, rec, path, graph_enabled,
+                           ast::IndexFailurePoint::none, no_front_end_reuse);
     if (ctx.index_outcome_sink) {
       ctx.index_outcome_sink(out);
     }
@@ -290,7 +291,7 @@ inline int index_one(Storage &db, ast::IndexSession &session, const File &rec,
 inline int index_files(Storage &db, const std::vector<std::string> &file_args,
                        const std::optional<std::string> &root,
                        bool graph_enabled, ast::IndexSession &session,
-                       Context &ctx) {
+                       bool no_front_end_reuse, Context &ctx) {
   int rc = 0;
   for (const std::string &f : file_args) {
     const std::string path = files::resolve_file_arg(f, root);
@@ -305,7 +306,8 @@ inline int index_files(Storage &db, const std::vector<std::string> &file_args,
       *ctx.out << "  already indexed\n";
       continue;
     }
-    rc |= index_one(db, session, *rec, path, graph_enabled, ctx);
+    rc |= index_one(db, session, *rec, path, graph_enabled, no_front_end_reuse,
+                    ctx);
   }
   return rc;
 }
@@ -316,7 +318,8 @@ inline int index_files(Storage &db, const std::vector<std::string> &file_args,
 // (ORDER BY c.path, d.path, f.name), snapshotted before the loop so header
 // rows added while indexing are not re-visited this run.
 inline int index_pending(Storage &db, bool graph_enabled,
-                         ast::IndexSession &session, Context &ctx) {
+                         ast::IndexSession &session, bool no_front_end_reuse,
+                         Context &ctx) {
   int done = 0;
   int skipped = 0;
   int failed = 0;
@@ -339,7 +342,8 @@ inline int index_pending(Storage &db, bool graph_enabled,
       continue;
     }
     *ctx.out << "indexing " << path << "\n";
-    if (index_one(db, session, rec, path, graph_enabled, ctx) == 0) {
+    if (index_one(db, session, rec, path, graph_enabled, no_front_end_reuse,
+                  ctx) == 0) {
       ++done;
     } else {
       ++failed;

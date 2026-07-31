@@ -359,7 +359,8 @@
     {"name": "cidx-astgraph", "kind": "executable", "module": "product.cli", "links": ["cidx_core"]},
     {"name": "cidx-diff", "kind": "executable", "module": "product.cli", "links": ["cidx_core"]},
     {"name": "cidx-queryplan-example", "kind": "optional-executable", "module": "product.cli", "links": ["cidx_core"]},
-    {"name": "cidx-clang-tidy", "kind": "generated-target", "module": "compat.core-bundle", "links": []}
+    {"name": "cidx-clang-tidy", "kind": "generated-target", "module": "compat.core-bundle", "links": []},
+    {"name": "front_end_reuse_probe", "kind": "test-executable", "module": "compat.core-bundle", "links": ["cidx_core"]}
   ],
   "targetExceptions": [
     {

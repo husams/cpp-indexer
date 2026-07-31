@@ -43,6 +43,12 @@ TEST_CASE("both CLI paths accept explicit front-end reuse disable") {
   CHECK(request->no_front_end_reuse);
 }
 
+TEST_CASE("legacy ParsedArgs preserves explicit front-end reuse disable") {
+  const cidx::cli::ParsedArgs parsed =
+      cidx::cli::parse_args({"index", "--no-front-end-reuse"});
+  CHECK(parsed.no_front_end_reuse);
+}
+
 TEST_CASE("production indexing profile distinguishes explicit disable") {
   const std::filesystem::path root =
       std::filesystem::temp_directory_path() /
