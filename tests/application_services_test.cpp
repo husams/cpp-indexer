@@ -781,19 +781,32 @@ TEST_CASE("agent catalog and versioned read-only budget contract") {
   CHECK(response.completeness.truncated);
   CHECK(response.completeness.budget == std::optional<int64_t>{1});
   CHECK(response.status == cidx::protocol::Status::Partial);
+  CHECK(cidx::json_out::dumps_indent2(response.result).find("\"index\"") !=
+        std::string::npos);
   const auto encoded = tools.encode_response(request, response);
   const auto encoded_text = cidx::json_out::dumps_indent2(encoded);
   CHECK(encoded_text.find("cidx.agent/v1") != std::string::npos);
   CHECK(encoded_text.find("\"exhausted_at\": 1") != std::string::npos);
+
+  request.budget.max_results = 10;
+  const auto evidence_response = tools.invoke(request, context);
+  CHECK(evidence_response.status == cidx::protocol::Status::Unknown);
+  CHECK(!evidence_response.completeness.truncated);
+  CHECK(std::any_of(
+      evidence_response.diagnostics.begin(), evidence_response.diagnostics.end(),
+      [](const auto &diagnostic) { return diagnostic.code == "missing_evidence"; }));
 
   const auto decoded = tools.decode_request(
       R"json({"version":1,"tool":"explain","cxq":"codebase()","budget":{"max_results":2}})json");
   CHECK(decoded.tool == cidx::agent::Tool::explain);
   CHECK(decoded.query.explain);
   CHECK(decoded.budget.max_results == 2);
+  const auto decode_invalid_version = [&tools] {
+    (void)tools.decode_request(
+        R"json({"version":99,"tool":"query","cxq":"codebase()"})json");
+  };
   CHECK_THROWS_WITH(
-      tools.decode_request(
-          R"json({"version":99,"tool":"query","cxq":"codebase()"})json"),
+      decode_invalid_version(),
       "E_PROTOCOL_VERSION: unsupported agent protocol version 99");
 }
 

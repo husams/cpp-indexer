@@ -7,7 +7,8 @@
 //   - each element/member on its own indented line
 //   - closing bracket on its own line at parent indent
 //   - empty containers: [] / {} on one line
-//   - member separator: ": " (note: space after colon, CPython default with indent)
+//   - member separator: ": " (note: space after colon, CPython default with
+//   indent)
 //   - item separator: "," with NO trailing space (CPython drops the space when
 //     indent is set)
 //   - null / true / false lowercase
@@ -67,5 +68,9 @@ struct Value {
 // NO trailing newline — the caller appends "\n" (matching the Python handler's
 // print() convention).
 std::string dumps_indent2(const Value &v);
+
+// Serialise compactly for newline-delimited protocols. Returns no trailing
+// newline so callers can emit exactly one frame per line.
+std::string dumps_compact(const Value &v);
 
 } // namespace cidx::json_out

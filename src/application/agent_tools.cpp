@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <utility>
 
+#include "catalogs/generated_catalog.hpp"
 #include "query/cxq.hpp"
 #include "query/exec.hpp"
 #include "util/json_read.hpp"
@@ -74,8 +75,8 @@ protocol::ResultEnvelope envelope_base(const IndexIdentity &index,
       protocol::ArtifactRef{.kind = "semantic-index",
                             .id = result.identity.index,
                             .schema_version = index.schema_version,
-                            .catalog_version = version::kCatalogVersion,
-                            .catalog_hash = std::string(version::kCatalogHash),
+                            .catalog_version = catalog::kCatalogVersion,
+                            .catalog_hash = std::string(catalog::kCatalogHash),
                             .generation = std::nullopt});
   return result;
 }
@@ -87,6 +88,7 @@ protocol::ResultEnvelope failure(const IndexIdentity &index,
   result.status = code == "policy_refuted" ? protocol::Status::Refuted
                                            : protocol::Status::Error;
   result.completeness.state = "unknown";
+  result.completeness.stale = index.freshness == "stale";
   result.result = json_out::Value::obj({});
   result.diagnostics.push_back(
       protocol::Diagnostic{.code = std::move(code),
@@ -94,6 +96,32 @@ protocol::ResultEnvelope failure(const IndexIdentity &index,
                            .message = std::move(message),
                            .next_action = std::nullopt});
   return result;
+}
+
+void require_row_evidence(protocol::ResultEnvelope &result) {
+  if (result.completeness.truncated ||
+      result.result.t != json_out::Value::T::Obj) {
+    return;
+  }
+  const json_out::Value *rows = field(result.result, "rows");
+  if (rows == nullptr || rows->t != json_out::Value::T::Arr) {
+    return;
+  }
+  for (const auto &row : rows->a) {
+    const json_out::Value *file = field(row, "file");
+    const json_out::Value *line = field(row, "line");
+    if (file == nullptr || file->t == json_out::Value::T::Null ||
+        line == nullptr || line->t == json_out::Value::T::Null) {
+      result.status = protocol::Status::Unknown;
+      result.completeness.state = "unknown";
+      result.diagnostics.push_back(protocol::Diagnostic{
+          .code = "missing_evidence",
+          .severity = "warning",
+          .message = "result row has no resolvable file/line provenance",
+          .next_action = "select file and line evidence or inspect the index"});
+      return;
+    }
+  }
 }
 
 void apply_freshness(protocol::ResultEnvelope &result,
@@ -227,6 +255,7 @@ ToolService::invoke(const Request &request,
           executor.run(plan, std::nullopt, request.budget.max_results);
       protocol::ResultEnvelope result = executed.to_envelope();
       result.operation = operation;
+      require_row_evidence(result);
       return result;
     }
     protocol::ResultEnvelope result = envelope_base(index, operation);

@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
+import os
 import sqlite3
-import tempfile
 from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
 
 from indexer.agent_tools import AgentRequest, AgentTools, TOOLS
@@ -42,6 +46,21 @@ class AgentToolsTests(unittest.TestCase):
                     result["response"]["completeness"]["budget"], 1
                 )
                 self.assertEqual(result["response"]["result"]["rows"][0]["file"], None)
+                self.assertEqual(result["response"]["status"], "partial")
+
+                complete = tools.invoke(
+                    AgentRequest(
+                        1,
+                        "query",
+                        "codebase() | nodes() | select(name, file, line)",
+                        10,
+                    )
+                )
+                self.assertEqual(complete["response"]["status"], "unknown")
+                self.assertEqual(
+                    complete["response"]["diagnostics"][-1]["code"],
+                    "missing_evidence",
+                )
 
                 with self.assertRaises(sqlite3.OperationalError):
                     tools._connection.execute("CREATE TABLE forbidden(id INTEGER)")  # noqa: SLF001
@@ -80,6 +99,66 @@ class AgentToolsTests(unittest.TestCase):
         self.assertNotIn("ParsedArgs", source)
         self.assertNotIn('#include "cli/', source)
         self.assertEqual(set(TOOLS), {"query", "explain"})
+
+    def test_documented_process_adapter_is_built(self) -> None:
+        executable = Path(__file__).parents[2] / "build" / "cidx-agent"
+        self.assertTrue(executable.is_file())
+
+    def test_cpp_and_python_process_adapters_emit_one_ndjson_frame(self) -> None:
+        path = self._database()
+        request = '{"version":1,"tool":"explain","cxq":"codebase() | nodes()"}\n'
+        try:
+            with AgentTools.from_path(path) as tools:
+                expected = json.loads(tools.invoke_json(request))
+            environment = {
+                **os.environ,
+                "PYTHONPATH": str(Path(__file__).parents[1]),
+            }
+            python_process = subprocess.run(
+                [sys.executable, "-m", "indexer.agent_tools", "--index", str(path)],
+                input=request,
+                text=True,
+                capture_output=True,
+                check=True,
+                env=environment,
+            )
+            cpp_process = subprocess.run(
+                [str(Path(__file__).parents[2] / "build" / "cidx-agent"), "--index", str(path)],
+                input=request,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            self.assertEqual(len(python_process.stdout.splitlines()), 1)
+            self.assertEqual(len(cpp_process.stdout.splitlines()), 1)
+            self.assertEqual(
+                json.loads(python_process.stdout)["response"]["result"],
+                expected["response"]["result"],
+            )
+            self.assertEqual(
+                json.loads(cpp_process.stdout)["response"]["result"],
+                expected["response"]["result"],
+            )
+
+            invalid_request = '{"version":99,"tool":"query","cxq":"codebase()"}\n'
+            python_error = subprocess.run(
+                [sys.executable, "-m", "indexer.agent_tools", "--index", str(path)],
+                input=invalid_request,
+                text=True,
+                capture_output=True,
+                check=True,
+                env=environment,
+            )
+            cpp_error = subprocess.run(
+                [str(Path(__file__).parents[2] / "build" / "cidx-agent"), "--index", str(path)],
+                input=invalid_request,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            self.assertEqual(json.loads(cpp_error.stdout), json.loads(python_error.stdout))
+        finally:
+            path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

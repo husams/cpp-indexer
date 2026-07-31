@@ -4295,6 +4295,7 @@ protocol::ResultEnvelope Result::to_envelope() const {
     payload.emplace_back("count", Value::of(static_cast<int64_t>(rows.size())));
   }
   payload.emplace_back("truncated", Value::of(truncated));
+  payload.emplace_back("index", index_identity_json(index));
   if (shape == Shape::Path) {
     Array path_values;
     for (const auto &witness : paths) {
@@ -4375,7 +4376,7 @@ protocol::ResultEnvelope Result::to_envelope() const {
       .schema_version = index.schema_version,
       .catalog_version = catalog::kCatalogVersion,
       .catalog_hash = std::string(catalog::kCatalogHash)});
-  if (truncated) {
+  if (truncated && exhausted_budget) {
     envelope.diagnostics.push_back(protocol::Diagnostic{
         .code = "truncated_budget",
         .severity = "warning",

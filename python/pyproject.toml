@@ -16,6 +16,7 @@ dev = ["pytest>=9.1.0", "pytest-bdd>=8.1"]
 [project.scripts]
 indexer = "indexer.cli:main"
 cidx-python = "indexer.cli:main"
+cidx-agent-python = "indexer.agent_tools:main"
 
 [build-system]
 requires = ["hatchling"]

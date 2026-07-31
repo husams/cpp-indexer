@@ -504,6 +504,15 @@ add_executable(cidx src/main.cpp)
 target_compile_options(cidx PRIVATE -Wall -Wextra)
 target_link_libraries(cidx PRIVATE cidx_core)
 
+add_executable(cidx-agent src/application/agent_process_main.cpp)
+target_compile_options(cidx-agent PRIVATE -Wall -Wextra)
+target_link_libraries(cidx-agent PRIVATE cidx_core)
+set_target_properties(cidx-agent PROPERTIES
+  BUILD_RPATH "${LLVM_LIBRARY_DIR}"
+  INSTALL_RPATH "${LLVM_LIBRARY_DIR}"
+  INSTALL_RPATH_USE_LINK_PATH ON
+)
+
 # NOTE: -static-libstdc++/-static-libgcc is intentionally NOT applied. cidx_core
 # now links the Clang C++ API (clang-cpp + the shared libLLVM), which uses the
 # SYSTEM libstdc++; statically embedding a second libstdc++ would put two C++

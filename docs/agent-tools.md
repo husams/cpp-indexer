@@ -27,6 +27,11 @@ The host binds the request to an existing read-only `QueryReadPort`. A request
 cannot select a writable database handle or an indexing operation. The typed
 request does not include CLI argument state or `ParsedArgs`.
 
+The standalone process adapter is `cidx-agent --index PATH` (or the
+`INDEXER_CACHE` index when `--index` is omitted). It reads one request object
+per stdin line and writes one response object per stdout line; the opened
+index is always read-only.
+
 ## Response
 
 Each request produces one JSON object:

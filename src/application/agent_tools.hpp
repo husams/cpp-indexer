@@ -48,4 +48,9 @@ public:
               application::ApplicationContext &context);
 };
 
+// Descriptive aliases keep the public agent surface discoverable to
+// repository tooling while preserving the concise internal names.
+using AgentRequest = Request;
+using AgentTools = ToolService;
+
 } // namespace cidx::agent

@@ -9,9 +9,12 @@ existing QueryPlan implementation.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import argparse
 import json
 from pathlib import Path
 import sqlite3
+import os
+import sys
 from typing import Any
 from urllib.parse import quote
 
@@ -186,6 +189,20 @@ class AgentTools:
         executor = Executor(self._db)
         if request.tool == "query":
             envelope = executor.run(plan, result_cap=request.max_results).to_envelope_dict()
+            rows = envelope["result"].get("rows", [])
+            if not envelope["completeness"]["truncated"] and any(
+                row.get("file") is None or row.get("line") is None for row in rows
+            ):
+                envelope["status"] = "unknown"
+                envelope["completeness"]["state"] = "unknown"
+                envelope["diagnostics"].append(
+                    {
+                        "code": "missing_evidence",
+                        "severity": "warning",
+                        "message": "result row has no resolvable file/line provenance",
+                        "next_action": "select file and line evidence or inspect the index",
+                    }
+                )
         else:
             envelope = _explain_envelope(
                 executor.explain(plan), self._db.index_identity()
@@ -209,18 +226,66 @@ class AgentTools:
             value = json.loads(line)
             if not isinstance(value, dict):
                 raise ValueError("E_PROTOCOL_SCHEMA: request must be an object")
-            return json.dumps(self.invoke(value), indent=2, ensure_ascii=True)
+            return json.dumps(
+                self.invoke(value), ensure_ascii=True, separators=(",", ":")
+            )
         except (PlanError, ValueError, json.JSONDecodeError) as error:
+            index = self._db.index_identity()
+            envelope = ResultEnvelope(
+                operation="query",
+                status=Status.ERROR,
+                identity=_envelope_identity(index),
+                producer=Producer(backend="cpp"),
+                completeness=Completeness(
+                    state="unknown", stale=index.freshness == "stale"
+                ),
+                result={},
+                diagnostics=[Diagnostic("invalid_input", "error", str(error))],
+                evidence=[Evidence("queryplan", "derived", "producer-verified", "bounded QueryPlan execution")],
+                artifacts=[
+                    ArtifactRef(
+                        "semantic-index",
+                        f"semantic-index/schema/{index.schema_version}",
+                        index.schema_version,
+                        CATALOG_VERSION,
+                        CATALOG_HASH,
+                    )
+                ],
+            ).to_dict()
             return json.dumps(
                 {
                     "protocol": PROTOCOL,
                     "version": PROTOCOL_VERSION,
                     "tool": "query",
-                    "error": {"code": "invalid_input", "message": str(error)},
+                    "response": envelope,
+                    "truncated": False,
+                    "budget": {
+                        "max_results": 1000,
+                        "exhausted": False,
+                        "exhausted_at": None,
+                    },
                 },
-                indent=2,
                 ensure_ascii=True,
+                separators=(",", ":"),
             )
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="cidx agent NDJSON adapter")
+    parser.add_argument(
+        "--index",
+        default=str(Path(os.environ.get("INDEXER_CACHE", "~/.cache/cidx")) / "index.db"),
+    )
+    args = parser.parse_args(argv)
+    with AgentTools.from_path(args.index) as tools:
+        for line in sys.stdin:
+            if line.strip():
+                print(tools.invoke_json(line), flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 
 
 __all__ = [
@@ -230,4 +295,5 @@ __all__ = [
     "PROTOCOL",
     "PROTOCOL_VERSION",
     "TOOLS",
+    "main",
 ]
