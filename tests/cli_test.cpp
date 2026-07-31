@@ -939,7 +939,9 @@ TEST_CASE("args: -h returns help text; validation beats help") {
       "  --profile-json TEXT         write opt-in transform telemetry to PATH\n"
       "  --profile-sqlite-config TEXT\n"
       "                              apply benchmark-only SQLite settings from "
-      "PATH\n");
+      "PATH\n"
+      "  --no-front-end-reuse        disable optional front-end reuse "
+      "(diagnostic; none is currently shipped)\n");
 
   // Subcommand help carries the full "cidx file list" usage line.
   pa = cli::parse_args({"file", "list", "-h"});

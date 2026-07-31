@@ -1,0 +1,6 @@
+{
+  "version": "front-end-reuse/v1",
+  "mechanism": "none",
+  "canonical_bytes": "{\"version\":\"front-end-reuse/v1\",\"mechanism\":\"none\",\"configuration\":[\"/opt/llvm/bin/clang++\",\"/tmp/front-end-reuse\",\"c++\",\"c++23\",\"arm64-apple-darwin\",[\"-fno-rtti\",\"-mavx2\"],\"/sdk\",\"/opt/llvm/lib/clang/22\",[\"/inc/a\",\"/inc/b\"],[\"-DFOO=1\",\"-UBAR\"],[\"CPATH=/inc\",\"SDKROOT=/sdk\"],[\"/tmp/generated.hpp\",\"/tmp/macros.h\"],\"error-limit=0\",[\"-std=c++23\",\"-target\",\"arm64-apple-darwin\",\"-fno-rtti\",\"-I\",\"/inc/a\"]],\"prefixes\":[]}",
+  "sha256": "sha256:b41791bcb72b1e474fbb9594675770a26f16b66d35990192fd114b9ee3648e03"
+}

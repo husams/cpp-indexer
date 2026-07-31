@@ -2,7 +2,7 @@
   "format": "cidx.explorer-qualification.v2",
   "frontend": {"package": "cidx-graph-explorer", "version": "0.1.0"},
   "cidx": {"version": "cidx 0.53.0", "schema_version": 40},
-  "cpp_indexer_source": {"algorithm": "sha256:path-content-v1", "paths": ["src", "tests", "manifests", "CMakeLists.txt"], "file_count": 416, "sha256": "ccabfea6871730930b356733edbc6b8f7ee796dfe0974422975e75745181d2ea"},
+  "cpp_indexer_source": {"algorithm": "sha256:path-content-v1", "paths": ["src", "tests", "manifests", "CMakeLists.txt"], "file_count": 424, "sha256": "0575dd368cf6be1d862d2a0627d1b266a3f23b2d50ab284c5fd7ec6c853ff072"},
   "schema": {"graph_view": "cidx.graph-view.v1", "result_protocol": "spec/contracts/result-protocol.json"},
   "inputs": [
     {"path": "index.db", "sha256": "37e8c59d174514d54cd5acbe291398674683dbcfd9f9bba3bef884a2ea9ba474"},

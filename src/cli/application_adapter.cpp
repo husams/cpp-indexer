@@ -246,6 +246,8 @@ parse_typed_index(const std::vector<std::string> &argv) {
   for (std::size_t i = first_argument; i < argv.size(); ++i) {
     if (argv[i] == "--no-graph") {
       request.graph = false;
+    } else if (argv[i] == "--no-front-end-reuse") {
+      request.no_front_end_reuse = true;
     } else if (argv[i] == "--no-autoderive-labels") {
       request.autoderive_labels = false;
     } else if (argv[i] == "--json") {

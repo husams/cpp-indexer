@@ -33,6 +33,7 @@ set(CIDX_DEFAULT_TESTS
   extraction_engine_test
   tla_counterexample_regression_test
   conformance_recorder_test
+  front_end_reuse_acceptance_test
 )
 
 foreach(test_name IN LISTS CIDX_DEFAULT_TESTS)
@@ -62,6 +63,25 @@ target_link_libraries(application_process_test PRIVATE cidx_core)
 add_test(NAME application_process_test
          COMMAND application_process_test $<TARGET_FILE:cidx>)
 set_tests_properties(application_process_test PROPERTIES LABELS "default")
+
+add_executable(front_end_reuse_identity_test front_end_reuse_identity_test.cpp)
+target_compile_options(front_end_reuse_identity_test PRIVATE -Wall -Wextra)
+target_link_libraries(front_end_reuse_identity_test PRIVATE cidx_core)
+target_compile_definitions(front_end_reuse_identity_test PRIVATE
+  CIDX_FRONT_END_REUSE_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/../spec/contracts/golden/front-end-reuse-identity-v1.json"
+  CIDX_FRONT_END_REUSE_SCHEMA="${CMAKE_CURRENT_SOURCE_DIR}/../spec/contracts/front-end-reuse-identity-v1.schema.json")
+add_test(NAME front_end_reuse_identity_test COMMAND front_end_reuse_identity_test)
+set_tests_properties(front_end_reuse_identity_test PROPERTIES LABELS "default")
+
+add_executable(front_end_reuse_parse_test front_end_reuse_parse_test.cpp)
+target_compile_options(front_end_reuse_parse_test PRIVATE -Wall -Wextra)
+target_link_libraries(front_end_reuse_parse_test PRIVATE cidx_core)
+add_test(NAME front_end_reuse_parse_test COMMAND front_end_reuse_parse_test)
+set_tests_properties(front_end_reuse_parse_test PROPERTIES
+  LABELS "clang")
+
+add_test(NAME front_end_reuse_probe_test COMMAND front_end_reuse_probe)
+set_tests_properties(front_end_reuse_probe_test PROPERTIES LABELS "clang")
 
 target_compile_definitions(result_protocol_test PRIVATE
   CIDX_RESULT_PROTOCOL_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/../spec/contracts/golden/result-envelope.json"

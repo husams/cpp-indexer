@@ -65,6 +65,12 @@ Each disposable setting is SIGKILL-interrupted during a real `cidx index`,
 resumed, integrity/foreign keys checked, and compared by canonical semantic
 digest before a separate production-profile change can be considered.
 
+S-075 adds an explicit front-end reuse qualification contract. Use
+`--front-end-reuse none` (the only shipped mechanism) or
+`--no-front-end-reuse` for diagnosis. The report records the three-candidate
+matrix, retained trial fields, the versioned none identity, semantic/diagnostic
+parity requirements, and that no generated artifact is constructed or injected.
+
 `--uninstrumented-cidx` enables the required paired disabled-profiling overhead
 gate. It records all six cold 1,000-TU trial values, both medians and spreads,
 the percentage overhead, and paired canonical digests. Build that executable

@@ -129,11 +129,10 @@ public:
 private:
   class Impl;
   std::unique_ptr<Impl> impl_;
-  friend IndexOneOutcome run_index_one(cidx::Storage &db, IndexSession &session,
-                                       const cidx::File &rec,
-                                       const std::string &path,
-                                       bool graph_enabled,
-                                       IndexFailurePoint failure);
+  friend IndexOneOutcome
+  run_index_one(cidx::Storage &db, IndexSession &session, const cidx::File &rec,
+                const std::string &path, bool graph_enabled,
+                IndexFailurePoint failure, bool no_front_end_reuse);
 };
 
 // Deterministic fault points used by the production TU pipeline tests. The
@@ -150,11 +149,13 @@ enum class IndexFailurePoint : std::uint8_t {
 IndexOneOutcome
 run_index_one(cidx::Storage &db, const cidx::File &rec, const std::string &path,
               bool graph_enabled,
-              IndexFailurePoint failure = IndexFailurePoint::none);
+              IndexFailurePoint failure = IndexFailurePoint::none,
+              bool no_front_end_reuse = false);
 
 IndexOneOutcome
 run_index_one(cidx::Storage &db, IndexSession &session, const cidx::File &rec,
               const std::string &path, bool graph_enabled,
-              IndexFailurePoint failure = IndexFailurePoint::none);
+              IndexFailurePoint failure = IndexFailurePoint::none,
+              bool no_front_end_reuse = false);
 
 } // namespace cidx::ast

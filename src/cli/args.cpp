@@ -135,6 +135,9 @@ void build_top_level(CLI::App &app, ParsedArgs &pa) {
                     "root");
   index->add_flag("--no-graph", pa.no_graph,
                   "skip relationship-graph extraction (calls, inherits, ...)");
+  index->add_flag("--no-front-end-reuse", pa.no_front_end_reuse,
+                  "disable optional front-end reuse (diagnostic; none is "
+                  "currently shipped)");
   index->add_flag("--status", pa.index_status,
                   "show persisted transform readiness");
   index->add_flag("--explain", pa.index_explain,
@@ -172,6 +175,9 @@ void build_top_level(CLI::App &app, ParsedArgs &pa) {
   resolve->add_option("--profile-sqlite-config",
                       pa.profile_sqlite_configuration,
                       "apply benchmark-only SQLite settings from PATH");
+  resolve->add_flag("--no-front-end-reuse", pa.no_front_end_reuse,
+                    "disable optional front-end reuse (diagnostic; none is "
+                    "currently shipped)");
   resolve->callback([&pa] { pa.command = "resolve"; });
 
   CLI::App *search =
