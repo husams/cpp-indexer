@@ -22,11 +22,13 @@
 // holds the symbol visitor only.
 #pragma once
 
+#include "ast/location.hpp"
 #include "ast/symbol_extractor.hpp"
 
 #include "clang/AST/RecursiveASTVisitor.h"
 
 #include <functional>
+#include <unordered_map>
 
 namespace clang {
 class ASTContext;
@@ -70,6 +72,10 @@ private:
   std::string target_file_;
   PassMetrics *metrics_ = nullptr;
   FileRouter router_;
+  std::optional<ExpansionLoc> candidate_location_;
+  // A TU can expose the same owned header through many declaration nodes.
+  // Cache only its normalized path; line/column remain declaration-specific.
+  std::unordered_map<unsigned, std::string> expansion_files_;
 };
 
 } // namespace cidx::ast

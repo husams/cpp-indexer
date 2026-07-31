@@ -13,6 +13,7 @@ namespace clang {
 class ASTContext;
 class SourceLocation;
 class SourceRange;
+class SourceManager;
 } // namespace clang
 
 namespace cidx::ast {
@@ -26,6 +27,12 @@ struct ExpansionLoc {
 // Expansion location of `loc` (libclang cursor.location convention).
 ExpansionLoc expansion_loc(const clang::ASTContext &context,
                            clang::SourceLocation loc);
+
+// Expansion location for a SourceLocation that has already been mapped to
+// its expansion spelling by SourceManager. This avoids repeating that mapping
+// when a caller needs both routing and the source coordinates.
+ExpansionLoc expansion_loc_from_expanded(const clang::SourceManager &manager,
+                                         clang::SourceLocation loc);
 
 // Expansion location of the range start (libclang extent.start).
 ExpansionLoc extent_start(const clang::ASTContext &context,

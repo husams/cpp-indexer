@@ -3,6 +3,7 @@
 // walk policy (symbol_visitor.hpp) and no I/O (symbol_emitter.hpp) here.
 #pragma once
 
+#include "ast/location.hpp"
 #include "ast/symbol_record.hpp"
 
 #include <optional>
@@ -20,6 +21,13 @@ public:
 
   // nullopt when the decl is not persisted (unmapped kind or no USR).
   std::optional<SymbolRecord> extract(const clang::NamedDecl *decl) const;
+
+  // Same extraction using a location already computed by the walk policy.
+  // The overload keeps routing and symbol extraction from repeating the
+  // SourceManager expansion lookup for every emitted declaration.
+  std::optional<SymbolRecord>
+  extract(const clang::NamedDecl *decl,
+          const ExpansionLoc &declaration_location) const;
 
 private:
   const clang::ASTContext &context_;

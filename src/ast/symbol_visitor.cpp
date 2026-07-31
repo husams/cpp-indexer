@@ -79,19 +79,30 @@ bool SymbolVisitor::should_emit(const clang::NamedDecl *decl) {
   // (_ignore_system_headers). In per-file mode only the target file's decls
   // are emitted (for_file_cursors' pruning); in whole-TU mode records carry
   // their file and the parity merger replays cidx's ordering.
+  candidate_location_.reset();
   const clang::SourceLocation loc =
       source_manager_.getExpansionLoc(decl->getLocation());
   if (loc.isInvalid() || source_manager_.isInSystemHeader(loc)) {
     return false;
   }
-  if (source_manager_.getFilename(loc).empty()) {
+  const unsigned file_key = source_manager_.getFileID(loc).getHashValue();
+  ExpansionLoc location;
+  if (const auto cached = expansion_files_.find(file_key);
+      cached != expansion_files_.end()) {
+    location.file = cached->second;
+    location.line = source_manager_.getExpansionLineNumber(loc);
+    location.col = source_manager_.getExpansionColumnNumber(loc);
+  } else {
+    location = expansion_loc_from_expanded(source_manager_, loc);
+    expansion_files_.emplace(file_key, location.file);
+  }
+  if (location.file.empty()) {
     return false;
   }
-  const std::string file = expansion_loc(context_, decl->getLocation()).file;
-  if (!target_file_.empty() && file != target_file_) {
+  if (!target_file_.empty() && location.file != target_file_) {
     return false;
   }
-  if (router_ && !router_(file)) {
+  if (router_ && !router_(location.file)) {
     return false;
   }
 
@@ -107,6 +118,7 @@ bool SymbolVisitor::should_emit(const clang::NamedDecl *decl) {
     return false;
   }
 
+  candidate_location_ = location;
   return true;
 }
 
@@ -114,7 +126,11 @@ bool SymbolVisitor::VisitNamedDecl(clang::NamedDecl *decl) {
   if (!should_emit(decl)) {
     return true;
   }
-  if (std::optional<SymbolRecord> sym = extractor_.extract(decl)) {
+  if (!candidate_location_) {
+    return true;
+  }
+  if (std::optional<SymbolRecord> sym =
+          extractor_.extract(decl, *candidate_location_)) {
     out_.emit(*sym);
   }
   return true;

@@ -56,7 +56,8 @@ std::optional<std::string> const_value_of(const clang::ASTContext &context,
 // cursor records itself as the decl site; definitions leave the decl fields
 // for the upsert to keep (to_symbol).
 void fill_extent(const clang::ASTContext &context, const clang::NamedDecl *decl,
-                 bool is_def, SymbolRecord &sym) {
+                 bool is_def, const ExpansionLoc *declaration_location,
+                 SymbolRecord &sym) {
   const ExpansionLoc start = extent_start(context, decl->getSourceRange());
   sym.line = start.line;
   sym.col = start.col;
@@ -64,7 +65,9 @@ void fill_extent(const clang::ASTContext &context, const clang::NamedDecl *decl,
   sym.end_line = end.line;
   sym.end_col = end.col;
   if (!is_def) {
-    const ExpansionLoc loc = expansion_loc(context, decl->getLocation());
+    const ExpansionLoc loc = declaration_location != nullptr
+                                 ? *declaration_location
+                                 : expansion_loc(context, decl->getLocation());
     sym.decl_line = loc.line;
     sym.decl_col = loc.col;
   }
@@ -95,6 +98,12 @@ SymbolExtractor::SymbolExtractor(const clang::ASTContext &context)
 
 std::optional<SymbolRecord>
 SymbolExtractor::extract(const clang::NamedDecl *decl) const {
+  return extract(decl, expansion_loc(context_, decl->getLocation()));
+}
+
+std::optional<SymbolRecord>
+SymbolExtractor::extract(const clang::NamedDecl *decl,
+                         const ExpansionLoc &declaration_location) const {
   const int kind = cidx_symbol_kind(decl);
   if (kind < 0) {
     return std::nullopt;
@@ -108,7 +117,7 @@ SymbolExtractor::extract(const clang::NamedDecl *decl) const {
   const bool is_def = is_definition(decl);
 
   SymbolRecord sym;
-  sym.file = expansion_loc(context_, decl->getLocation()).file;
+  sym.file = declaration_location.file;
   sym.usr = std::move(usr);
   sym.spelling = spelling(decl);
   sym.kind = kind;
@@ -118,7 +127,7 @@ SymbolExtractor::extract(const clang::NamedDecl *decl) const {
   }
   sym.display_name = display_name(context_, decl);
   sym.type_info = type_info(context_, decl);
-  fill_extent(context_, decl, is_def, sym);
+  fill_extent(context_, decl, is_def, &declaration_location, sym);
 
   sym.is_definition = is_def;
   sym.is_pure = is_pure_virtual_method(decl);

@@ -2313,12 +2313,12 @@ TEST_SUITE("clang") {
     const auto outcome = cidx::ast::run_index_one(db, *file, source, true);
     REQUIRE(!outcome.parse_failed);
     const std::vector<std::string> expected{
-        "symbols.main",       "symbols.headers",      "lifecycle.headers",
-        "lifecycle.main",     "declarations.headers", "definitions.headers",
-        "statements.headers", "namespaces.headers",   "declarations.main",
-        "definitions.main",   "statements.main",      "namespaces.main",
-        "headers.associate",  "main.associate",       "presentation.persist",
-        "includes.persist",   "evidence.persist"};
+        "symbols.main",         "symbols.headers",    "lifecycle.headers",
+        "lifecycle.main",       "graph.headers",      "declarations.headers",
+        "definitions.headers",  "statements.headers", "namespaces.headers",
+        "declarations.main",    "definitions.main",   "statements.main",
+        "namespaces.main",      "headers.associate",  "main.associate",
+        "presentation.persist", "includes.persist",   "evidence.persist"};
     REQUIRE(outcome.pass_metrics.size() == expected.size());
     for (std::size_t index = 0; index < expected.size(); ++index) {
       CHECK(outcome.pass_metrics[index].id == expected[index]);
@@ -2327,10 +2327,8 @@ TEST_SUITE("clang") {
     std::size_t whole_tu_traversals = 0;
     std::size_t registered_whole_tu_traversal_budget = 0;
     for (const auto &metrics : outcome.pass_metrics) {
-      const bool routed_root_pass = metrics.id == "symbols.headers" ||
-                                    metrics.id == "declarations.headers" ||
-                                    metrics.id == "definitions.headers" ||
-                                    metrics.id == "namespaces.headers";
+      const bool routed_root_pass =
+          metrics.id == "symbols.headers" || metrics.id == "graph.headers";
       CHECK(metrics.whole_tu_traversals == (routed_root_pass ? 1U : 0U));
       CHECK(metrics.registered_whole_tu_traversal_budget ==
             (routed_root_pass ? 1U : 0U));
@@ -2338,16 +2336,17 @@ TEST_SUITE("clang") {
       registered_whole_tu_traversal_budget +=
           metrics.registered_whole_tu_traversal_budget;
     }
-    CHECK(whole_tu_traversals == 4);
-    CHECK(registered_whole_tu_traversal_budget == 4);
-    CHECK(outcome.observed_whole_tu_traversals == 4);
-    CHECK(outcome.registered_whole_tu_traversal_budget == 4);
+    CHECK(whole_tu_traversals == 2);
+    CHECK(registered_whole_tu_traversal_budget == 2);
+    CHECK(outcome.observed_whole_tu_traversals == 2);
+    CHECK(outcome.registered_whole_tu_traversal_budget == 2);
     const std::vector<std::vector<cidx::ast::FrontendCapability>> capabilities{
         {cidx::ast::FrontendCapability::ast},
         {cidx::ast::FrontendCapability::ast,
          cidx::ast::FrontendCapability::preprocessor},
         {},
         {},
+        {cidx::ast::FrontendCapability::ast},
         {cidx::ast::FrontendCapability::ast},
         {cidx::ast::FrontendCapability::ast},
         {cidx::ast::FrontendCapability::ast,
@@ -2377,8 +2376,11 @@ TEST_SUITE("clang") {
             {{"symbols"}, {"fact_lifecycle"}, {"symbols.headers"}},
             {{}, {"fact_lifecycle"}, {"lifecycle.headers"}},
             {{"symbols", "fact_lifecycle"},
-             {"relations", "types", "definitions", "presentation_intents"},
+             {"root_events"},
              {"symbols.headers", "lifecycle.headers", "lifecycle.main"}},
+            {{"symbols", "fact_lifecycle", "root_events"},
+             {"relations", "types", "definitions", "presentation_intents"},
+             {"graph.headers"}},
             {{"symbols"}, {"definitions"}, {"declarations.headers"}},
             {{"definitions", "relations", "types"},
              {"relations", "types", "evidence", "definitions", "symbols"},
