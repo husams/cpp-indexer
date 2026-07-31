@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "application/agent_tools.hpp"
 #include "application/registry.hpp"
 #include "application/services.hpp"
 #include "cli/application_adapter.hpp"
@@ -737,6 +738,63 @@ TEST_CASE("default services execute real storage-backed operations") {
       context);
   CHECK(unknown_source.status == cidx::protocol::Status::Error);
   CHECK(unknown_source.diagnostics.front().code == "unknown_source");
+}
+
+TEST_CASE("agent catalog and versioned read-only budget contract") {
+  const auto catalog = cidx::agent::tool_catalog();
+  CHECK(catalog.size() == 2);
+  CHECK(catalog[0] == "query");
+  CHECK(catalog[1] == "explain");
+
+  cidx::Storage db(":memory:");
+  cidx::Symbol first;
+  first.usr = "USR::agent-first";
+  first.spelling = "first";
+  first.kind = "function";
+  first.is_definition = true;
+  first.resolved = true;
+  cidx::Symbol second = first;
+  second.usr = "USR::agent-second";
+  second.spelling = "second";
+  db.add_symbol(first);
+  db.add_symbol(second);
+
+  cidx::StorageWorkspaceAdapter workspace_data(db);
+  cidx::WorkspaceContext workspace =
+      cidx::WorkspaceContext::borrow(workspace_data);
+  cidx::query::SqliteQueryReadAdapter query_read(db);
+  cidx::application::ApplicationReadPorts read_ports{.query = &query_read};
+  cidx::application::ApplicationContext context(
+      workspace,
+      cidx::application::ApplicationPolicy{
+          .access = cidx::application::AccessMode::read_only,
+          .capabilities = cidx::application::capability_bit(
+              cidx::application::Capability::index_read)},
+      read_ports);
+
+  cidx::agent::Request request;
+  request.tool = cidx::agent::Tool::query;
+  request.query.expression = "codebase() | nodes() | select(name, file, line)";
+  request.budget.max_results = 1;
+  const cidx::agent::ToolService tools;
+  const auto response = tools.invoke(request, context);
+  CHECK(response.completeness.truncated);
+  CHECK(response.completeness.budget == std::optional<int64_t>{1});
+  CHECK(response.status == cidx::protocol::Status::Partial);
+  const auto encoded = tools.encode_response(request, response);
+  const auto encoded_text = cidx::json_out::dumps_indent2(encoded);
+  CHECK(encoded_text.find("cidx.agent/v1") != std::string::npos);
+  CHECK(encoded_text.find("\"exhausted_at\": 1") != std::string::npos);
+
+  const auto decoded = tools.decode_request(
+      R"json({"version":1,"tool":"explain","cxq":"codebase()","budget":{"max_results":2}})json");
+  CHECK(decoded.tool == cidx::agent::Tool::explain);
+  CHECK(decoded.query.explain);
+  CHECK(decoded.budget.max_results == 2);
+  CHECK_THROWS_WITH(
+      tools.decode_request(
+          R"json({"version":99,"tool":"query","cxq":"codebase()"})json"),
+      "E_PROTOCOL_VERSION: unsupported agent protocol version 99");
 }
 
 int main(int argc, char **argv) {

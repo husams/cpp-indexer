@@ -165,6 +165,7 @@ struct Result {
   std::vector<std::vector<Cell>> rows; // Shape::Nodes/Rows
   std::vector<PathWitness> paths;      // Shape::Path only
   IndexIdentity index;
+  std::optional<int64_t> exhausted_budget;
 
   // {"shape","view","count","truncated","index","rows"} -- see
   // docs/query-plan.md.
@@ -185,7 +186,8 @@ public:
   // Validate + normalize + run. Throws PlanError on an invalid plan.
   // `after_id` pages the first nodes() enumeration from ids strictly greater
   // than the cursor. It is execution state, not part of the immutable Plan IR.
-  Result run(const Plan &plan, std::optional<int64_t> after_id = std::nullopt);
+  Result run(const Plan &plan, std::optional<int64_t> after_id = std::nullopt,
+             std::optional<int64_t> result_cap = std::nullopt);
 
   // Internal compatibility adapters already hydrate from the same read port;
   // they do not need to recompute the workspace-wide identity for each small

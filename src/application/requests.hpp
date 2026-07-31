@@ -33,6 +33,9 @@ struct QueryRequest {
   QueryOutput output = QueryOutput::human;
   bool explain = false;
   std::optional<std::string> index;
+  // An optional caller-owned result budget. The executor reports exhaustion
+  // explicitly; it never treats a capped prefix as complete.
+  std::optional<std::int64_t> max_results;
 };
 
 enum class AnalysisAction : std::uint8_t { list, execute, export_facts };

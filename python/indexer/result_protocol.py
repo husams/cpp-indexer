@@ -457,7 +457,11 @@ def from_query_result(result: Any, index: Any, *, operation: str = "query") -> R
             source_fingerprint=index.source_fingerprint,
         ),
         producer=Producer(backend="python"),
-        completeness=Completeness(state=state, truncated=result.truncated, stale=stale),
+        completeness=Completeness(
+            state=state,
+            truncated=result.truncated,
+            stale=stale,
+            budget=getattr(result, "exhausted_budget", None)),
         result=payload,
         evidence=[Evidence("queryplan", "derived", "producer-verified", "bounded QueryPlan execution")],
         artifacts=[ArtifactRef("semantic-index", f"semantic-index/schema/{index.schema_version}", index.schema_version)],
