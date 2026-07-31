@@ -815,6 +815,9 @@ public:
   // and future maintenance commands. Not part of the indexing flow.
   SqliteDb &raw_db() { return db_; }
 
+  // SQLite connection data-version counter used by session invalidation.
+  [[nodiscard]] std::int64_t data_version();
+
   // Runtime qualification and maintenance APIs. Backup uses SQLite's online
   // backup API; maintenance is explicit because ANALYZE changes statistics.
   auto backup_to(const std::string &path) const -> void { db_.backup_to(path); }
