@@ -215,13 +215,15 @@ const char kDirNeedsComponent[] =
 // main() (D23). The ParsedTu lives only inside the try block: its destructor
 // frees the TU + Index BEFORE mark_file_indexed runs — Python's
 // `del tu` in index_source's finally (one-AST peak memory, design §7).
-inline int index_one(Storage &db, const File &rec, const std::string &path,
-                     bool graph_enabled, Context &ctx) {
+inline int index_one(Storage &db, ast::IndexSession &session, const File &rec,
+                     const std::string &path, bool graph_enabled,
+                     Context &ctx) {
   // All indexing runs through the LibTooling engine (parity-proven visitors
   // over the Clang C++ API): same DB effects, counters, and per-file output
   // line as the retired libclang cursor walk.
   {
-    ast::IndexOneOutcome out = ast::run_index_one(db, rec, path, graph_enabled);
+    ast::IndexOneOutcome out =
+        ast::run_index_one(db, session, rec, path, graph_enabled);
     if (ctx.index_outcome_sink) {
       ctx.index_outcome_sink(out);
     }
@@ -273,7 +275,7 @@ inline int index_one(Storage &db, const File &rec, const std::string &path,
       return 1;
     }
     db.replace_diagnostics(rec.id, out.diagnostics);
-    db.mark_file_indexed(rec.id, file_mtime(path), out.source_md5);
+    db.mark_file_indexed(rec.id, out.source_mtime, out.source_md5);
     *ctx.out << "  -> " << out.stored
              << " symbols; headers: " << out.headers.indexed << " indexed (+"
              << out.headers.symbols << " symbols), " << out.headers.already
@@ -287,7 +289,8 @@ inline int index_one(Storage &db, const File &rec, const std::string &path,
 // flag but the loop continues.
 inline int index_files(Storage &db, const std::vector<std::string> &file_args,
                        const std::optional<std::string> &root,
-                       bool graph_enabled, Context &ctx) {
+                       bool graph_enabled, ast::IndexSession &session,
+                       Context &ctx) {
   int rc = 0;
   for (const std::string &f : file_args) {
     const std::string path = files::resolve_file_arg(f, root);
@@ -302,7 +305,7 @@ inline int index_files(Storage &db, const std::vector<std::string> &file_args,
       *ctx.out << "  already indexed\n";
       continue;
     }
-    rc |= index_one(db, *rec, path, graph_enabled, ctx);
+    rc |= index_one(db, session, *rec, path, graph_enabled, ctx);
   }
   return rc;
 }
@@ -312,7 +315,8 @@ inline int index_files(Storage &db, const std::vector<std::string> &file_args,
 // skip (analysis §4); list_files() with no filters is the same query/order
 // (ORDER BY c.path, d.path, f.name), snapshotted before the loop so header
 // rows added while indexing are not re-visited this run.
-inline int index_pending(Storage &db, bool graph_enabled, Context &ctx) {
+inline int index_pending(Storage &db, bool graph_enabled,
+                         ast::IndexSession &session, Context &ctx) {
   int done = 0;
   int skipped = 0;
   int failed = 0;
@@ -335,7 +339,7 @@ inline int index_pending(Storage &db, bool graph_enabled, Context &ctx) {
       continue;
     }
     *ctx.out << "indexing " << path << "\n";
-    if (index_one(db, rec, path, graph_enabled, ctx) == 0) {
+    if (index_one(db, session, rec, path, graph_enabled, ctx) == 0) {
       ++done;
     } else {
       ++failed;

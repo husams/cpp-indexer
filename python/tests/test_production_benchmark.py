@@ -69,6 +69,26 @@ def test_reverse_order_changes_only_compile_database_order(
     )
 
 
+def test_canonical_rows_sort_after_portable_identity_normalization(
+    tmp_path: Path,
+) -> None:
+    benchmark = load_benchmark()
+    first_root = tmp_path / "trial-1"
+    second_root = tmp_path / "trial-2"
+    first_rows = [
+        [f"{first_root}/b.cpp", "build:" + "f" * 40],
+        [f"{first_root}/a.cpp", "build:" + "0" * 40],
+    ]
+    second_rows = [
+        [f"{second_root}/a.cpp", "build:" + "9" * 40],
+        [f"{second_root}/b.cpp", "build:" + "1" * 40],
+    ]
+
+    assert benchmark.HSE95._normalize_canonical_rows(
+        first_rows, first_root
+    ) == benchmark.HSE95._normalize_canonical_rows(second_rows, second_root)
+
+
 def test_model_analysis_prefers_clear_quadratic_growth() -> None:
     benchmark = load_benchmark()
     profile = {

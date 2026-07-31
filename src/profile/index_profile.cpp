@@ -286,8 +286,13 @@ void write_profile(Session::Impl &impl) {
          << "      \"reconciliation_rows_changed\": "
          << impl.counters["reconciliation_rows_changed"] << ",\n"
          << "      \"include_path_resolution_queries\": "
-         << impl.counters["include_path_resolution_queries"] << ",\n"
-         << "      \"telemetry_failures\": "
+         << impl.counters["include_path_resolution_queries"] << ",\n";
+  for (const auto &[name, value] : impl.counters) {
+    if (name.starts_with("index_session.")) {
+      output << "      " << json_string(name) << ": " << value << ",\n";
+    }
+  }
+  output << "      \"telemetry_failures\": "
          << telemetry_failures.load(std::memory_order_relaxed) << "\n"
          << "    },\n    \"sqlite\": {\n"
          << "      \"prepare_calls\": " << impl.sqlite_prepare_calls << ",\n"

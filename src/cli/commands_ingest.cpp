@@ -460,11 +460,13 @@ int cmd_index(const ParsedArgs &args, Context &ctx) {
              : std::nullopt;
     // v7: --no-graph disables edge extraction for this run. Indexing runs
     // through the LibTooling engine (ast::run_index_one), which builds its own
-    // toolchain + parse internally — no Parser/AstIndexer needed here.
+    // parse internally. One run-wide session owns the stable workspace
+    // snapshot, Toolchain, and semantic-configuration caches for every TU.
     const bool graph_enabled = !args.no_graph;
+    ast::IndexSession session(db, log);
     rc = !args.files.empty()
-             ? index_files(db, args.files, root, graph_enabled, ctx)
-             : index_pending(db, graph_enabled, ctx);
+             ? index_files(db, args.files, root, graph_enabled, session, ctx)
+             : index_pending(db, graph_enabled, session, ctx);
     if (rc == 0) {
       const bool current = all_files_current(db);
       if (!graph_enabled) {

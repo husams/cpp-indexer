@@ -21,7 +21,7 @@ from typing import Any
 
 EXPECTED_SCHEMA_VERSION = 40
 EXPECTED_CATALOG_VERSION = 1
-EXPECTED_CATALOG_HASH = "21497a89add82fba96293f97b34f9a19c68912b6cc823a915889acf0709c216d"
+EXPECTED_CATALOG_HASH = "c4f426232c34739c83a3d15c3bd91b4d4f8934ec8853f8efaa7a27939e37e9f7"
 DUMP_LAYER0 = Path(__file__).resolve().parents[2] / "scripts/dump_layer0.sh"
 REQUIRED_CANONICAL_SECTIONS = frozenset(
     {
@@ -250,6 +250,26 @@ def mutate_translation_unit(source: Path, old_value: int, new_value: int) -> Non
     if text.count(old) != 1:
         raise RuntimeError(f"expected one mutation marker in {source}: {old!r}")
     source.write_text(text.replace(old, new), encoding="utf-8")
+
+
+def _normalize_canonical_rows(
+    rows: list[list[Any]], corpus_root: Path
+) -> list[list[Any]]:
+    root_text = str(corpus_root)
+
+    def normalize(value: Any) -> Any:
+        if isinstance(value, str):
+            return re.sub(
+                r"build:[0-9a-f]{40}",
+                "build:<build>",
+                value.replace(root_text, "<corpus>"),
+            )
+        return value
+
+    normalized = [[normalize(value) for value in row] for row in rows]
+    return sorted(
+        normalized, key=lambda row: json.dumps(row, separators=(",", ":"))
+    )
 
 
 def _canonical_rows(
@@ -707,22 +727,13 @@ def _canonical_rows(
     }
 
     connection.create_function("scoped_symbol_key", 3, _scoped_symbol_key)
-    root_text = str(corpus_root)
 
-    def normalize(value: Any) -> Any:
-        if isinstance(value, str):
-            return re.sub(
-                r"build:[0-9a-f]{40}",
-                "build:<build>",
-                value.replace(root_text, "<corpus>"),
-            )
-        return value
-
-    canonical = {
-        name: [[normalize(value) for value in row]
-               for row in connection.execute(query).fetchall()]
-        for name, query in queries.items()
-    }
+    canonical = {}
+    for name, query in queries.items():
+        canonical[name] = _normalize_canonical_rows(
+            [list(row) for row in connection.execute(query).fetchall()],
+            corpus_root,
+        )
     unresolved = [
         row for row in canonical["fact_applicability"] if row[1] is None
     ]
