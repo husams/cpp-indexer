@@ -1008,6 +1008,33 @@ TEST_CASE(
   CHECK(db.file_configs_for(header).empty());
 }
 
+TEST_CASE("include retirement reports direct and cascade row deltas") {
+  cidx::Storage db(":memory:");
+  const int64_t component = db.add_component("include-delete", "/repo/delete");
+  const int64_t directory = db.add_directory(component, "");
+  const int64_t tu = db.add_file(directory, "main.cpp");
+  const int64_t header = db.add_file(directory, "header.hpp");
+  const int64_t config = db.add_include_config(
+      cidx::IncludeConfig{.tu_file_id = tu, .digest = "delete"});
+  const int64_t edge = db.add_include_edge(
+      cidx::IncludeEdge{.src_file_id = tu,
+                        .dst_file_id = header,
+                        .dst_path = "/repo/delete/header.hpp",
+                        .config_id = config});
+  db.add_include_site(cidx::IncludeSite{.edge_id = edge});
+  db.add_include_macro_use(
+      cidx::IncludeMacroUse{.src_file_id = tu,
+                            .def_path = "/repo/delete/header.hpp",
+                            .name = "DELETE_MACRO",
+                            .config_id = config});
+
+  const cidx::IncludeDeletionStats deleted =
+      db.delete_include_configs_for_tu(tu);
+  CHECK(deleted.direct >= 2);
+  CHECK(deleted.cascade == 3);
+  CHECK(db.include_edges_from(tu, true).empty());
+}
+
 TEST_CASE("v35 occurrence identities are compact and lossless") {
   cidx::Storage db(":memory:");
   const int64_t component = db.add_component("c", "/repo/c");

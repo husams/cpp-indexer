@@ -501,6 +501,28 @@ SqliteStorageService::delete_include_configs_for_tu(int64_t tu_file_id) {
   while (fc.step()) {
     ++deleted.direct;
   }
+  auto sites = db_.prepare(
+      "DELETE FROM include_site WHERE edge_id IN ("
+      "SELECT id FROM include_edge WHERE config_id IN ("
+      "SELECT id FROM include_config WHERE tu_file_id = ?)) RETURNING edge_id");
+  sites.bind(1, tu_file_id);
+  while (sites.step()) {
+    ++deleted.cascade;
+  }
+  auto edges = db_.prepare(
+      "DELETE FROM include_edge WHERE config_id IN ("
+      "SELECT id FROM include_config WHERE tu_file_id = ?) RETURNING id");
+  edges.bind(1, tu_file_id);
+  while (edges.step()) {
+    ++deleted.cascade;
+  }
+  auto macros = db_.prepare("DELETE FROM include_macro_use WHERE config_id IN ("
+                            "SELECT id FROM include_config WHERE tu_file_id = "
+                            "?) RETURNING config_id");
+  macros.bind(1, tu_file_id);
+  while (macros.step()) {
+    ++deleted.cascade;
+  }
   auto st = db_.prepare(
       "DELETE FROM include_config WHERE tu_file_id = ? RETURNING rowid");
   st.bind(1, tu_file_id);

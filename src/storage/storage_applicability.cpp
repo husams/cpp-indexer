@@ -19,7 +19,8 @@ void ensure_applicability_staging(SqliteDb &db) {
           "bucket TEXT NOT NULL, fact_id INTEGER NOT NULL, "
           "PRIMARY KEY(bucket, fact_id));"
           "CREATE TEMP TABLE IF NOT EXISTS cidx_applicability_generation ("
-          "generation INTEGER NOT NULL);");
+          "file_id INTEGER NOT NULL, config_id INTEGER NOT NULL, "
+          "generation INTEGER NOT NULL, PRIMARY KEY(file_id, config_id));");
 }
 
 auto stage_ids(SqliteDb &db, std::string_view bucket,
@@ -85,22 +86,19 @@ AssociationStats SqliteStorageService::associate_facts_for_file(
   stats.attempted = symbol_ids.size() + edge_ids.size() + definition_ids.size();
   ensure_applicability_staging(db_);
 
-  auto reset_generation =
-      db_.prepare("DELETE FROM temp.cidx_applicability_generation");
-  reset_generation.step_done();
-  auto seed_generation = db_.prepare(
-      "INSERT INTO temp.cidx_applicability_generation(generation) "
-      "SELECT COALESCE(MAX(generation), 0) + 1 FROM fact_applicability "
-      "WHERE file_id = ? AND config_id = ?");
+  auto seed_generation =
+      db_.prepare("INSERT INTO temp.cidx_applicability_generation "
+                  "(file_id, config_id, generation) VALUES (?, ?, 1) "
+                  "ON CONFLICT(file_id, config_id) DO UPDATE SET "
+                  "generation = cidx_applicability_generation.generation + 1 "
+                  "RETURNING generation");
   seed_generation.bind(1, file_id);
   seed_generation.bind(2, config_id);
-  seed_generation.step_done();
-  auto generation_row =
-      db_.prepare("SELECT generation FROM temp.cidx_applicability_generation");
-  if (!generation_row.step()) {
+  if (!seed_generation.step()) {
     throw StorageError("applicability generation staging failed");
   }
-  const int64_t generation = generation_row.col_int64(0);
+  const int64_t generation = seed_generation.col_int64(0);
+  seed_generation.step_done();
 
   auto clear = db_.prepare(
       "DELETE FROM fact_applicability WHERE file_id = ? AND config_id = ?");
@@ -117,6 +115,14 @@ AssociationStats SqliteStorageService::associate_facts_for_file(
       stage_ids(db_, "definition", definition_ids);
   stats.temporary_rows = symbol_rows + edge_rows + definition_rows;
 
+  auto stage_definition_edges = db_.prepare(
+      "INSERT OR IGNORE INTO temp.cidx_applicability_ids(bucket, fact_id) "
+      "SELECT 'def_edge', de.rowid FROM def_edge de JOIN "
+      "temp.cidx_applicability_ids ids ON ids.bucket = 'definition' AND "
+      "ids.fact_id = de.src_def_id");
+  stage_definition_edges.step_done();
+  const auto definition_edge_rows = static_cast<std::uint64_t>(db_.changes());
+
   std::uint64_t base_inserted = 0;
   base_inserted += insert_staged(db_, "symbol", "symbol", "id", "id", "symbol",
                                  file_id, config_id, generation);
@@ -124,16 +130,15 @@ AssociationStats SqliteStorageService::associate_facts_for_file(
                                  "definition", file_id, config_id, generation);
   base_inserted += insert_staged(db_, "edge", "edge", "id", "id", "edge",
                                  file_id, config_id, generation);
-  base_inserted +=
-      insert_staged(db_, "def_edge", "def_edge", "rowid", "src_def_id",
-                    "definition", file_id, config_id, generation);
+  base_inserted += insert_staged(db_, "def_edge", "def_edge", "rowid", "rowid",
+                                 "def_edge", file_id, config_id, generation);
   stats.inserted = base_inserted;
 
   {
     auto st = db_.prepare(
         "INSERT OR IGNORE INTO fact_applicability "
         "(fact_kind, fact_id, file_id, config_id, generation) "
-        "SELECT 'decl_site', ds.rowid, ?, ?, ? FROM decl_site ds JOIN "
+        "SELECT DISTINCT 'decl_site', ds.rowid, ?, ?, ? FROM decl_site ds JOIN "
         "fact_applicability fa ON fa.fact_kind = 'symbol' AND "
         "fa.fact_id = ds.symbol_id AND fa.file_id = ? AND fa.config_id = ? "
         "AND fa.generation = ? WHERE ds.file_id = ?");
@@ -151,7 +156,7 @@ AssociationStats SqliteStorageService::associate_facts_for_file(
       db_,
       "INSERT OR IGNORE INTO fact_applicability "
       "(fact_kind, fact_id, file_id, config_id, generation) "
-      "SELECT 'parameter', p.owner_id, ?, ?, ? FROM parameter p JOIN "
+      "SELECT DISTINCT 'parameter', p.owner_id, ?, ?, ? FROM parameter p JOIN "
       "fact_applicability fa ON fa.fact_kind = 'symbol' AND fa.fact_id = "
       "p.owner_id AND fa.file_id = ? AND fa.config_id = ? AND fa.generation = "
       "?",
@@ -160,7 +165,8 @@ AssociationStats SqliteStorageService::associate_facts_for_file(
       db_,
       "INSERT OR IGNORE INTO fact_applicability "
       "(fact_kind, fact_id, file_id, config_id, generation) "
-      "SELECT 'symbol_type', st.symbol_id, ?, ?, ? FROM symbol_type st JOIN "
+      "SELECT DISTINCT 'symbol_type', st.symbol_id, ?, ?, ? FROM symbol_type "
+      "st JOIN "
       "fact_applicability fa ON fa.fact_kind = 'symbol' AND fa.fact_id = "
       "st.symbol_id AND fa.file_id = ? AND fa.config_id = ? AND fa.generation "
       "= ?",
@@ -186,7 +192,7 @@ AssociationStats SqliteStorageService::associate_facts_for_file(
       db_,
       "INSERT OR IGNORE INTO fact_applicability "
       "(fact_kind, fact_id, file_id, config_id, generation) "
-      "SELECT 'entity_node', en.id, ?, ?, ? FROM entity_node en JOIN "
+      "SELECT DISTINCT 'entity_node', en.id, ?, ?, ? FROM entity_node en JOIN "
       "fact_applicability fa ON fa.fact_kind = 'symbol' AND fa.fact_id = "
       "en.id AND fa.file_id = ? AND fa.config_id = ? AND fa.generation = ?",
       file_id, config_id, generation);
@@ -203,7 +209,8 @@ AssociationStats SqliteStorageService::associate_facts_for_file(
       db_,
       "INSERT OR IGNORE INTO fact_applicability "
       "(fact_kind, fact_id, file_id, config_id, generation) "
-      "SELECT 'template_param', tp.owner_id, ?, ?, ? FROM template_param tp "
+      "SELECT DISTINCT 'template_param', tp.owner_id, ?, ?, ? FROM "
+      "template_param tp "
       "JOIN fact_applicability fa ON fa.fact_kind = 'symbol' AND "
       "fa.fact_id = tp.owner_id AND fa.file_id = ? AND fa.config_id = ? AND "
       "fa.generation = ?",
@@ -212,7 +219,8 @@ AssociationStats SqliteStorageService::associate_facts_for_file(
       db_,
       "INSERT OR IGNORE INTO fact_applicability "
       "(fact_kind, fact_id, file_id, config_id, generation) "
-      "SELECT 'template_arg', ta.owner_id, ?, ?, ? FROM template_arg ta JOIN "
+      "SELECT DISTINCT 'template_arg', ta.owner_id, ?, ?, ? FROM template_arg "
+      "ta JOIN "
       "fact_applicability fa ON fa.fact_kind = 'symbol' AND fa.fact_id = "
       "ta.owner_id AND fa.file_id = ? AND fa.config_id = ? AND fa.generation = "
       "?",
@@ -221,7 +229,7 @@ AssociationStats SqliteStorageService::associate_facts_for_file(
       db_,
       "INSERT OR IGNORE INTO fact_applicability "
       "(fact_kind, fact_id, file_id, config_id, generation) "
-      "SELECT 'call_arg', ca.edge_id, ?, ?, ? FROM call_arg ca JOIN "
+      "SELECT DISTINCT 'call_arg', ca.edge_id, ?, ?, ? FROM call_arg ca JOIN "
       "fact_applicability fa ON fa.fact_kind = 'edge' AND fa.fact_id = "
       "ca.edge_id AND fa.file_id = ? AND fa.config_id = ? AND fa.generation = "
       "?",
@@ -230,7 +238,8 @@ AssociationStats SqliteStorageService::associate_facts_for_file(
       db_,
       "INSERT OR IGNORE INTO fact_applicability "
       "(fact_kind, fact_id, file_id, config_id, generation) "
-      "SELECT 'possible_call', pc.src_def_id, ?, ?, ? FROM possible_call pc "
+      "SELECT DISTINCT 'possible_call', pc.src_def_id, ?, ?, ? FROM "
+      "possible_call pc "
       "JOIN fact_applicability fa ON fa.fact_kind = 'definition' AND "
       "fa.fact_id = pc.src_def_id AND fa.file_id = ? AND fa.config_id = ? AND "
       "fa.generation = ?",
@@ -247,8 +256,8 @@ AssociationStats SqliteStorageService::associate_facts_for_file(
     st.step_done();
     stats.inserted += static_cast<std::uint64_t>(db_.changes());
   }
-  stats.attempted += stats.inserted - base_inserted;
-  stats.ignored = stats.attempted - std::min(stats.attempted, stats.inserted);
+  stats.attempted += definition_edge_rows + stats.inserted - base_inserted;
+  stats.ignored = stats.attempted - stats.inserted;
   return stats;
 }
 

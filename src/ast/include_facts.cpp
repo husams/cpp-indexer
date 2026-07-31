@@ -80,9 +80,7 @@ void persist_include_edge_and_site(IncludePersistenceState &state,
   const int64_t edge_id = state.db.add_include_edge(edge);
   ++state.stats.attempted;
   ++state.stats.inserted_or_updated;
-  if (!state.edge_identities.emplace(source_id, edge.dst_path).second) {
-    ++state.stats.ignored;
-  }
+  state.edge_identities.emplace(source_id, edge.dst_path);
 
   IncludeSite site;
   site.edge_id = edge_id;
@@ -99,11 +97,7 @@ void persist_include_edge_and_site(IncludePersistenceState &state,
   state.db.add_include_site(site);
   ++state.stats.attempted;
   ++state.stats.inserted_or_updated;
-  if (!state.site_identities
-           .emplace(source_id, edge.dst_path, fact.begin_offset)
-           .second) {
-    ++state.stats.ignored;
-  }
+  state.site_identities.emplace(source_id, edge.dst_path, fact.begin_offset);
 }
 
 void persist_include_fact(IncludePersistenceState &state,
@@ -113,7 +107,7 @@ void persist_include_fact(IncludePersistenceState &state,
   }
   const std::optional<int64_t> source_id = state.file_id_for(fact.src_path);
   if (!source_id) {
-    ++state.stats.ignored;
+    ++state.stats.attempted;
     return;
   }
   record_header_applicability(state.db, source_id, state.normalized_id);
@@ -126,7 +120,7 @@ void persist_macro_use(IncludePersistenceState &state, const MacroUseFact &fact,
                        int64_t config_id) {
   const std::optional<int64_t> source_id = state.file_id_for(fact.src_path);
   if (!source_id) {
-    ++state.stats.ignored;
+    ++state.stats.attempted;
     return;
   }
   IncludeMacroUse use;
@@ -138,10 +132,7 @@ void persist_macro_use(IncludePersistenceState &state, const MacroUseFact &fact,
   state.db.add_include_macro_use(use);
   ++state.stats.attempted;
   ++state.stats.inserted_or_updated;
-  if (!state.macro_identities.emplace(*source_id, use.def_path, use.name)
-           .second) {
-    ++state.stats.ignored;
-  }
+  state.macro_identities.emplace(*source_id, use.def_path, use.name);
 }
 
 // The enclosing #if/#elif/#else stack at a directive. Clang only lexes taken
@@ -522,6 +513,7 @@ auto persist_include_facts(cidx::Storage &db, const IncludeFacts &facts,
       4 + state.file_applicability.size() + state.edge_identities.size() +
       state.site_identities.size() + state.macro_identities.size();
   stats.duplicates = stats.attempted - unique_facts;
+  stats.ignored = stats.attempted - stats.inserted_or_updated;
   return stats;
 }
 

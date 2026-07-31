@@ -818,6 +818,7 @@ public:
   // Raw connection — exposed for tests (schema assertions on :memory: DBs)
   // and future maintenance commands. Not part of the indexing flow.
   SqliteDb &raw_db() { return db_; }
+  [[nodiscard]] auto data_version() -> std::int64_t;
 
   // Runtime qualification and maintenance APIs. Backup uses SQLite's online
   // backup API; maintenance is explicit because ANALYZE changes statistics.

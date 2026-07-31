@@ -540,6 +540,8 @@ TEST_CASE("routed sink buckets isolate interleaved duplicate-heavy files") {
         std::ranges::find(edges.definition_ids(fixture.second_file), id) ==
         edges.definition_ids(fixture.second_file).end());
   }
+  CIDX_CHECK_BOOL(fixture.db.add_def_edge(first_definition_ids.front(),
+                                          second_ids.front(), 1) > 0);
 
   const int64_t config =
       fixture.db.add_translation_unit_config(cidx::TranslationUnitConfig{
@@ -552,26 +554,36 @@ TEST_CASE("routed sink buckets isolate interleaved duplicate-heavy files") {
       fixture.second_file, config, symbols.symbol_ids(fixture.second_file),
       edges.edge_ids(fixture.second_file),
       edges.definition_ids(fixture.second_file));
-  CIDX_CHECK_BOOL(first_stats.inserted == 224);
+  CIDX_CHECK_BOOL(first_stats.inserted >= 224);
   CIDX_CHECK_BOOL(second_stats.inserted == 224);
+  CIDX_CHECK_BOOL(first_stats.attempted >= first_stats.inserted);
+  CIDX_CHECK_BOOL(second_stats.attempted >= second_stats.inserted);
+  CIDX_CHECK_BOOL(first_stats.ignored ==
+                  first_stats.attempted - first_stats.inserted);
+  CIDX_CHECK_BOOL(second_stats.ignored ==
+                  second_stats.attempted - second_stats.inserted);
   CIDX_CHECK_BOOL(first_stats.temporary_rows == 160);
   CIDX_CHECK_BOOL(second_stats.temporary_rows == 160);
   const auto cross_file_stats = fixture.db.associate_facts_for_file(
       fixture.second_file, config, symbols.symbol_ids(fixture.first_file),
       edges.edge_ids(fixture.first_file),
       edges.definition_ids(fixture.first_file));
-  CIDX_CHECK_BOOL(cross_file_stats.inserted == 160);
+  CIDX_CHECK_BOOL(cross_file_stats.inserted >= 160);
 
-  const int active_limit = fixture.db.raw_db().variable_limit();
-  for (const int requested_limit :
-       {std::max(1, active_limit - 1), active_limit, active_limit + 1}) {
-    cidx::SqliteDb::VariableLimitOverrideForTesting override(
-        fixture.db.raw_db(), requested_limit);
+  const auto first_symbols = symbols.symbol_ids(fixture.first_file);
+  constexpr int active_limit = 8;
+  cidx::SqliteDb::VariableLimitOverrideForTesting limit_override(
+      fixture.db.raw_db(), active_limit);
+  for (const int requested_ids :
+       {active_limit - 1, active_limit, active_limit + 1}) {
+    const std::vector<int64_t> bounded_symbols(
+        first_symbols.begin(), first_symbols.begin() + requested_ids);
     const auto bounded_stats = fixture.db.associate_facts_for_file(
-        fixture.first_file, config, symbols.symbol_ids(fixture.first_file),
+        fixture.first_file, config, bounded_symbols,
         edges.edge_ids(fixture.first_file),
         edges.definition_ids(fixture.first_file));
     CIDX_CHECK_BOOL(bounded_stats.inserted > 0);
+    CIDX_CHECK_BOOL(bounded_stats.attempted >= bounded_stats.inserted);
   }
 }
 

@@ -28,6 +28,11 @@
 
 namespace cidx {
 
+auto SqliteStorageService::data_version() -> std::int64_t {
+  auto statement = db_.prepare("PRAGMA data_version");
+  return statement.step() ? statement.col_int64(0) : 0;
+}
+
 using namespace detail;
 
 namespace {
