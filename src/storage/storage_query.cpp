@@ -319,6 +319,11 @@ auto SqliteStorageService::foreign_keys_ok() -> bool {
   return !st.step();
 }
 
+auto SqliteStorageService::database_data_version() -> std::int64_t {
+  auto st = db_.prepare("PRAGMA data_version");
+  return st.step() ? st.col_int64(0) : 0;
+}
+
 // ============================================================================
 // M6 graph read-only accessors (A1–A8)
 // ============================================================================

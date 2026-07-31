@@ -825,6 +825,7 @@ public:
   auto refresh_statistics() -> void { db_.exec("ANALYZE"); }
   [[nodiscard]] auto integrity_ok() -> bool;
   [[nodiscard]] auto foreign_keys_ok() -> bool;
+  [[nodiscard]] auto database_data_version() -> std::int64_t;
 
   // %c%c% char-in-order LIKE pattern with '\ % _' escaping (G18); public
   // statics so fuzzy_match_test can pin them directly.

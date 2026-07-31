@@ -157,6 +157,7 @@ add_library(cidx_core STATIC
   src/util/pathutil.cpp
   src/util/repo.cpp
   src/util/files.cpp
+  src/util/front_end_reuse.cpp
   src/profile/index_profile.cpp
   src/storage/sqlite.cpp
   src/storage/sqlite_adapters.cpp
@@ -267,6 +268,7 @@ endif()
 find_package(LLVM REQUIRED CONFIG)
 find_package(Clang REQUIRED CONFIG)
 add_library(cidx_ast OBJECT
+  src/ast/front_end_reuse.cpp
   src/ast/kind_map.cpp src/ast/usr.cpp src/ast/location.cpp
   src/ast/names.cpp src/ast/decl_flags.cpp
   src/ast/symbol_extractor.cpp src/ast/symbol_visitor.cpp
@@ -510,6 +512,20 @@ target_link_libraries(cidx PRIVATE cidx_core)
 
 # RPATH so the dynamic Clang C++ libs (clang-cpp + libLLVM) resolve at runtime.
 set_target_properties(cidx PROPERTIES
+  BUILD_RPATH "${LLVM_LIBRARY_DIR}"
+  INSTALL_RPATH "${LLVM_LIBRARY_DIR}"
+  INSTALL_RPATH_USE_LINK_PATH ON
+)
+
+# S-075 qualification probe. It is intentionally separate from production
+# indexing: ADR-014 selects the no-ship path until a reusable mechanism has
+# corpus-backed evidence and a complete failure-atomic implementation.
+add_executable(front_end_reuse_probe tests/front_end_reuse_probe.cpp)
+target_compile_options(front_end_reuse_probe PRIVATE -Wall -Wextra)
+target_link_libraries(front_end_reuse_probe PRIVATE cidx_core)
+target_include_directories(front_end_reuse_probe SYSTEM PRIVATE
+  ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
+set_target_properties(front_end_reuse_probe PROPERTIES
   BUILD_RPATH "${LLVM_LIBRARY_DIR}"
   INSTALL_RPATH "${LLVM_LIBRARY_DIR}"
   INSTALL_RPATH_USE_LINK_PATH ON

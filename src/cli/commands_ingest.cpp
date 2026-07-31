@@ -443,8 +443,8 @@ int cmd_index(const ParsedArgs &args, Context &ctx) {
                    << transform_run_status_name(run.status) << " "
                    << transform_completeness_name(run.completeness) << "\n";
         }
-        *ctx.out << "readiness: "
-                 << (report.complete ? "ready" : "stale") << "\n";
+        *ctx.out << "readiness: " << (report.complete ? "ready" : "stale")
+                 << "\n";
       }
       return 0;
     }
@@ -465,14 +465,17 @@ int cmd_index(const ParsedArgs &args, Context &ctx) {
     const bool graph_enabled = !args.no_graph;
     ast::IndexSession session(db, log);
     rc = !args.files.empty()
-             ? index_files(db, args.files, root, graph_enabled, session, ctx)
-             : index_pending(db, graph_enabled, session, ctx);
+             ? index_files(db, args.files, root, graph_enabled, session,
+                           args.no_front_end_reuse, ctx)
+             : index_pending(db, graph_enabled, session,
+                             args.no_front_end_reuse, ctx);
     if (rc == 0) {
       const bool current = all_files_current(db);
       if (!graph_enabled) {
         db.mark_transform_pipeline_pending("graph extraction disabled");
       } else if (!current) {
-        db.mark_transform_pipeline_pending("index has pending or selected files");
+        db.mark_transform_pipeline_pending(
+            "index has pending or selected files");
       } else {
         const TransformReport report = db.run_transform_pipeline();
         if (report.failed) {

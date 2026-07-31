@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cpp-indexer.invalid/front-end-reuse-identity-v1.schema.json",
+  "title": "CIDX front-end reuse identity v1",
+  "type": "object",
+  "required": ["version", "mechanism", "canonical_bytes", "sha256"],
+  "properties": {
+    "version": {"const": "front-end-reuse/v1"},
+    "mechanism": {
+      "enum": ["none", "generated-umbrella-pch", "precompiled-preamble"]
+    },
+    "canonical_bytes": {"type": "string", "minLength": 1},
+    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

@@ -1,4 +1,5 @@
 #include "ast/index_engine.hpp"
+#include "ast/front_end_reuse.hpp"
 
 #include "ast/declaration_edge_visitor.hpp"
 #include "ast/display_name_rewrite.hpp"
@@ -20,6 +21,7 @@
 #include "toolchain/toolchain.hpp"
 #include "util/env.hpp"
 #include "util/files.hpp"
+#include "util/front_end_reuse.hpp"
 #include "util/hashing.hpp"
 #include "util/pathutil.hpp"
 #include "workspace/context.hpp"
@@ -1170,7 +1172,7 @@ public:
     resolver_ = std::make_unique<TranslationUnitConfigurationService>(
         *context_, toolchain_);
     ownership_.rebuild(db_, context_->snapshot(), metrics_);
-    data_version_ = database_data_version(db_);
+    data_version_ = db_.database_data_version();
     ++metrics_.generation;
     ++metrics_.snapshot_rebuilds;
     if (count_invalidation) {
@@ -1179,7 +1181,7 @@ public:
   }
 
   void refresh_external_state(const std::string &path, std::int64_t file_id) {
-    const std::int64_t current_version = database_data_version(db_);
+    const std::int64_t current_version = db_.database_data_version();
     if (current_version == data_version_) {
       return;
     }
@@ -1359,14 +1361,17 @@ IndexSessionMetrics IndexSession::metrics() const { return impl_->metrics(); }
 
 IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
                               const std::string &path, bool graph_enabled,
-                              IndexFailurePoint failure) {
+                              IndexFailurePoint failure,
+                              bool no_front_end_reuse) {
   IndexSession session(db);
-  return run_index_one(db, session, rec, path, graph_enabled, failure);
+  return run_index_one(db, session, rec, path, graph_enabled, failure,
+                       no_front_end_reuse);
 }
 
 IndexOneOutcome run_index_one(cidx::Storage &db, IndexSession &session,
                               const cidx::File &rec, const std::string &path,
-                              bool graph_enabled, IndexFailurePoint failure) {
+                              bool graph_enabled, IndexFailurePoint failure,
+                              bool no_front_end_reuse) {
   const IndexSessionMetrics session_before = session.impl_->profiled_metrics_;
   const bool profiling = profile::active();
   const auto wall_started =
@@ -1401,6 +1406,24 @@ IndexOneOutcome run_index_one(cidx::Storage &db, IndexSession &session,
   const TranslationUnitConfig resolved =
       configuration_without_source(descriptor);
   const std::vector<std::string> &args = resolved.arguments;
+  const FrontEndReusePlan reuse_plan =
+      plan_front_end_reuse(resolved, no_front_end_reuse);
+  if (profiling) {
+    profile::add_counter(
+        "front_end_reuse.mechanism." + reuse_plan.identity.mechanism, 1);
+    profile::add_counter("front_end_reuse.explicitly_disabled",
+                         no_front_end_reuse ? 1 : 0);
+    profile::add_counter("front_end_reuse.generated_artifacts", 0);
+  }
+  if (const auto diagnostic = preflight_build_declared_pch(resolved)) {
+    out.parse_failed = true;
+    out.error = *diagnostic;
+    out.failed_flags = args;
+    if (profiling) {
+      profile::add_counter("front_end_reuse.build_declared_pch_diagnostics", 1);
+    }
+    return out;
+  }
   if (profiling) {
     profile::add_timing("workspace_snapshot_configuration",
                         elapsed_seconds(workspace_started));

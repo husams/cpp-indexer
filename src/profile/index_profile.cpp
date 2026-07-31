@@ -292,7 +292,8 @@ void write_profile(Session::Impl &impl) {
          << "      \"include_path_resolution_queries\": "
          << impl.counters["include_path_resolution_queries"] << ",\n";
   for (const auto &[name, value] : impl.counters) {
-    if (name.starts_with("index_session.")) {
+    if (name.starts_with("index_session.") ||
+        name.starts_with("front_end_reuse.")) {
       output << "      " << json_string(name) << ": " << value << ",\n";
     }
   }
