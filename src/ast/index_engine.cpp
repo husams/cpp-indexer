@@ -184,7 +184,9 @@ public:
            std::vector<std::string> dependencies, PassScope scope,
            TraversalMode traversal,
            FactCompleteness completeness = FactCompleteness::complete,
-           FactTrust trust = FactTrust::trusted) -> ExtractionPassDescriptor {
+           FactTrust trust = FactTrust::trusted,
+           std::size_t max_whole_tu_traversals =
+               0) -> ExtractionPassDescriptor {
       return ExtractionPassDescriptor{
           .id = std::move(id),
           .version = 1,
@@ -200,8 +202,7 @@ public:
           .budget = {.max_visited_constructs = 1'000'000,
                      .max_emitted_facts = 2'000'000,
                      .max_diagnostics = 1'024,
-                     .max_whole_tu_traversals =
-                         traversal == TraversalMode::declaration ? 1U : 0U,
+                     .max_whole_tu_traversals = max_whole_tu_traversals,
                      .declared = true}};
     };
     registry.register_pass(
@@ -217,7 +218,8 @@ public:
         descriptor("symbols.headers",
                    {FrontendCapability::ast, FrontendCapability::preprocessor},
                    {"includes"}, {"symbols"}, {"symbols.main"},
-                   PassScope::owned_header, TraversalMode::declaration),
+                   PassScope::owned_header, TraversalMode::declaration,
+                   FactCompleteness::complete, FactTrust::trusted, 1),
         [this](PassExecutionContext &execution) -> void {
           run_routed_symbol_pass(execution);
           state_.out->stored = symbols_.stored_count(state_.rec->id);
@@ -247,7 +249,8 @@ public:
             {"symbols", "fact_lifecycle"},
             {"relations", "types", "definitions", "presentation_intents"},
             {"symbols.headers", "lifecycle.headers", "lifecycle.main"},
-            PassScope::owned_header, TraversalMode::declaration),
+            PassScope::owned_header, TraversalMode::declaration,
+            FactCompleteness::complete, FactTrust::trusted, 1),
         [this](PassExecutionContext &execution) -> void {
           run_routed_declaration_stage(execution);
           for (PendingHeader &header : pending_headers_) {
@@ -260,7 +263,8 @@ public:
     registry.register_pass(
         descriptor("definitions.headers", {FrontendCapability::ast},
                    {"symbols"}, {"definitions"}, {"declarations.headers"},
-                   PassScope::owned_header, TraversalMode::declaration),
+                   PassScope::owned_header, TraversalMode::declaration,
+                   FactCompleteness::complete, FactTrust::trusted, 1),
         [this](PassExecutionContext &execution) -> void {
           routed_definition_visitor_ = collect_routed_definitions(execution);
           for (PendingHeader &header : pending_headers_) {
@@ -283,7 +287,8 @@ public:
         descriptor("namespaces.headers", {FrontendCapability::ast},
                    {"symbols", "relations"}, {"relations"},
                    {"statements.headers"}, PassScope::owned_header,
-                   TraversalMode::declaration),
+                   TraversalMode::declaration, FactCompleteness::complete,
+                   FactTrust::trusted, 1),
         [this](PassExecutionContext &execution) -> void {
           run_routed_namespace_stage(execution);
           for (PendingHeader &header : pending_headers_) {
@@ -558,7 +563,13 @@ public:
     const PassExecutionReport report = registry.run(plan, &session);
     state_.out->pass_metrics.clear();
     state_.out->pass_metrics.reserve(report.passes.size());
+    state_.out->registered_whole_tu_traversal_budget = 0;
+    state_.out->observed_whole_tu_traversals = 0;
     for (const PassExecutionRecord &pass : report.passes) {
+      state_.out->registered_whole_tu_traversal_budget +=
+          pass.descriptor.budget.max_whole_tu_traversals;
+      state_.out->observed_whole_tu_traversals +=
+          pass.metrics.whole_tu_traversals;
       state_.out->pass_metrics.push_back(
           {.id = pass.descriptor.id,
            .required_capabilities = pass.descriptor.required_capabilities,
@@ -572,6 +583,8 @@ public:
            .unknown_constructs = pass.metrics.unknown_constructs,
            .duplicates = pass.metrics.duplicates,
            .diagnostics = pass.metrics.diagnostics,
+           .registered_whole_tu_traversal_budget =
+               pass.descriptor.budget.max_whole_tu_traversals,
            .whole_tu_traversals = pass.metrics.whole_tu_traversals,
            .fact_families = pass.metrics.fact_families,
            .elapsed_microseconds = pass.metrics.elapsed.count(),
@@ -1117,6 +1130,10 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
     if (!profiling) {
       return;
     }
+    profile::add_counter("registered_root_traversal_budget",
+                         out.registered_whole_tu_traversal_budget);
+    profile::add_counter("observed_root_traversals",
+                         out.observed_whole_tu_traversals);
     for (const IndexPassMetrics &pass : out.pass_metrics) {
       const double elapsed =
           static_cast<double>(pass.elapsed_microseconds) / 1'000'000.0;

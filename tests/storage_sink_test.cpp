@@ -505,6 +505,61 @@ TEST_CASE("routed sink buckets isolate interleaved duplicate-heavy files") {
   }
   CIDX_REQUIRE_BOOL(edges.edge_ids(fixture.first_file) == first_edge_ids);
   CIDX_REQUIRE_BOOL(edges.edge_ids(fixture.second_file) == second_edge_ids);
+  CIDX_REQUIRE_BOOL(edges.edge_ids().size() ==
+                    first_edge_ids.size() + second_edge_ids.size());
+  for (const int64_t id : first_edge_ids) {
+    CIDX_CHECK_BOOL(
+        std::ranges::find(edges.edge_ids(fixture.second_file), id) ==
+        edges.edge_ids(fixture.second_file).end());
+  }
+
+  std::vector<int64_t> first_definition_ids;
+  std::vector<int64_t> second_definition_ids;
+  for (int index = 0; index < 128; ++index) {
+    const bool first_file = index % 2 == 0;
+    const int64_t file_id =
+        first_file ? fixture.first_file : fixture.second_file;
+    edges.set_current_file_id(file_id);
+    const int64_t id = edges.get_or_create_definition(
+        first_file ? first_ids[index / 2] : second_ids[index / 2], file_id,
+        index + 1, 1, index + 1, 10, std::nullopt);
+    CIDX_CHECK_BOOL(
+        edges.get_or_create_definition(
+            first_file ? first_ids[index / 2] : second_ids[index / 2], file_id,
+            index + 1, 1, index + 1, 10, std::nullopt) == id);
+    (first_file ? first_definition_ids : second_definition_ids).push_back(id);
+  }
+  CIDX_REQUIRE_BOOL(edges.definition_ids(fixture.first_file) ==
+                    first_definition_ids);
+  CIDX_REQUIRE_BOOL(edges.definition_ids(fixture.second_file) ==
+                    second_definition_ids);
+  CIDX_REQUIRE_BOOL(edges.definition_ids().size() ==
+                    first_definition_ids.size() + second_definition_ids.size());
+  for (const int64_t id : first_definition_ids) {
+    CIDX_CHECK_BOOL(
+        std::ranges::find(edges.definition_ids(fixture.second_file), id) ==
+        edges.definition_ids(fixture.second_file).end());
+  }
+
+  const std::size_t first_applicability_facts =
+      fixture.db.association_fact_count(
+          fixture.first_file, symbols.symbol_ids(fixture.first_file),
+          edges.edge_ids(fixture.first_file),
+          edges.definition_ids(fixture.first_file));
+  const std::size_t second_applicability_facts =
+      fixture.db.association_fact_count(
+          fixture.second_file, symbols.symbol_ids(fixture.second_file),
+          edges.edge_ids(fixture.second_file),
+          edges.definition_ids(fixture.second_file));
+  CIDX_CHECK_BOOL(first_applicability_facts == 224);
+  CIDX_CHECK_BOOL(second_applicability_facts == 224);
+  CIDX_CHECK_BOOL(first_applicability_facts + second_applicability_facts ==
+                  448);
+  CIDX_CHECK_BOOL(fixture.db.association_fact_count(
+                      fixture.second_file,
+                      symbols.symbol_ids(fixture.first_file),
+                      edges.edge_ids(fixture.first_file),
+                      edges.definition_ids(fixture.first_file)) == 160);
 }
 
 TEST_CASE("edge sink caches lookups and tracks unique facts in visit order") {
@@ -515,7 +570,7 @@ TEST_CASE("edge sink caches lookups and tracks unique facts in visit order") {
       SinkFixture::stored_symbol("sink:@F@edge_second", fixture.second_file));
 
   cidx::ast::StorageEdgeSink sink(fixture.ports);
-  sink.set_current_file_id(fixture.first_file);
+  sink.set_current_file_id(fixture.second_file);
   const auto first_lookup =
       sink.lookup_symbol_id("sink:@F@edge_first", "/tmp/hse95-sink/first.cpp");
   REQUIRE(first_lookup.has_value());
@@ -530,7 +585,7 @@ TEST_CASE("edge sink caches lookups and tracks unique facts in visit order") {
       sink.lookup_symbol_id("sink:@F@edge_first", "/tmp/hse95-sink/first.cpp");
   REQUIRE(invalidated_lookup.has_value());
   CIDX_CHECK_BOOL(invalidated_lookup.value_or(-1) == first_id);
-  CIDX_CHECK_BOOL(fixture.symbol_read.lookup_calls == 2);
+  CIDX_CHECK_BOOL(fixture.symbol_read.lookup_calls == 1);
 
   const cidx::ast::EdgeRecord first_edge{.src_id = first_id,
                                          .dst_id = second_id,

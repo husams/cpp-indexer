@@ -113,6 +113,8 @@ REQUIRED_PROFILE_COUNTERS = frozenset(
         "association_fact_count",
         "include_fact_count",
         "root_traverse_decl_calls",
+        "registered_root_traversal_budget",
+        "observed_root_traversals",
         "facts_by_family",
         "sqlite",
         "transactions",

@@ -48,6 +48,7 @@ struct IndexPassMetrics {
   std::size_t unknown_constructs = 0;
   std::size_t duplicates = 0;
   std::size_t diagnostics = 0;
+  std::size_t registered_whole_tu_traversal_budget = 0;
   std::size_t whole_tu_traversals = 0;
   std::map<std::string, PassMetrics::FactFamily, std::less<>> fact_families;
   std::int64_t elapsed_microseconds = 0;
@@ -64,6 +65,8 @@ struct IndexOneOutcome {
   std::string error;
   std::vector<std::string> failed_flags; // final args, for the log dump
   std::vector<IndexPassMetrics> pass_metrics;
+  std::size_t registered_whole_tu_traversal_budget = 0;
+  std::size_t observed_whole_tu_traversals = 0;
   std::vector<EvidenceRecord> evidence;
 };
 

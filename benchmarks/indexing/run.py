@@ -718,11 +718,18 @@ def _canonical_rows(
             )
         return value
 
-    canonical = {
-        name: [[normalize(value) for value in row]
-               for row in connection.execute(query).fetchall()]
-        for name, query in queries.items()
-    }
+    canonical = {}
+    for name, query in queries.items():
+        rows = [
+            [normalize(value) for value in row]
+            for row in connection.execute(query).fetchall()
+        ]
+        canonical[name] = sorted(
+            rows,
+            key=lambda row: json.dumps(
+                row, sort_keys=True, separators=(",", ":")
+            ),
+        )
     unresolved = [
         row for row in canonical["fact_applicability"] if row[1] is None
     ]

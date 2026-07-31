@@ -2173,15 +2173,23 @@ TEST_SUITE("clang") {
       CHECK(!outcome.pass_metrics[index].produced_fact_families.empty());
     }
     std::size_t whole_tu_traversals = 0;
+    std::size_t registered_whole_tu_traversal_budget = 0;
     for (const auto &metrics : outcome.pass_metrics) {
       const bool routed_root_pass = metrics.id == "symbols.headers" ||
                                     metrics.id == "declarations.headers" ||
                                     metrics.id == "definitions.headers" ||
                                     metrics.id == "namespaces.headers";
       CHECK(metrics.whole_tu_traversals == (routed_root_pass ? 1U : 0U));
+      CHECK(metrics.registered_whole_tu_traversal_budget ==
+            (routed_root_pass ? 1U : 0U));
       whole_tu_traversals += metrics.whole_tu_traversals;
+      registered_whole_tu_traversal_budget +=
+          metrics.registered_whole_tu_traversal_budget;
     }
     CHECK(whole_tu_traversals == 4);
+    CHECK(registered_whole_tu_traversal_budget == 4);
+    CHECK(outcome.observed_whole_tu_traversals == 4);
+    CHECK(outcome.registered_whole_tu_traversal_budget == 4);
     const std::vector<std::vector<cidx::ast::FrontendCapability>> capabilities{
         {cidx::ast::FrontendCapability::ast},
         {cidx::ast::FrontendCapability::ast,

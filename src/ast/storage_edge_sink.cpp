@@ -93,16 +93,12 @@ std::optional<int64_t> StorageEdgeSink::lookup_symbol_id(
 }
 
 void StorageEdgeSink::set_current_file_id(int64_t file_id) {
-  const bool same_file = current_file_id_ == file_id;
   current_file_id_ = file_id;
   current_universe_id_ =
       file_id >= 0
           ? std::optional<int64_t>(
                 ports_.workspace.semantic_universe_for_file_id(file_id))
           : std::nullopt;
-  if (same_file) {
-    lookup_cache_.clear();
-  }
 }
 
 void StorageEdgeSink::set_identity_translation_unit_config_id(
