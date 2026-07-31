@@ -1407,6 +1407,8 @@ IndexOneOutcome run_index_one(cidx::Storage &db, IndexSession &session,
   if (profiling) {
     profile::add_counter(
         "front_end_reuse.mechanism." + reuse_plan.identity.mechanism, 1);
+    profile::add_counter("front_end_reuse.explicitly_disabled",
+                         no_front_end_reuse ? 1 : 0);
     profile::add_counter("front_end_reuse.generated_artifacts", 0);
   }
   if (const auto diagnostic = preflight_build_declared_pch(resolved)) {

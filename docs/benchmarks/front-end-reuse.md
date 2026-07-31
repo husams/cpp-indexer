@@ -11,10 +11,12 @@ ctest --test-dir build -R front_end_reuse_probe_test --output-on-failure
 
 It retains three trials for each concrete path: the no-reuse syntax-only
 control, an LLVM-driver-generated umbrella PCH loaded with `-include-pch`, and
-fresh `ASTUnit` construction. The generated PCH path records setup/load time
-and its explicit builtin-module compatibility failures; the ASTUnit path
-records successful isolated construction without retaining a reusable owner.
-Neither rejected candidate is presented as shipped acceleration.
+an `ASTUnit` that builds a precompiled preamble and reparses with the same
+owner. Each trial records setup/load time, diagnostic errors, peak RSS, and
+semantic-summary parity. The generated PCH path records its explicit
+builtin-module compatibility failures; the ASTUnit path demonstrates a
+successful owner-local preamble reuse, but cross-worker owner retention is not
+shipped. Neither rejected candidate is presented as shipped acceleration.
 
 The production corpus harness records the qualification matrix and its
 three-trial fields in the report:

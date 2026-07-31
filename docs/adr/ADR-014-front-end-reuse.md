@@ -29,11 +29,15 @@ retain the same public identity contract.
 | Precompiled preamble / `ASTUnit` reuse | Rejected for this iteration | `ASTUnit` ownership and preamble lifetime do not fit the current isolated per-TU `ClangTool::run` action contract or the bounded worker/session boundary without introducing unqualified cross-worker state and memory retention. |
 
 The probe and the existing header-heavy benchmark harness are retained as the
-reproduction boundary. The probe retains three trials per path. The generated
-PCH path demonstrates candidate-specific setup and load behavior, but all three
-loads are rejected by a Clang builtin-module compatibility diagnostic; the
-ASTUnit path measures fresh isolated ASTUnit construction and does not retain a
-reusable owner. The rejected paths are not presented as shipped acceleration.
+reproduction boundary. The probe retains three trials per path and records
+diagnostic errors, peak RSS, and semantic-summary parity. The generated PCH path
+demonstrates candidate-specific setup and load behavior, but all three loads
+are rejected by a Clang builtin-module compatibility diagnostic. The ASTUnit
+path builds a real precompiled preamble, reparses with the same ASTUnit owner,
+and proves the probe summary remains semantically equivalent; retaining that
+owner across production workers is nevertheless rejected by the current
+isolated ownership contract. The rejected paths are not presented as shipped
+acceleration.
 The evidence-backed conclusion is that the required failure and compatibility
 guarantees are not yet qualified,
 so shipping no reuse is safer than claiming a front-end benefit that cannot be
