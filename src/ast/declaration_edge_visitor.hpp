@@ -33,6 +33,7 @@
 
 #include "clang/AST/RecursiveASTVisitor.h"
 
+#include <functional>
 #include <optional>
 #include <string>
 #include <utility>
@@ -61,12 +62,16 @@ struct PassMetrics;
 class DeclarationEdgeVisitor
     : public clang::RecursiveASTVisitor<DeclarationEdgeVisitor> {
 public:
+  using FileRouter =
+      std::function<std::optional<std::int64_t>(const std::string &)>;
+
   DeclarationEdgeVisitor(
       clang::ASTContext &context, DeclarationPassPorts &ports,
       std::string target_file, int64_t file_id,
       DefinitionScopeEmitter *definitions = nullptr,
       PassMetrics *metrics = nullptr,
-      PresentationIntentEmitter *presentation_intents = nullptr);
+      PresentationIntentEmitter *presentation_intents = nullptr,
+      FileRouter router = {});
 
   bool VisitDecl(clang::Decl *decl);
   bool VisitNamedDecl(clang::NamedDecl *decl);         // contains
@@ -91,7 +96,7 @@ public:
 private:
   // The decl-level walk prunes at function bodies and only covers cursors of
   // the target file (for_file_cursors_p).
-  bool in_walk(const clang::Decl *decl) const;
+  bool in_walk(const clang::Decl *decl);
 
   std::optional<int64_t> emit_lookup_edge(const std::string &src_usr,
                                           const std::string &dst_usr, int kind,
@@ -126,7 +131,7 @@ private:
   // Explicit function/method instantiations live only in specialization
   // lists (never as lexical decls); ownership follows the point of
   // instantiation, not the template's file.
-  bool owns_instantiation(const clang::FunctionDecl *fd) const;
+  bool owns_instantiation(const clang::FunctionDecl *fd);
   void emit_callable_identity(const clang::FunctionDecl *fd);
   void emit_signature_uses(const clang::FunctionDecl *fn);
   // v30 signature/type tier: parameter rows + returns relation for a callable
@@ -160,6 +165,7 @@ private:
   int64_t file_id_;
   PassMetrics *metrics_;
   PresentationIntentEmitter *presentation_intents_;
+  FileRouter router_;
 };
 
 } // namespace cidx::ast

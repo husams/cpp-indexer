@@ -60,10 +60,11 @@ bool is_local_symbol_decl(const clang::NamedDecl *decl) {
 } // namespace
 
 SymbolVisitor::SymbolVisitor(clang::ASTContext &context, SymbolEmitter &out,
-                             std::string target_file, PassMetrics *metrics)
+                             std::string target_file, PassMetrics *metrics,
+                             FileRouter router)
     : context_(context), source_manager_(context.getSourceManager()),
       extractor_(context), out_(out), target_file_(std::move(target_file)),
-      metrics_(metrics) {}
+      metrics_(metrics), router_(std::move(router)) {}
 
 bool SymbolVisitor::VisitDecl(clang::Decl * /*decl*/) {
   if (metrics_ != nullptr) {
@@ -72,7 +73,7 @@ bool SymbolVisitor::VisitDecl(clang::Decl * /*decl*/) {
   return true;
 }
 
-bool SymbolVisitor::should_emit(const clang::NamedDecl *decl) const {
+bool SymbolVisitor::should_emit(const clang::NamedDecl *decl) {
   // cidx's symbol phase covers the main file AND owned (non-system) headers,
   // each under its own file_id; system headers are skipped entirely
   // (_ignore_system_headers). In per-file mode only the target file's decls
@@ -86,8 +87,11 @@ bool SymbolVisitor::should_emit(const clang::NamedDecl *decl) const {
   if (source_manager_.getFilename(loc).empty()) {
     return false;
   }
-  if (!target_file_.empty() &&
-      expansion_loc(context_, decl->getLocation()).file != target_file_) {
+  const std::string file = expansion_loc(context_, decl->getLocation()).file;
+  if (!target_file_.empty() && file != target_file_) {
+    return false;
+  }
+  if (router_ && !router_(file)) {
     return false;
   }
 
@@ -144,6 +148,9 @@ void SymbolVisitor::emit_explicit_instantiation(const clang::FunctionDecl *fd) {
     return;
   }
   if (!target_file_.empty() && loc.file != target_file_) {
+    return;
+  }
+  if (router_ && !router_(loc.file)) {
     return;
   }
   std::optional<SymbolRecord> sym = extractor_.extract(fd);

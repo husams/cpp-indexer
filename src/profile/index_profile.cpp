@@ -256,6 +256,10 @@ void write_profile(Session::Impl &impl) {
          << impl.counters["include_fact_count"] << ",\n"
          << "      \"root_traverse_decl_calls\": "
          << impl.counters["root_traverse_decl_calls"] << ",\n"
+         << "      \"registered_root_traversal_budget\": "
+         << impl.counters["registered_root_traversal_budget"] << ",\n"
+         << "      \"observed_root_traversals\": "
+         << impl.counters["observed_root_traversals"] << ",\n"
          << "      \"facts_by_family\": ";
   write_fact_family_map(output, impl.fact_families, 6);
   output << ",\n      \"sqlite\": {\n"

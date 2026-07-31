@@ -2292,8 +2292,12 @@ TEST_SUITE("clang") {
     const std::string dir = make_temp_dir();
     const std::string source = dir + "/sequence.cpp";
     const std::string header = dir + "/sequence.hpp";
+    const std::string second_header = dir + "/sequence_second.hpp";
     write_file(header, "struct SequenceHeader { int value; };\n");
+    write_file(second_header,
+               "struct SequenceSecondHeader { int second_value; };\n");
     write_file(source, "#include \"sequence.hpp\"\n"
+                       "#include \"sequence_second.hpp\"\n"
                        "int sequence_main() { return 1; }\n");
 
     Storage db(":memory:");
@@ -2309,34 +2313,52 @@ TEST_SUITE("clang") {
     const auto outcome = cidx::ast::run_index_one(db, *file, source, true);
     REQUIRE(!outcome.parse_failed);
     const std::vector<std::string> expected{
-        "symbols.main",         "symbols.headers",     "lifecycle.headers",
-        "declarations.headers", "definitions.headers", "statements.headers",
-        "namespaces.headers",   "headers.associate",   "lifecycle.main",
-        "declarations.main",    "definitions.main",    "statements.main",
-        "namespaces.main",      "main.associate",      "presentation.persist",
-        "includes.persist",     "evidence.persist"};
+        "symbols.main",       "symbols.headers",      "lifecycle.headers",
+        "lifecycle.main",     "declarations.headers", "definitions.headers",
+        "statements.headers", "namespaces.headers",   "declarations.main",
+        "definitions.main",   "statements.main",      "namespaces.main",
+        "headers.associate",  "main.associate",       "presentation.persist",
+        "includes.persist",   "evidence.persist"};
     REQUIRE(outcome.pass_metrics.size() == expected.size());
     for (std::size_t index = 0; index < expected.size(); ++index) {
       CHECK(outcome.pass_metrics[index].id == expected[index]);
       CHECK(!outcome.pass_metrics[index].produced_fact_families.empty());
     }
+    std::size_t whole_tu_traversals = 0;
+    std::size_t registered_whole_tu_traversal_budget = 0;
+    for (const auto &metrics : outcome.pass_metrics) {
+      const bool routed_root_pass = metrics.id == "symbols.headers" ||
+                                    metrics.id == "declarations.headers" ||
+                                    metrics.id == "definitions.headers" ||
+                                    metrics.id == "namespaces.headers";
+      CHECK(metrics.whole_tu_traversals == (routed_root_pass ? 1U : 0U));
+      CHECK(metrics.registered_whole_tu_traversal_budget ==
+            (routed_root_pass ? 1U : 0U));
+      whole_tu_traversals += metrics.whole_tu_traversals;
+      registered_whole_tu_traversal_budget +=
+          metrics.registered_whole_tu_traversal_budget;
+    }
+    CHECK(whole_tu_traversals == 4);
+    CHECK(registered_whole_tu_traversal_budget == 4);
+    CHECK(outcome.observed_whole_tu_traversals == 4);
+    CHECK(outcome.registered_whole_tu_traversal_budget == 4);
     const std::vector<std::vector<cidx::ast::FrontendCapability>> capabilities{
         {cidx::ast::FrontendCapability::ast},
         {cidx::ast::FrontendCapability::ast,
          cidx::ast::FrontendCapability::preprocessor},
         {},
-        {cidx::ast::FrontendCapability::ast},
-        {cidx::ast::FrontendCapability::ast},
-        {cidx::ast::FrontendCapability::ast,
-         cidx::ast::FrontendCapability::templates},
-        {cidx::ast::FrontendCapability::ast},
-        {},
         {},
         {cidx::ast::FrontendCapability::ast},
         {cidx::ast::FrontendCapability::ast},
         {cidx::ast::FrontendCapability::ast,
          cidx::ast::FrontendCapability::templates},
         {cidx::ast::FrontendCapability::ast},
+        {cidx::ast::FrontendCapability::ast},
+        {cidx::ast::FrontendCapability::ast},
+        {cidx::ast::FrontendCapability::ast,
+         cidx::ast::FrontendCapability::templates},
+        {cidx::ast::FrontendCapability::ast},
+        {},
         {},
         {},
         {cidx::ast::FrontendCapability::preprocessor},
@@ -2353,21 +2375,18 @@ TEST_SUITE("clang") {
             {{}, {"symbols"}, {}},
             {{"includes"}, {"symbols"}, {"symbols.main"}},
             {{"symbols"}, {"fact_lifecycle"}, {"symbols.headers"}},
+            {{}, {"fact_lifecycle"}, {"lifecycle.headers"}},
             {{"symbols", "fact_lifecycle"},
              {"relations", "types", "definitions", "presentation_intents"},
-             {"symbols.headers", "lifecycle.headers"}},
+             {"symbols.headers", "lifecycle.headers", "lifecycle.main"}},
             {{"symbols"}, {"definitions"}, {"declarations.headers"}},
             {{"definitions", "relations", "types"},
              {"relations", "types", "evidence", "definitions", "symbols"},
              {"definitions.headers"}},
             {{"symbols", "relations"}, {"relations"}, {"statements.headers"}},
-            {{"symbols", "relations", "definitions"},
-             {"file_associations"},
-             {"symbols.headers", "statements.headers", "namespaces.headers"}},
-            {{}, {"fact_lifecycle"}, {"headers.associate"}},
             {{"symbols", "fact_lifecycle"},
              {"relations", "types", "definitions", "presentation_intents"},
-             {"headers.associate", "lifecycle.main"}},
+             {"declarations.headers", "lifecycle.main"}},
             {{"symbols"}, {"definitions"}, {"declarations.main"}},
             {{"definitions", "relations", "types"},
              {"relations", "types", "evidence", "definitions", "symbols"},
@@ -2375,8 +2394,12 @@ TEST_SUITE("clang") {
             {{"symbols", "relations"}, {"relations"}, {"statements.main"}},
             {{"symbols", "relations", "definitions"},
              {"file_associations"},
-             {"symbols.main", "lifecycle.main", "statements.main",
-              "namespaces.main"}},
+             {"symbols.headers", "statements.headers", "statements.main",
+              "namespaces.headers"}},
+            {{"symbols", "relations", "definitions"},
+             {"file_associations"},
+             {"symbols.main", "lifecycle.main", "headers.associate",
+              "statements.main", "namespaces.main"}},
             {{"presentation_intents"},
              {"display_names"},
              {"declarations.headers", "declarations.main"}},

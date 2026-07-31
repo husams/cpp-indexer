@@ -254,9 +254,14 @@ void StorageSymbolSink::set_identity_translation_unit_file_id(int64_t file_id) {
 }
 
 void StorageSymbolSink::reset_counters() {
-  stored_ = 0;
-  symbol_ids_.clear();
-  symbol_id_set_.clear();
+  buckets_.erase(current_file_id_);
+  resolved_identity_cache_.clear();
+  resolved_identity_cache_hashes_.clear();
+  resolved_cache_active_ = false;
+}
+
+void StorageSymbolSink::reset_all_counters() {
+  buckets_.clear();
   resolved_identity_cache_.clear();
   resolved_identity_cache_hashes_.clear();
   resolved_cache_active_ = false;
@@ -266,10 +271,24 @@ void StorageSymbolSink::set_metrics(PassMetrics *metrics) {
   metrics_ = metrics;
 }
 
-int StorageSymbolSink::stored_count() const { return stored_; }
+int StorageSymbolSink::stored_count() const {
+  return stored_count(current_file_id_);
+}
 
 const std::vector<int64_t> &StorageSymbolSink::symbol_ids() const {
-  return symbol_ids_;
+  return symbol_ids(current_file_id_);
+}
+
+int StorageSymbolSink::stored_count(int64_t file_id) const {
+  const auto bucket = buckets_.find(file_id);
+  return bucket == buckets_.end() ? 0 : bucket->second.stored;
+}
+
+const std::vector<int64_t> &
+StorageSymbolSink::symbol_ids(int64_t file_id) const {
+  static const std::vector<int64_t> empty;
+  const auto bucket = buckets_.find(file_id);
+  return bucket == buckets_.end() ? empty : bucket->second.symbol_ids;
 }
 
 void StorageSymbolSink::emit(const SymbolRecord &s) {
@@ -277,6 +296,7 @@ void StorageSymbolSink::emit(const SymbolRecord &s) {
   if (kind_name == nullptr) {
     return;
   }
+  FileBucket &bucket = buckets_[current_file_id_];
   note_symbol_attempt(metrics_, s);
 
   const cidx::Symbol sym = make_symbol(
@@ -300,26 +320,27 @@ void StorageSymbolSink::emit(const SymbolRecord &s) {
     const int64_t symbol_id = cached.symbol_id;
     ports_.symbols_write.add_decl_site(symbol_id, sym);
     apply_decl_site_to_cache(cached.persisted, sym);
-    record_symbol_id(symbol_ids_, symbol_id_set_, symbol_id);
-  } else {
-    const std::optional<cidx::Symbol> existing =
-        lookup_existing_symbol(ports_, sym, resolved_identity);
-    const int64_t symbol_id = ports_.symbols_write.add_symbol(sym);
-    record_symbol_id(symbol_ids_, symbol_id_set_, symbol_id);
-    if (!(resolved_identity || (existing && existing->resolved))) {
-      ++stored_; // AstIndexer::store: true = counted as "stored"
-    }
-    if (existing && existing->resolved && existing->is_definition) {
-      resolved_cache_active_ = true;
-      identity_key = identity_cache_key(sym);
-      cidx::Symbol persisted = merged_symbol_state(*existing, sym);
-      persisted.id = symbol_id;
-      resolved_identity_cache_.insert_or_assign(
-          std::move(identity_key),
-          CachedResolvedIdentity{.symbol_id = symbol_id,
-                                 .persisted = std::move(persisted)});
-      resolved_identity_cache_hashes_.insert(identity_cache_hash(sym));
-    }
+    record_symbol_id(bucket.symbol_ids, bucket.symbol_id_set, symbol_id);
+    note_symbol_persisted(metrics_, s);
+    return;
+  }
+  const std::optional<cidx::Symbol> existing =
+      lookup_existing_symbol(ports_, sym, resolved_identity);
+  const int64_t symbol_id = ports_.symbols_write.add_symbol(sym);
+  record_symbol_id(bucket.symbol_ids, bucket.symbol_id_set, symbol_id);
+  if (!(resolved_identity || (existing && existing->resolved))) {
+    ++bucket.stored; // AstIndexer::store: true = counted as "stored"
+  }
+  if (existing && existing->resolved && existing->is_definition) {
+    resolved_cache_active_ = true;
+    identity_key = identity_cache_key(sym);
+    cidx::Symbol persisted = merged_symbol_state(*existing, sym);
+    persisted.id = symbol_id;
+    resolved_identity_cache_.insert_or_assign(
+        std::move(identity_key),
+        CachedResolvedIdentity{.symbol_id = symbol_id,
+                               .persisted = std::move(persisted)});
+    resolved_identity_cache_hashes_.insert(identity_cache_hash(sym));
   }
   note_symbol_persisted(metrics_, s);
 }
