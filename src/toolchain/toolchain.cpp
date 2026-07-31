@@ -177,8 +177,11 @@ Toolchain::driver_search_dirs(const std::string &driver,
   const auto it = search_dirs_memo_.find(key);
   profile::note_toolchain_cache_lookup(it != search_dirs_memo_.end());
   if (it != search_dirs_memo_.end()) {
+    ++metrics_.configuration_hits;
     return it->second;
   }
+  ++metrics_.configuration_misses;
+  ++metrics_.driver_subprocesses;
   std::vector<std::string> dirs;
   const RunResult res = run({driver, "-E", "-x", lang, "-", "-v"}, 30.0);
   // Python returns () on TimeoutExpired; a nonzero exit still gets parsed
@@ -213,11 +216,14 @@ std::optional<std::string> Toolchain::gcc_version(const std::string &driver) {
   const auto it = gcc_version_memo_.find(driver);
   profile::note_toolchain_cache_lookup(it != gcc_version_memo_.end());
   if (it != gcc_version_memo_.end()) {
+    ++metrics_.configuration_hits;
     return it->second;
   }
+  ++metrics_.configuration_misses;
   std::optional<std::string> version;
   if (std::regex_search(pathutil::basename(driver), gcc_driver_re())) {
     for (const char *flag : {"-dumpfullversion", "-dumpversion"}) {
+      ++metrics_.driver_subprocesses;
       const RunResult res = run({driver, flag}, 30.0);
       if (res.exit_code != 0 || res.timed_out) { // check_output raise parity
         continue;
@@ -239,8 +245,10 @@ std::pair<bool, bool> Toolchain::glibc_probe(const std::string &driver,
   const auto it = glibc_memo_.find(key);
   profile::note_toolchain_cache_lookup(it != glibc_memo_.end());
   if (it != glibc_memo_.end()) {
+    ++metrics_.configuration_hits;
     return it->second;
   }
+  ++metrics_.configuration_misses;
   bool floatn13 = false;
   bool malloc_args = false;
   for (const std::string &d : driver_search_dirs(driver, cpp ? "c++" : "c")) {
@@ -435,7 +443,13 @@ std::vector<std::string> Toolchain::driver_flags(const std::string &driver,
   const bool cached = it != driver_flags_memo_.end();
   profile::note_toolchain_cache_lookup(cached);
   if (cached && !it->second.warned_no_resource) {
+    ++metrics_.configuration_hits;
     return it->second.flags;
+  }
+  if (!cached) {
+    ++metrics_.configuration_misses;
+  } else {
+    ++metrics_.configuration_hits;
   }
   // G7 warning: hoisted so memo-hit re-emit and first-computation share one
   // string; behavior is byte-identical — Python logs per call (not per probe).

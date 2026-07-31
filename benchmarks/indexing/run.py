@@ -252,6 +252,26 @@ def mutate_translation_unit(source: Path, old_value: int, new_value: int) -> Non
     source.write_text(text.replace(old, new), encoding="utf-8")
 
 
+def _normalize_canonical_rows(
+    rows: list[list[Any]], corpus_root: Path
+) -> list[list[Any]]:
+    root_text = str(corpus_root)
+
+    def normalize(value: Any) -> Any:
+        if isinstance(value, str):
+            return re.sub(
+                r"build:[0-9a-f]{40}",
+                "build:<build>",
+                value.replace(root_text, "<corpus>"),
+            )
+        return value
+
+    normalized = [[normalize(value) for value in row] for row in rows]
+    return sorted(
+        normalized, key=lambda row: json.dumps(row, separators=(",", ":"))
+    )
+
+
 def _canonical_rows(
     connection: Any, corpus_root: Path
 ) -> dict[str, list[list[Any]]]:
@@ -707,28 +727,12 @@ def _canonical_rows(
     }
 
     connection.create_function("scoped_symbol_key", 3, _scoped_symbol_key)
-    root_text = str(corpus_root)
-
-    def normalize(value: Any) -> Any:
-        if isinstance(value, str):
-            return re.sub(
-                r"build:[0-9a-f]{40}",
-                "build:<build>",
-                value.replace(root_text, "<corpus>"),
-            )
-        return value
 
     canonical = {}
     for name, query in queries.items():
-        rows = [
-            [normalize(value) for value in row]
-            for row in connection.execute(query).fetchall()
-        ]
-        canonical[name] = sorted(
-            rows,
-            key=lambda row: json.dumps(
-                row, sort_keys=True, separators=(",", ":")
-            ),
+        canonical[name] = _normalize_canonical_rows(
+            [list(row) for row in connection.execute(query).fetchall()],
+            corpus_root,
         )
     unresolved = [
         row for row in canonical["fact_applicability"] if row[1] is None

@@ -27,6 +27,12 @@
 
 namespace cidx {
 
+struct ToolchainMetrics {
+  std::size_t configuration_hits = 0;
+  std::size_t configuration_misses = 0;
+  std::size_t driver_subprocesses = 0;
+};
+
 class Toolchain {
 public:
   // Default sink is the process logger; tests pass their own (D7 precedent).
@@ -48,6 +54,10 @@ public:
   // else extension in {.cpp .cc .cxx .c++ .hpp .hh .hxx}, lowercased.
   static bool is_cpp(const std::string &filename,
                      const std::vector<std::string> &args);
+
+  [[nodiscard]] const ToolchainMetrics &metrics() const noexcept {
+    return metrics_;
+  }
 
   // util.py:130-159 -- the driver's `#include <...>` system search list, in
   // driver order. `<driver> -E -x <lang> - -v` with empty stdin and a 30 s
@@ -136,6 +146,7 @@ private:
   std::optional<std::string> resource_memo_;
   bool sysroot_memo_set_ = false;
   std::optional<std::string> sysroot_memo_;
+  ToolchainMetrics metrics_;
 };
 
 } // namespace cidx

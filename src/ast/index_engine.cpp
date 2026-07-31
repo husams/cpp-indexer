@@ -19,6 +19,7 @@
 #include "storage/storage.hpp"
 #include "toolchain/toolchain.hpp"
 #include "util/env.hpp"
+#include "util/files.hpp"
 #include "util/hashing.hpp"
 #include "util/pathutil.hpp"
 #include "workspace/context.hpp"
@@ -95,6 +96,50 @@ std::optional<std::string> parsed_file_md5(clang::SourceManager &source_manager,
   return cidx::md5_hex(buffer->getBufferStart(), buffer->getBufferSize());
 }
 
+class ComponentOwnershipIndex {
+public:
+  void rebuild(cidx::Storage &db, const WorkspaceSnapshot &snapshot,
+               IndexSessionMetrics &metrics) {
+    metrics.cache_evictions += cache_.size();
+    cache_.clear();
+    roots_.clear();
+    roots_.reserve(snapshot.components.size());
+    for (const Component &component : snapshot.components) {
+      std::string root = pathutil::normpath(db.component_abs_base(component));
+      while (root.size() > 1U && root.ends_with('/')) {
+        root.pop_back();
+      }
+      const auto position =
+          std::ranges::find_if(roots_, [&root](const std::string &existing) {
+            return root.size() > existing.size() ||
+                   (root.size() == existing.size() && root > existing);
+          });
+      roots_.insert(position, std::move(root));
+    }
+    ++metrics.component_scans;
+  }
+
+  [[nodiscard]] bool owns(const std::string &path,
+                          IndexSessionMetrics &metrics) {
+    const std::string absolute = pathutil::normpath(pathutil::abspath(path));
+    if (const auto found = cache_.find(absolute); found != cache_.end()) {
+      ++metrics.ownership_hits;
+      return found->second;
+    }
+    ++metrics.ownership_misses;
+    const bool owned =
+        std::ranges::any_of(roots_, [&absolute](const auto &root) {
+          return absolute == root || absolute.starts_with(root + "/");
+        });
+    cache_.emplace(absolute, owned);
+    return owned;
+  }
+
+private:
+  std::vector<std::string> roots_;
+  std::unordered_map<std::string, bool> cache_;
+};
+
 struct EngineState {
   cidx::Storage *db = nullptr;
   cidx::storage::AstStoragePorts *ports = nullptr;
@@ -113,6 +158,8 @@ struct EngineState {
   std::vector<PresentationIntent> presentation_intents;
   const cidx::IncludeConfig *config = nullptr; // v31: this TU's normalized args
   int64_t normalized_config_id = -1;
+  ComponentOwnershipIndex *ownership = nullptr;
+  IndexSessionMetrics *session_metrics = nullptr;
   clang::Preprocessor *pp = nullptr; // v31: for include-guard status
   bool tu_handled = false;
 };
@@ -199,8 +246,8 @@ public:
           .traversal = traversal,
           .completeness = completeness,
           .trust = trust,
-          .budget = {.max_visited_constructs = 1'000'000,
-                     .max_emitted_facts = 2'000'000,
+          .budget = {.max_visited_constructs = 10'000'000,
+                     .max_emitted_facts = 20'000'000,
                      .max_diagnostics = 1'024,
                      .max_whole_tu_traversals = max_whole_tu_traversals,
                      .declared = true}};
@@ -787,10 +834,12 @@ private:
         ++counts.system;
         continue;
       }
-      if (!db_.component_for_path(abs)) {
+      if (state_.ownership == nullptr || state_.session_metrics == nullptr ||
+          !state_.ownership->owns(abs, *state_.session_metrics)) {
         ++counts.unowned;
         continue;
       }
+      ++state_.session_metrics->file_hash_reads;
       const std::optional<std::string> current_md5 = cidx::md5_of(abs);
       const auto existing = db_.get_file(abs);
       const bool covered_by_current_config =
@@ -803,6 +852,7 @@ private:
         ++counts.already;
         continue;
       }
+      ++state_.session_metrics->file_stat_reads;
       const std::optional<double> mtime = file_mtime(abs);
       const int64_t hid =
           db_.add_file_path(abs, mtime, parsed_md5, state_.rec->compile_options,
@@ -970,12 +1020,16 @@ static void apply_diagnostic_policy(const std::string &path, bool strict,
 }
 
 SourceSnapshot SourceSnapshot::capture(const std::string &path) {
-  return {.md5 = cidx::md5_of(path)};
+  return {.mtime = file_mtime(path), .md5 = cidx::md5_of(path)};
 }
 
 bool SourceSnapshot::matches(const std::string &path) const {
+  const std::optional<double> current_mtime = file_mtime(path);
   const std::optional<std::string> current = cidx::md5_of(path);
-  return md5.has_value() && current.has_value() && md5 == current;
+  const bool mtime_matches = !mtime.has_value() || (current_mtime.has_value() &&
+                                                    mtime == current_mtime);
+  return mtime_matches && md5.has_value() && current.has_value() &&
+         md5 == current;
 }
 
 class PipelineFailureInjector final : public cidx::storage::FailureInjector {
@@ -1023,9 +1077,298 @@ private:
   IndexFailurePoint target_;
 };
 
+std::int64_t database_data_version(cidx::Storage &db) {
+  auto statement = db.raw_db().prepare("PRAGMA data_version");
+  return statement.step() ? statement.col_int64(0) : 0;
+}
+
+std::string repository_fingerprint(const WorkspaceSnapshot &snapshot) {
+  std::string data;
+  for (const Repository &repository : snapshot.repositories) {
+    data += repository.name + '\0' + repository.kind + '\0' +
+            repository.remote_url.value_or("") + '\0';
+  }
+  return sha256_hex(data);
+}
+
+std::string clone_fingerprint(const WorkspaceSnapshot &snapshot) {
+  std::string data;
+  for (const Clone &clone : snapshot.active_clones) {
+    data += std::to_string(clone.repository_id) + '\0' + clone.path + '\0' +
+            clone.label.value_or("") + '\0';
+  }
+  return sha256_hex(data);
+}
+
+std::string component_fingerprint(const WorkspaceSnapshot &snapshot) {
+  std::string data;
+  for (const Component &component : snapshot.components) {
+    data += component.name + '\0' + component.path + '\0' + component.kind +
+            '\0' + component.version.value_or("") + '\0' +
+            std::to_string(component.repository_id.value_or(-1)) + '\0';
+  }
+  return sha256_hex(data);
+}
+
+std::string file_configuration_fingerprint(cidx::Storage &db,
+                                           std::int64_t file_id) {
+  const auto file = db.get_file_by_id(file_id);
+  if (!file) {
+    return "<unregistered>";
+  }
+  std::string data = file->driver.value_or("") + '\0';
+  for (const std::string &option :
+       file->compile_options.value_or(std::vector<std::string>{})) {
+    data += option + '\0';
+  }
+  return sha256_hex(data);
+}
+
+TranslationUnitConfig
+configuration_without_source(const TranslationUnitDescriptor &descriptor) {
+  const TranslationUnitConfig &input = descriptor.configuration;
+  TranslationUnitConfig configuration = resolve_translation_unit_config(
+      input.driver, input.working_dir, input.arguments, input.language,
+      input.resource_dir, input.diagnostics_policy);
+  configuration.standard = input.standard;
+  configuration.target = input.target;
+  configuration.abi_options = input.abi_options;
+  configuration.sysroot = input.sysroot;
+  configuration.include_paths = input.include_paths;
+  configuration.macro_state = input.macro_state;
+  configuration.relevant_environment = input.relevant_environment;
+  configuration.generated_inputs = input.generated_inputs;
+  configuration.state = input.state;
+  const std::string source =
+      pathutil::normpath(pathutil::abspath(descriptor.source_identity));
+  std::erase_if(
+      configuration.arguments, [&source](const std::string &argument) {
+        return pathutil::normpath(pathutil::abspath(argument)) == source;
+      });
+  return configuration;
+}
+
+class IndexSession::Impl {
+public:
+  Impl(cidx::Storage &db, cidx::Logger &log)
+      : db_(db), workspace_data_(db), toolchain_(log) {
+    rebuild(IndexInvalidationReason::manual, false);
+  }
+
+  void rebuild(IndexInvalidationReason reason, bool count_invalidation = true) {
+    const std::size_t evictions =
+        descriptor_cache_.size() + configuration_id_cache_.size() +
+        source_hashes_.size() + generated_input_hashes_.size() +
+        file_configuration_hashes_.size();
+    metrics_.cache_evictions += evictions;
+    descriptor_cache_.clear();
+    configuration_id_cache_.clear();
+    source_hashes_.clear();
+    generated_input_hashes_.clear();
+    file_configuration_hashes_.clear();
+    context_ = std::make_unique<WorkspaceContext>(WorkspaceContext::borrow(
+        workspace_data_, WorkspaceReadWriteMode::read_write));
+    resolver_ = std::make_unique<TranslationUnitConfigurationService>(
+        *context_, toolchain_);
+    ownership_.rebuild(db_, context_->snapshot(), metrics_);
+    data_version_ = database_data_version(db_);
+    ++metrics_.generation;
+    ++metrics_.snapshot_rebuilds;
+    if (count_invalidation) {
+      note_invalidation(reason);
+    }
+  }
+
+  void refresh_external_state(const std::string &path, std::int64_t file_id) {
+    const std::int64_t current_version = database_data_version(db_);
+    if (current_version == data_version_) {
+      return;
+    }
+    const std::string key = pathutil::normpath(pathutil::abspath(path));
+    const std::string current_configuration =
+        file_configuration_fingerprint(db_, file_id);
+    const bool configuration_changed =
+        file_configuration_hashes_.contains(key) &&
+        file_configuration_hashes_.at(key) != current_configuration;
+    const WorkspaceSnapshot before = context_->snapshot();
+    const std::string repositories = repository_fingerprint(before);
+    const std::string clones = clone_fingerprint(before);
+    const std::string components = component_fingerprint(before);
+    rebuild(IndexInvalidationReason::compile_option_update);
+    const WorkspaceSnapshot &after = context_->snapshot();
+    if (configuration_changed) {
+      file_configuration_hashes_.insert_or_assign(key, current_configuration);
+    } else if (repository_fingerprint(after) != repositories) {
+      replace_last_invalidation(IndexInvalidationReason::repository_switch);
+    } else if (clone_fingerprint(after) != clones) {
+      replace_last_invalidation(IndexInvalidationReason::clone_change);
+    } else if (component_fingerprint(after) != components) {
+      replace_last_invalidation(IndexInvalidationReason::component_update);
+    }
+  }
+
+  void observe_source(const std::string &path,
+                      const std::optional<std::string> &hash) {
+    const std::string key = pathutil::normpath(pathutil::abspath(path));
+    if (const auto found = source_hashes_.find(key);
+        found != source_hashes_.end() && found->second != hash) {
+      rebuild(IndexInvalidationReason::source_mutation);
+    }
+    source_hashes_.insert_or_assign(key, hash);
+  }
+
+  const TranslationUnitDescriptor &
+  prepared_descriptor(const std::string &path, std::int64_t file_id,
+                      const std::optional<std::string> &source_hash) {
+    refresh_external_state(path, file_id);
+    observe_source(path, source_hash);
+    const TranslationUnitDescriptor *resolved = &descriptor(path);
+    const std::string key = pathutil::normpath(pathutil::abspath(path));
+    file_configuration_hashes_.insert_or_assign(
+        key, file_configuration_fingerprint(db_, file_id));
+    const std::string input_hash = generated_input_fingerprint(*resolved);
+    if (const auto found =
+            generated_input_hashes_.find(resolved->semantic_hash);
+        found != generated_input_hashes_.end() && found->second != input_hash) {
+      rebuild(IndexInvalidationReason::generated_input_change);
+      observe_source(path, source_hash);
+      resolved = &descriptor(path);
+    }
+    generated_input_hashes_.insert_or_assign(resolved->semantic_hash,
+                                             input_hash);
+    file_configuration_hashes_.insert_or_assign(
+        key, file_configuration_fingerprint(db_, file_id));
+    return *resolved;
+  }
+
+  const TranslationUnitDescriptor &descriptor(const std::string &path) {
+    const std::string key = pathutil::normpath(pathutil::abspath(path));
+    if (const auto found = descriptor_cache_.find(key);
+        found != descriptor_cache_.end()) {
+      ++metrics_.descriptor_hits;
+      return found->second;
+    }
+    ++metrics_.descriptor_misses;
+    return descriptor_cache_.emplace(key, resolver_->resolve(key))
+        .first->second;
+  }
+
+  int64_t configuration_id(const TranslationUnitDescriptor &descriptor) {
+    const TranslationUnitConfig configuration =
+        configuration_without_source(descriptor);
+    const std::string configuration_hash =
+        translation_unit_config_hash(configuration);
+    if (const auto found = configuration_id_cache_.find(configuration_hash);
+        found != configuration_id_cache_.end()) {
+      ++metrics_.configuration_id_hits;
+      return found->second;
+    }
+    ++metrics_.configuration_id_misses;
+    const int64_t id = db_.add_translation_unit_config(configuration);
+    configuration_id_cache_.emplace(configuration_hash, id);
+    return id;
+  }
+
+  [[nodiscard]] ComponentOwnershipIndex &ownership() noexcept {
+    return ownership_;
+  }
+
+  [[nodiscard]] IndexSessionMetrics metrics() const {
+    IndexSessionMetrics result = metrics_;
+    const ToolchainMetrics &toolchain = toolchain_.metrics();
+    result.configuration_hits = toolchain.configuration_hits;
+    result.configuration_misses = toolchain.configuration_misses;
+    result.driver_subprocesses = toolchain.driver_subprocesses;
+    return result;
+  }
+
+  cidx::Storage &db_;
+  cidx::StorageWorkspaceAdapter workspace_data_;
+  Toolchain toolchain_;
+  std::unique_ptr<WorkspaceContext> context_;
+  std::unique_ptr<TranslationUnitConfigurationService> resolver_;
+  std::unordered_map<std::string, TranslationUnitDescriptor> descriptor_cache_;
+  std::unordered_map<std::string, int64_t> configuration_id_cache_;
+  std::unordered_map<std::string, std::optional<std::string>> source_hashes_;
+  std::unordered_map<std::string, std::string> generated_input_hashes_;
+  std::unordered_map<std::string, std::string> file_configuration_hashes_;
+  ComponentOwnershipIndex ownership_;
+  std::int64_t data_version_ = 0;
+  IndexSessionMetrics metrics_;
+  IndexSessionMetrics profiled_metrics_;
+
+private:
+  std::string
+  generated_input_fingerprint(const TranslationUnitDescriptor &descriptor) {
+    std::string data;
+    for (const std::string &input : descriptor.configuration.generated_inputs) {
+      const std::string path = pathutil::abspath(pathutil::join(
+          descriptor.configuration.working_dir.value_or("."), input));
+      ++metrics_.file_stat_reads;
+      const bool exists = files::is_regular_file(path);
+      ++metrics_.file_hash_reads;
+      data += path + '\0' + (exists ? md5_of(path).value_or("") : "<missing>") +
+              '\0';
+    }
+    return sha256_hex(data);
+  }
+
+  void note_invalidation(IndexInvalidationReason reason) {
+    switch (reason) {
+    case IndexInvalidationReason::manual:
+      return;
+    case IndexInvalidationReason::repository_switch:
+      ++metrics_.repository_invalidations;
+      return;
+    case IndexInvalidationReason::clone_change:
+      ++metrics_.clone_invalidations;
+      return;
+    case IndexInvalidationReason::component_update:
+      ++metrics_.component_invalidations;
+      return;
+    case IndexInvalidationReason::compile_option_update:
+      ++metrics_.configuration_invalidations;
+      return;
+    case IndexInvalidationReason::generated_input_change:
+      ++metrics_.generated_input_invalidations;
+      return;
+    case IndexInvalidationReason::source_mutation:
+      ++metrics_.source_invalidations;
+      return;
+    }
+  }
+
+  void replace_last_invalidation(IndexInvalidationReason reason) {
+    if (metrics_.configuration_invalidations > 0) {
+      --metrics_.configuration_invalidations;
+    }
+    note_invalidation(reason);
+  }
+};
+
+IndexSession::IndexSession(cidx::Storage &db, cidx::Logger &log)
+    : impl_(std::make_unique<Impl>(db, log)) {}
+IndexSession::~IndexSession() = default;
+IndexSession::IndexSession(IndexSession &&) noexcept = default;
+IndexSession &IndexSession::operator=(IndexSession &&) noexcept = default;
+
+void IndexSession::invalidate(IndexInvalidationReason reason) {
+  impl_->rebuild(reason);
+}
+
+IndexSessionMetrics IndexSession::metrics() const { return impl_->metrics(); }
+
 IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
                               const std::string &path, bool graph_enabled,
                               IndexFailurePoint failure) {
+  IndexSession session(db);
+  return run_index_one(db, session, rec, path, graph_enabled, failure);
+}
+
+IndexOneOutcome run_index_one(cidx::Storage &db, IndexSession &session,
+                              const cidx::File &rec, const std::string &path,
+                              bool graph_enabled, IndexFailurePoint failure) {
+  const IndexSessionMetrics session_before = session.impl_->profiled_metrics_;
   const bool profiling = profile::active();
   const auto wall_started =
       profiling ? ProfileClock::now() : ProfileClock::time_point{};
@@ -1038,6 +1381,8 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
       profiling ? ProfileClock::now() : ProfileClock::time_point{};
   IndexOneOutcome out;
   const SourceSnapshot source = SourceSnapshot::capture(path);
+  ++session.impl_->metrics_.file_stat_reads;
+  ++session.impl_->metrics_.file_hash_reads;
   if (profiling) {
     profile::add_timing("source_validation_hashing",
                         elapsed_seconds(source_started));
@@ -1050,17 +1395,13 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
   }
   const auto workspace_started =
       profiling ? ProfileClock::now() : ProfileClock::time_point{};
+  out.source_mtime = source.mtime;
   out.source_md5 = source.md5;
-  cidx::StorageWorkspaceAdapter workspace_data(db);
-  WorkspaceContext context = WorkspaceContext::borrow(
-      workspace_data, WorkspaceReadWriteMode::read_write);
-  Toolchain toolchain;
-  TranslationUnitConfigurationService resolver(context, toolchain);
-  const TranslationUnitDescriptor descriptor = resolver.resolve(path);
-  const TranslationUnitConfig &resolved = descriptor.configuration;
-  const std::vector<std::string> args =
-      TranslationUnitConfigurationService::invocation_arguments(path,
-                                                                descriptor);
+  const TranslationUnitDescriptor &descriptor =
+      session.impl_->prepared_descriptor(path, rec.id, source.md5);
+  const TranslationUnitConfig resolved =
+      configuration_without_source(descriptor);
+  const std::vector<std::string> &args = resolved.arguments;
   if (profiling) {
     profile::add_timing("workspace_snapshot_configuration",
                         elapsed_seconds(workspace_started));
@@ -1097,11 +1438,13 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
   state.failure_injector = &injector;
   state.out = &out;
   state.config = &config;
+  state.ownership = &session.impl_->ownership();
+  state.session_metrics = &session.impl_->metrics_;
   state.unit = ports.unit_of_work().begin();
   if (profiling) {
     profile::note_transaction_begin();
   }
-  state.normalized_config_id = db.add_translation_unit_config(resolved);
+  state.normalized_config_id = session.impl_->configuration_id(descriptor);
 
   IndexFrontendActionFactory factory(state);
   const auto clang_started =
@@ -1164,6 +1507,48 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
                                  counts.duplicates);
       }
     }
+    const IndexSessionMetrics current = session.metrics();
+    const auto add_delta = [&current, &session_before](
+                               std::string_view name,
+                               std::size_t IndexSessionMetrics::*member) {
+      profile::add_counter(name, static_cast<std::uint64_t>(
+                                     current.*member - session_before.*member));
+    };
+    add_delta("index_session.snapshot_rebuilds",
+              &IndexSessionMetrics::snapshot_rebuilds);
+    add_delta("index_session.descriptor_hits",
+              &IndexSessionMetrics::descriptor_hits);
+    add_delta("index_session.descriptor_misses",
+              &IndexSessionMetrics::descriptor_misses);
+    add_delta("index_session.configuration_id_hits",
+              &IndexSessionMetrics::configuration_id_hits);
+    add_delta("index_session.configuration_id_misses",
+              &IndexSessionMetrics::configuration_id_misses);
+    add_delta("index_session.cache_evictions",
+              &IndexSessionMetrics::cache_evictions);
+    add_delta("index_session.file_stat_reads",
+              &IndexSessionMetrics::file_stat_reads);
+    add_delta("index_session.file_hash_reads",
+              &IndexSessionMetrics::file_hash_reads);
+    add_delta("index_session.component_scans",
+              &IndexSessionMetrics::component_scans);
+    add_delta("index_session.ownership_hits",
+              &IndexSessionMetrics::ownership_hits);
+    add_delta("index_session.ownership_misses",
+              &IndexSessionMetrics::ownership_misses);
+    add_delta("index_session.repository_invalidations",
+              &IndexSessionMetrics::repository_invalidations);
+    add_delta("index_session.clone_invalidations",
+              &IndexSessionMetrics::clone_invalidations);
+    add_delta("index_session.component_invalidations",
+              &IndexSessionMetrics::component_invalidations);
+    add_delta("index_session.configuration_invalidations",
+              &IndexSessionMetrics::configuration_invalidations);
+    add_delta("index_session.generated_input_invalidations",
+              &IndexSessionMetrics::generated_input_invalidations);
+    add_delta("index_session.source_invalidations",
+              &IndexSessionMetrics::source_invalidations);
+    session.impl_->profiled_metrics_ = current;
     std::uint64_t preprocessed_bytes = file_bytes(path);
     for (const IncludeFact &include : state.includes.includes) {
       if (include.resolved) {
@@ -1193,6 +1578,7 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
   if (!state.tu_handled) {
     out.parse_failed = true;
     out.error = "cannot parse " + path;
+    out.session_metrics = session.metrics();
     if (profiling) {
       profile::note_transaction_rollback();
     }
@@ -1202,7 +1588,11 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
   const auto verification_started =
       profiling ? ProfileClock::now() : ProfileClock::time_point{};
   apply_diagnostic_policy(path, state.strict, args, out);
+  ++session.impl_->metrics_.source_change_checks;
+  ++session.impl_->metrics_.file_stat_reads;
+  ++session.impl_->metrics_.file_hash_reads;
   if (!source.matches(path)) {
+    session.impl_->rebuild(IndexInvalidationReason::source_mutation);
     out.source_changed = true;
     out.error = path + ": source changed during indexing; retry required";
   } else if (out.source_changed && out.error.empty()) {
@@ -1223,6 +1613,7 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
     profile::note_transaction_rollback();
   }
   record_profile();
+  out.session_metrics = session.metrics();
   return out;
 }
 

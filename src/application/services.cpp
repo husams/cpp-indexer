@@ -248,6 +248,7 @@ StorageApplicationOperations::execute(const IndexRequest &request,
     truncated = true;
   }
 
+  ast::IndexSession session(db);
   for (std::size_t position = 0; position < targets.size(); ++position) {
     const auto &[file, path] = targets[position];
     if (context.cancellation().cancelled()) {
@@ -263,7 +264,7 @@ StorageApplicationOperations::execute(const IndexRequest &request,
       break;
     }
     const ast::IndexOneOutcome outcome =
-        ast::run_index_one(db, file, path, request.graph);
+        ast::run_index_one(db, session, file, path, request.graph);
     std::vector<Diagnostic> persisted_diagnostics = outcome.diagnostics;
     if ((outcome.parse_failed || outcome.source_changed) &&
         persisted_diagnostics.empty()) {
