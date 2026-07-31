@@ -1559,7 +1559,7 @@ struct IndexOneSetup {
                 IndexFailurePoint failure, IndexOneOutcome &out,
                 TranslationUnitConfig resolved_config,
                 ComponentOwnershipIndex &ownership,
-                IndexSessionMetrics &metrics, std::int64_t normalized_config_id)
+                IndexSessionMetrics &metrics)
       : resolved(std::move(resolved_config)), setup(resolved.arguments, path),
         collector(out.diagnostics), injector(failure), ports(db, &injector),
         ast_ports{.workspace = ports.workspace_catalog_read(),
@@ -1589,7 +1589,6 @@ struct IndexOneSetup {
     state.ownership = &ownership;
     state.session_metrics = &metrics;
     state.unit = ports.unit_of_work().begin();
-    state.normalized_config_id = normalized_config_id;
   }
 
   TranslationUnitConfig resolved;
@@ -1627,6 +1626,13 @@ void record_final_profile(
                        cpu_started, child_wall_before);
 }
 
+void rollback_index_one(EngineState &state, bool profiling) {
+  state.unit->rollback();
+  if (profiling) {
+    profile::note_transaction_rollback();
+  }
+}
+
 IndexOneOutcome finalize_index_one(
     cidx::Storage &db, IndexSession &session, const std::string &path,
     const SourceSnapshot &source, const std::vector<std::string> &args,
@@ -1642,10 +1648,8 @@ IndexOneOutcome finalize_index_one(
   if (!state.tu_handled) {
     out.parse_failed = true;
     out.error = "cannot parse " + path;
+    rollback_index_one(state, profiling);
     out.session_metrics = session.metrics();
-    if (profiling) {
-      profile::note_transaction_rollback();
-    }
     record_final_profile(session, profiled_metrics, profiling, path,
                          session_before, out, state, start_position,
                          cardinality_before, wall_started, cpu_started,
@@ -1676,8 +1680,8 @@ IndexOneOutcome finalize_index_one(
       profile::note_transaction_commit();
       profile::add_timing("commit", elapsed_seconds(commit_started));
     }
-  } else if (profiling) {
-    profile::note_transaction_rollback();
+  } else {
+    rollback_index_one(state, profiling);
   }
   record_final_profile(session, profiled_metrics, profiling, path,
                        session_before, out, state, start_position,
@@ -1726,14 +1730,14 @@ IndexOneOutcome run_index_one(cidx::Storage &db, IndexSession &session,
   }
   IndexOneSetup prepared(db, rec, path, graph_enabled, failure, out,
                          std::move(resolved), session.impl_->ownership(),
-                         session.impl_->metrics_,
-                         session.impl_->configuration_id(descriptor));
+                         session.impl_->metrics_);
   CompilationSetup &setup = prepared.setup;
   EngineState &state = prepared.state;
   const std::vector<std::string> &args = prepared.resolved.arguments;
   if (profiling) {
     profile::note_transaction_begin();
   }
+  state.normalized_config_id = session.impl_->configuration_id(descriptor);
 
   execute_index_one_frontend(setup, state, out, profiling);
   return finalize_index_one(
