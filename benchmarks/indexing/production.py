@@ -19,6 +19,11 @@ import subprocess
 import time
 from typing import Any, Iterable
 
+try:
+    from benchmarks.indexing.frontend_reuse import qualification_contract
+except ModuleNotFoundError:  # direct script execution from benchmarks/indexing
+    from frontend_reuse import qualification_contract
+
 
 MINIMUM_TRIALS = 3
 BASELINE_DISTINCT_OWNED_HEADERS = 2
@@ -1189,6 +1194,17 @@ def main() -> int:
     parser.add_argument("--skip-self-index", action="store_true")
     parser.add_argument("--skip-sqlite-matrix", action="store_true")
     parser.add_argument(
+        "--front-end-reuse",
+        choices=("none",),
+        default="none",
+        help="front-end reuse mechanism; ADR-014 currently ships only none",
+    )
+    parser.add_argument(
+        "--no-front-end-reuse",
+        action="store_true",
+        help="explicitly select the no-reuse control for diagnosis",
+    )
+    parser.add_argument(
         "--allow-contended-host",
         action="store_true",
         help="record non-authoritative smoke data even when cidx competitors exist",
@@ -1256,6 +1272,9 @@ def main() -> int:
         "sqlite_matrix": {},
         "disabled_profiling_overhead": None,
         "parity_failures": [],
+        "front_end_reuse": qualification_contract(
+            trials=args.trials, disabled=args.no_front_end_reuse
+        ),
     }
     if uninstrumented is not None:
         report["identity"]["uninstrumented_executable"] = {

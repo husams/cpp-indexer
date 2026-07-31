@@ -19,6 +19,7 @@ struct IndexRequest {
   std::optional<std::string> source;
   bool graph = true;
   bool autoderive_labels = true;
+  bool no_front_end_reuse = false;
   bool json = false;
   std::optional<std::string> index;
   std::optional<std::string> profile_json;
