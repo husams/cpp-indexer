@@ -1097,8 +1097,7 @@ private:
 };
 
 std::int64_t database_data_version(cidx::Storage &db) {
-  auto statement = db.raw_db().prepare("PRAGMA data_version");
-  return statement.step() ? statement.col_int64(0) : 0;
+  return db.data_version();
 }
 
 std::string repository_fingerprint(const WorkspaceSnapshot &snapshot) {
