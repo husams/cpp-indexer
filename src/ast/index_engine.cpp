@@ -7,7 +7,6 @@
 #include "ast/location.hpp"
 #include "ast/namespace_use_visitor.hpp"
 #include "ast/pass_registry.hpp"
-#include "ast/routed_root_events.hpp"
 #include "ast/storage_edge_sink.hpp"
 #include "ast/storage_symbol_sink.hpp"
 #include "ast/symbol_visitor.hpp"
@@ -292,21 +291,13 @@ public:
           }
         });
     registry.register_pass(
-        descriptor("graph.headers", {FrontendCapability::ast},
-                   {"symbols", "fact_lifecycle"}, {"root_events"},
-                   {"symbols.headers", "lifecycle.headers", "lifecycle.main"},
-                   PassScope::owned_header, TraversalMode::declaration,
-                   FactCompleteness::complete, FactTrust::trusted, 1),
-        [this](PassExecutionContext &execution) -> void {
-          run_routed_graph_stage(execution);
-        });
-    registry.register_pass(
         descriptor(
             "declarations.headers", {FrontendCapability::ast},
-            {"symbols", "fact_lifecycle", "root_events"},
+            {"symbols", "fact_lifecycle"},
             {"relations", "types", "definitions", "presentation_intents"},
-            {"graph.headers"}, PassScope::owned_header,
-            TraversalMode::declaration),
+            {"symbols.headers", "lifecycle.headers", "lifecycle.main"},
+            PassScope::owned_header, TraversalMode::declaration,
+            FactCompleteness::complete, FactTrust::trusted, 1),
         [this](PassExecutionContext &execution) -> void {
           run_routed_declaration_stage(execution);
           for (PendingHeader &header : pending_headers_) {
@@ -319,7 +310,8 @@ public:
     registry.register_pass(
         descriptor("definitions.headers", {FrontendCapability::ast},
                    {"symbols"}, {"definitions"}, {"declarations.headers"},
-                   PassScope::owned_header, TraversalMode::declaration),
+                   PassScope::owned_header, TraversalMode::declaration,
+                   FactCompleteness::complete, FactTrust::trusted, 1),
         [this](PassExecutionContext &execution) -> void {
           routed_definition_visitor_ = collect_routed_definitions(execution);
           for (PendingHeader &header : pending_headers_) {
@@ -342,7 +334,8 @@ public:
         descriptor("namespaces.headers", {FrontendCapability::ast},
                    {"symbols", "relations"}, {"relations"},
                    {"statements.headers"}, PassScope::owned_header,
-                   TraversalMode::declaration),
+                   TraversalMode::declaration, FactCompleteness::complete,
+                   FactTrust::trusted, 1),
         [this](PassExecutionContext &execution) -> void {
           run_routed_namespace_stage(execution);
           for (PendingHeader &header : pending_headers_) {
@@ -572,7 +565,6 @@ public:
     plan.add("symbols.headers");
     plan.add("lifecycle.headers");
     plan.add("lifecycle.main");
-    plan.add("graph.headers");
     plan.add("declarations.headers");
     plan.add("definitions.headers");
     plan.add("statements.headers");
@@ -662,16 +654,6 @@ private:
     std::vector<int64_t> definition_ids;
   };
 
-  void run_routed_graph_stage(PassExecutionContext &execution) {
-    if (!state_.graph_enabled) {
-      return;
-    }
-    routed_root_events_.emplace(10'000'000, &execution.metrics);
-    execution.metrics.note_whole_tu_traversal();
-    profile::add_counter("root_traverse_decl_calls");
-    routed_root_events_->collect(tu_);
-  }
-
   void run_routed_symbol_pass(PassExecutionContext &execution) {
     routed_symbol_file_id_ = -1;
     symbols_.set_identity_translation_unit_config_id(
@@ -758,9 +740,9 @@ private:
         context_, ports, {}, -1, &definitions, &execution.metrics,
         &presentation_intents,
         [this](const std::string &path) { return route_fact_file(path); });
-    if (routed_root_events_) {
-      routed_root_events_->replay_declarations(decls);
-    }
+    execution.metrics.note_whole_tu_traversal();
+    profile::add_counter("root_traverse_decl_calls");
+    decls.TraverseDecl(tu_);
   }
 
   auto collect_routed_definitions(PassExecutionContext &execution)
@@ -775,9 +757,9 @@ private:
         static_cast<DefinitionScopeEmitter &>(edges_), std::string{}, -1,
         &execution.metrics,
         [this](const std::string &path) { return route_fact_file(path); });
-    if (routed_root_events_) {
-      routed_root_events_->replay_definitions(*visitor);
-    }
+    execution.metrics.note_whole_tu_traversal();
+    profile::add_counter("root_traverse_decl_calls");
+    visitor->TraverseDecl(tu_);
     return visitor;
   }
 
@@ -814,9 +796,9 @@ private:
     NamespaceUseVisitor ns(
         context_, ports, {}, -1, &execution.metrics,
         [this](const std::string &path) { return route_fact_file(path); });
-    if (routed_root_events_) {
-      routed_root_events_->replay_namespaces(ns);
-    }
+    execution.metrics.note_whole_tu_traversal();
+    profile::add_counter("root_traverse_decl_calls");
+    ns.TraverseDecl(tu_);
   }
 
   [[nodiscard]] bool header_covered_by_current_config(
@@ -914,7 +896,6 @@ private:
   std::vector<int64_t> main_symbol_ids_;
   std::vector<int64_t> main_edge_ids_;
   std::vector<int64_t> main_definition_ids_;
-  std::optional<RoutedRootEventBuffer> routed_root_events_;
   std::unique_ptr<FunctionDefinitionVisitor> routed_definition_visitor_;
 };
 

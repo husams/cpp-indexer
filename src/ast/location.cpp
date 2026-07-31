@@ -25,9 +25,7 @@ ExpansionLoc to_expansion(const clang::SourceManager &sm,
     // Absolutize a relative spelling against the CWD WITHOUT resolving
     // symlinks (os.path.abspath parity; /var must not become /private/var).
     llvm::SmallString<256> abs(out.file);
-    if (llvm::sys::fs::make_absolute(abs)) {
-      return out;
-    }
+    llvm::sys::fs::make_absolute(abs);
     llvm::sys::path::remove_dots(abs, /*remove_dot_dot=*/true);
     out.file = std::string(abs);
   }
@@ -40,13 +38,7 @@ ExpansionLoc to_expansion(const clang::SourceManager &sm,
 
 ExpansionLoc expansion_loc(const clang::ASTContext &context,
                            clang::SourceLocation loc) {
-  const clang::SourceManager &sm = context.getSourceManager();
-  return to_expansion(sm, sm.getExpansionLoc(loc));
-}
-
-ExpansionLoc expansion_loc_from_expanded(const clang::SourceManager &manager,
-                                         clang::SourceLocation loc) {
-  return to_expansion(manager, loc);
+  return to_expansion(context.getSourceManager(), loc);
 }
 
 ExpansionLoc extent_start(const clang::ASTContext &context,

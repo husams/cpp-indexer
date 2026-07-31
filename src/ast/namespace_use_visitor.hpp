@@ -45,9 +45,6 @@ public:
   bool TraverseDecl(clang::Decl *decl);
   bool VisitDecl(clang::Decl *decl);
 
-  std::optional<int64_t> begin_decl(clang::Decl *decl);
-  void end_decl(std::optional<int64_t> scope_id);
-
   std::optional<int64_t> scope_symbol_id(const clang::Decl *decl);
 
   bool TraverseNestedNameSpecifierLoc(clang::NestedNameSpecifierLoc nns);

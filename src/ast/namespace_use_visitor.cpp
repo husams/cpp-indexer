@@ -64,20 +64,6 @@ bool NamespaceUseVisitor::in_target_file(const clang::Decl *decl) {
   return file == target_file_;
 }
 
-std::optional<int64_t> NamespaceUseVisitor::begin_decl(clang::Decl *decl) {
-  const std::optional<int64_t> scope_id = scope_symbol_id(decl);
-  if (scope_id) {
-    scope_stack_.push_back(*scope_id);
-  }
-  return scope_id;
-}
-
-void NamespaceUseVisitor::end_decl(std::optional<int64_t> scope_id) {
-  if (scope_id && !scope_stack_.empty()) {
-    scope_stack_.pop_back();
-  }
-}
-
 // The indexed symbol id a scope-establishing decl contributes to the
 // enclosing-source stack (nullopt when not a scope, unnamed, or unindexed).
 std::optional<int64_t>
@@ -107,9 +93,14 @@ bool NamespaceUseVisitor::TraverseDecl(clang::Decl *decl) {
   if (decl == nullptr) {
     return true;
   }
-  const std::optional<int64_t> scope_id = begin_decl(decl);
+  const std::optional<int64_t> scope_id = scope_symbol_id(decl);
+  if (scope_id) {
+    scope_stack_.push_back(*scope_id);
+  }
   const bool result = RecursiveASTVisitor::TraverseDecl(decl);
-  end_decl(scope_id);
+  if (scope_id) {
+    scope_stack_.pop_back();
+  }
   return result;
 }
 
