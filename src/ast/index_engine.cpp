@@ -1079,6 +1079,10 @@ private:
   IndexFailurePoint target_;
 };
 
+std::int64_t database_data_version(cidx::Storage &db) {
+  return db.data_version();
+}
+
 std::string repository_fingerprint(const WorkspaceSnapshot &snapshot) {
   std::string data;
   for (const Repository &repository : snapshot.repositories) {
