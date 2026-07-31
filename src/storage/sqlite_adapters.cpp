@@ -507,8 +507,9 @@ void SqliteIncludeStoreAdapter::add_include_macro_use(
   db_->add_include_macro_use(use);
 }
 
-void SqliteIncludeStoreAdapter::delete_include_configs_for_tu(int64_t file_id) {
-  db_->delete_include_configs_for_tu(file_id);
+IncludeDeletionStats
+SqliteIncludeStoreAdapter::delete_include_configs_for_tu(int64_t file_id) {
+  return db_->delete_include_configs_for_tu(file_id);
 }
 
 SqliteSchemaCatalogAdapter::SqliteSchemaCatalogAdapter(SqliteStorageService &db)

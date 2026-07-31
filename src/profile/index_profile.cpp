@@ -42,7 +42,6 @@ constexpr auto kTimingNames = std::to_array<std::string_view>({
     "commit",
     "transforms",
     "verification",
-    "metrics_only_sql",
     "identity_reconciliation",
     "sqlite_prepare",
     "sqlite_vdbe",
@@ -159,6 +158,7 @@ struct Session::Impl {
   std::map<std::string, FactFamilyCounts, std::less<>> fact_families;
   std::vector<TranslationUnitRecord> translation_units;
   std::uint64_t sqlite_prepare_calls = 0;
+  std::uint64_t sqlite_prepared_sql_text_bytes = 0;
   std::uint64_t sqlite_step_calls = 0;
   std::uint64_t sqlite_virtual_machine_steps = 0;
   std::uint64_t sqlite_fullscan_steps = 0;
@@ -250,10 +250,26 @@ void write_profile(Session::Impl &impl) {
     first = false;
   }
   output << "\n    },\n    \"counters\": {\n"
-         << "      \"association_fact_count\": "
-         << impl.counters["association_fact_count"] << ",\n"
-         << "      \"include_fact_count\": "
-         << impl.counters["include_fact_count"] << ",\n"
+         << "      \"applicability_attempted\": "
+         << impl.counters["applicability_attempted"] << ",\n"
+         << "      \"applicability_inserted\": "
+         << impl.counters["applicability_inserted"] << ",\n"
+         << "      \"applicability_ignored\": "
+         << impl.counters["applicability_ignored"] << ",\n"
+         << "      \"applicability_deleted\": "
+         << impl.counters["applicability_deleted"] << ",\n"
+         << "      \"applicability_temporary_rows\": "
+         << impl.counters["applicability_temporary_rows"] << ",\n"
+         << "      \"include_attempted\": "
+         << impl.counters["include_attempted"] << ",\n"
+         << "      \"include_inserted_or_updated\": "
+         << impl.counters["include_inserted_or_updated"] << ",\n"
+         << "      \"include_ignored\": " << impl.counters["include_ignored"]
+         << ",\n"
+         << "      \"include_deleted\": " << impl.counters["include_deleted"]
+         << ",\n"
+         << "      \"include_cascade_deleted\": "
+         << impl.counters["include_cascade_deleted"] << ",\n"
          << "      \"root_traverse_decl_calls\": "
          << impl.counters["root_traverse_decl_calls"] << ",\n"
          << "      \"registered_root_traversal_budget\": "
@@ -301,6 +317,8 @@ void write_profile(Session::Impl &impl) {
          << telemetry_failures.load(std::memory_order_relaxed) << "\n"
          << "    },\n    \"sqlite\": {\n"
          << "      \"prepare_calls\": " << impl.sqlite_prepare_calls << ",\n"
+         << "      \"prepared_sql_text_bytes\": "
+         << impl.sqlite_prepared_sql_text_bytes << ",\n"
          << "      \"step_calls\": " << impl.sqlite_step_calls << "\n"
          << "    }\n  },\n  \"translation_units\": [";
   for (std::size_t index = 0; index < impl.translation_units.size(); ++index) {
@@ -487,11 +505,13 @@ void note_toolchain_cache_lookup(bool hit) noexcept {
   }
 }
 
-void note_sqlite_prepare(double seconds) noexcept {
-  best_effort([seconds] {
+void note_sqlite_prepare(double seconds,
+                         std::uint64_t sql_text_bytes) noexcept {
+  best_effort([seconds, sql_text_bytes] {
     if (current != nullptr) {
       std::scoped_lock lock(current->mutex);
       ++current->sqlite_prepare_calls;
+      current->sqlite_prepared_sql_text_bytes += sql_text_bytes;
       current->timings["sqlite_prepare"] += std::max(0.0, seconds);
     }
   });

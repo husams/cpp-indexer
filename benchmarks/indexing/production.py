@@ -37,15 +37,6 @@ SQLITE_EXPERIMENTS: dict[str, dict[str, Any]] = {
     "delete-full": {"journal_mode": "DELETE", "synchronous": "FULL"},
 }
 ATTRIBUTION_EXPERIMENTS = {
-    "metrics-only-sql": {
-        "case": "baseline:1000:forward",
-        "stage": "cold",
-        "profile_fields": [
-            "summary.timings.metrics_only_sql",
-            "summary.counters.association_fact_count",
-            "summary.counters.include_fact_count",
-        ],
-    },
     "identity-reconciliation": {
         "case": "self-index",
         "stage": "self-cold",
@@ -64,7 +55,17 @@ ATTRIBUTION_EXPERIMENTS = {
         ],
         "profile_fields": [
             "summary.timings.applicability_association",
-            "summary.counters.association_fact_count",
+            "summary.counters.applicability_attempted",
+            "summary.counters.applicability_inserted",
+            "summary.counters.applicability_ignored",
+            "summary.counters.applicability_deleted",
+            "summary.counters.applicability_temporary_rows",
+            "summary.counters.include_attempted",
+            "summary.counters.include_inserted_or_updated",
+            "summary.counters.include_ignored",
+            "summary.counters.include_deleted",
+            "summary.counters.include_cascade_deleted",
+            "summary.counters.include_path_resolution_queries",
         ],
     },
     "workspace-file-validation": {
@@ -107,7 +108,6 @@ REQUIRED_PROFILE_TIMINGS = frozenset(
         "commit",
         "transforms",
         "verification",
-        "metrics_only_sql",
         "identity_reconciliation",
         "sqlite_prepare",
         "sqlite_vdbe",
@@ -115,8 +115,16 @@ REQUIRED_PROFILE_TIMINGS = frozenset(
 )
 REQUIRED_PROFILE_COUNTERS = frozenset(
     {
-        "association_fact_count",
-        "include_fact_count",
+        "applicability_attempted",
+        "applicability_inserted",
+        "applicability_ignored",
+        "applicability_deleted",
+        "applicability_temporary_rows",
+        "include_attempted",
+        "include_inserted_or_updated",
+        "include_ignored",
+        "include_deleted",
+        "include_cascade_deleted",
         "root_traverse_decl_calls",
         "registered_root_traversal_budget",
         "observed_root_traversals",
@@ -1034,7 +1042,6 @@ def attribution_summary(
         f"many-headers:{representative_files}:forward",
     ]
     summary: dict[str, Any] = {
-        "metrics_only_sql": profile(baseline_scale, "cold"),
         "applicability_maintenance": {
             case: profile(case, "cold") for case in applicability_cases
         },

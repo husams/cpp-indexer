@@ -32,6 +32,109 @@ void record_header_applicability(cidx::Storage &db,
   }
 }
 
+struct IncludePersistenceState {
+  cidx::Storage &db;
+  IncludeFactStats &stats;
+  int64_t normalized_id;
+  std::unordered_map<std::string, std::optional<int64_t>> path_ids;
+  std::set<int64_t> file_applicability;
+  std::set<std::tuple<int64_t, std::string>> edge_identities;
+  std::set<std::tuple<int64_t, std::string, int64_t>> site_identities;
+  std::set<std::tuple<int64_t, std::string, std::string>> macro_identities;
+
+  auto file_id_for(const std::string &path) -> std::optional<int64_t> {
+    if (path.empty()) {
+      return std::nullopt;
+    }
+    const std::string abs = cidx::pathutil::abspath(path);
+    if (const auto it = path_ids.find(abs); it != path_ids.end()) {
+      return it->second;
+    }
+    ++stats.path_resolution_queries;
+    std::optional<int64_t> id;
+    if (const std::optional<cidx::File> file = db.get_file(abs)) {
+      id = file->id;
+    }
+    path_ids.emplace(abs, id);
+    return id;
+  }
+};
+
+void persist_include_edge_and_site(IncludePersistenceState &state,
+                                   const IncludeFact &fact, int64_t config_id,
+                                   int64_t source_id) {
+  IncludeEdge edge;
+  edge.src_file_id = source_id;
+  edge.dst_path =
+      fact.resolved ? cidx::pathutil::abspath(fact.dst_path) : fact.spelling;
+  edge.dst_file_id =
+      fact.resolved ? state.file_id_for(fact.dst_path) : std::nullopt;
+  if (edge.dst_file_id) {
+    ++state.stats.attempted;
+    state.file_applicability.insert(*edge.dst_file_id);
+  }
+  record_header_applicability(state.db, edge.dst_file_id, state.normalized_id);
+  edge.config_id = config_id;
+  edge.is_system = fact.is_system;
+  edge.count = 1;
+  const int64_t edge_id = state.db.add_include_edge(edge);
+  ++state.stats.attempted;
+  ++state.stats.inserted_or_updated;
+  state.edge_identities.emplace(source_id, edge.dst_path);
+
+  IncludeSite site;
+  site.edge_id = edge_id;
+  site.line = fact.line;
+  site.col = fact.col;
+  site.begin_offset = fact.begin_offset;
+  site.end_offset = fact.end_offset;
+  site.spelling = fact.spelling;
+  site.is_angled = fact.is_angled;
+  site.directive = fact.directive;
+  site.cond_fingerprint = fact.cond_fingerprint;
+  site.resolved = fact.resolved;
+  site.guarded = fact.guarded;
+  state.db.add_include_site(site);
+  ++state.stats.attempted;
+  ++state.stats.inserted_or_updated;
+  state.site_identities.emplace(source_id, edge.dst_path, fact.begin_offset);
+}
+
+void persist_include_fact(IncludePersistenceState &state,
+                          const IncludeFact &fact, int64_t config_id) {
+  if (fact.src_path.empty()) {
+    return;
+  }
+  const std::optional<int64_t> source_id = state.file_id_for(fact.src_path);
+  if (!source_id) {
+    ++state.stats.attempted;
+    return;
+  }
+  record_header_applicability(state.db, source_id, state.normalized_id);
+  ++state.stats.attempted;
+  state.file_applicability.insert(*source_id);
+  persist_include_edge_and_site(state, fact, config_id, *source_id);
+}
+
+void persist_macro_use(IncludePersistenceState &state, const MacroUseFact &fact,
+                       int64_t config_id) {
+  const std::optional<int64_t> source_id = state.file_id_for(fact.src_path);
+  if (!source_id) {
+    ++state.stats.attempted;
+    return;
+  }
+  IncludeMacroUse use;
+  use.src_file_id = *source_id;
+  use.def_path = cidx::pathutil::abspath(fact.def_path);
+  use.name = fact.name;
+  use.config_id = config_id;
+  use.count = 1;
+  state.db.add_include_macro_use(use);
+  ++state.stats.attempted;
+  ++state.stats.inserted_or_updated;
+  state.macro_identities.emplace(*source_id, use.def_path, use.name);
+}
+
 // The enclosing #if/#elif/#else stack at a directive. Clang only lexes taken
 // branches, so an include inside a false branch produces NO fact for this
 // configuration -- which is exactly right: it is not part of this TU. The
@@ -373,8 +476,9 @@ void register_include_callbacks(clang::CompilerInstance &ci,
       std::make_unique<IncludeFactRecorder>(ci.getPreprocessor(), out));
 }
 
-void persist_include_facts(cidx::Storage &db, const IncludeFacts &facts,
-                           const IncludeConfig &config) {
+auto persist_include_facts(cidx::Storage &db, const IncludeFacts &facts,
+                           const IncludeConfig &config) -> IncludeFactStats {
+  IncludeFactStats stats{.attempted = 4, .inserted_or_updated = 4};
   // Retire every configuration previously recorded for THIS TU, then write the
   // current one. A TU is imported once per file, so exactly one configuration
   // is current; a changed compile command produces a new digest, and the old
@@ -384,7 +488,10 @@ void persist_include_facts(cidx::Storage &db, const IncludeFacts &facts,
   // header's facts recorded under a DIFFERENT TU's configuration are untouched.
   IncludeConfig cfg = config;
   cfg.digest = include_config_digest(cfg);
-  db.delete_include_configs_for_tu(cfg.tu_file_id);
+  const IncludeDeletionStats deletion =
+      db.delete_include_configs_for_tu(cfg.tu_file_id);
+  stats.deleted = deletion.direct;
+  stats.cascade_deleted = deletion.cascade;
   const int64_t config_id = db.add_include_config(cfg);
   const auto normalized = db.include_config_by_id(config_id);
   if (!normalized || !normalized->translation_unit_config_id) {
@@ -392,150 +499,22 @@ void persist_include_facts(cidx::Storage &db, const IncludeFacts &facts,
   }
   const int64_t normalized_id = *normalized->translation_unit_config_id;
 
-  // Resolve each source file to its row once. A directive in a file no
-  // component owns has nothing to hang off (and could never be edited), so it
-  // is dropped rather than silently attributed elsewhere.
-  std::unordered_map<std::string, std::optional<int64_t>> src_ids;
-  const auto src_id_for =
-      [&](const std::string &path) -> std::optional<int64_t> {
-    const std::string abs = cidx::pathutil::abspath(path);
-    auto it = src_ids.find(abs);
-    if (it != src_ids.end()) {
-      return it->second;
-    }
-    std::optional<int64_t> id;
-    if (const std::optional<cidx::File> f = db.get_file(abs)) {
-      id = f->id;
-    }
-    src_ids.emplace(abs, id);
-    return id;
-  };
+  IncludePersistenceState state{
+      .db = db, .stats = stats, .normalized_id = normalized_id};
 
-  std::unordered_map<std::string, std::optional<int64_t>> dst_ids;
-  const auto dst_id_for =
-      [&](const std::string &path) -> std::optional<int64_t> {
-    if (path.empty()) {
-      return std::nullopt;
-    }
-    const std::string abs = cidx::pathutil::abspath(path);
-    auto it = dst_ids.find(abs);
-    if (it != dst_ids.end()) {
-      return it->second;
-    }
-    std::optional<int64_t> id;
-    if (const std::optional<cidx::File> f = db.get_file(abs)) {
-      id = f->id;
-    }
-    dst_ids.emplace(abs, id);
-    return id;
-  };
-
-  for (const IncludeFact &f : facts.includes) {
-    if (f.src_path.empty()) {
-      continue; // -include from the command line: no editable directive
-    }
-    const std::optional<int64_t> sid = src_id_for(f.src_path);
-    if (!sid) {
-      continue;
-    }
-    record_header_applicability(db, sid, normalized_id);
-
-    IncludeEdge e;
-    e.src_file_id = *sid;
-    e.dst_path = f.resolved ? cidx::pathutil::abspath(f.dst_path) : f.spelling;
-    e.dst_file_id = f.resolved ? dst_id_for(f.dst_path) : std::nullopt;
-    record_header_applicability(db, e.dst_file_id, normalized_id);
-    e.config_id = config_id;
-    e.is_system = f.is_system;
-    e.count = 1;
-    const int64_t eid = db.add_include_edge(e);
-
-    IncludeSite s;
-    s.edge_id = eid;
-    s.line = f.line;
-    s.col = f.col;
-    s.begin_offset = f.begin_offset;
-    s.end_offset = f.end_offset;
-    s.spelling = f.spelling;
-    s.is_angled = f.is_angled;
-    s.directive = f.directive;
-    s.cond_fingerprint = f.cond_fingerprint;
-    s.resolved = f.resolved;
-    s.guarded = f.guarded;
-    db.add_include_site(s);
-  }
-
-  for (const MacroUseFact &m : facts.macro_uses) {
-    const std::optional<int64_t> sid = src_id_for(m.src_path);
-    if (!sid) {
-      continue;
-    }
-    IncludeMacroUse u;
-    u.src_file_id = *sid;
-    u.def_path = cidx::pathutil::abspath(m.def_path);
-    u.name = m.name;
-    u.config_id = config_id;
-    u.count = 1;
-    db.add_include_macro_use(u);
-  }
-}
-
-auto include_fact_count(cidx::Storage &db, const IncludeFacts &facts)
-    -> IncludeFactCounts {
-  // These are the four distinct identities created by add_include_config:
-  // normalized config, include config, translation-unit applicability, and TU
-  // file applicability. The remaining identities mirror every upsert in
-  // persist_include_facts so repeated directives are counted once and exposed
-  // as duplicate attempts rather than over-budgeting the pass.
-  constexpr std::size_t config_facts = 4;
-  std::size_t attempted = config_facts;
-  std::set<int64_t> file_applicability;
-  std::set<std::tuple<int64_t, std::string>> edges;
-  std::set<std::tuple<int64_t, std::string, int64_t>> sites;
-  std::set<std::tuple<int64_t, std::string, std::string>> macro_uses;
-
-  const auto record = [&attempted](auto &identities, auto identity) {
-    ++attempted;
-    return identities.emplace(std::move(identity)).second;
-  };
-
-  const auto file_id_for = [&db](const std::string &path) {
-    if (path.empty()) {
-      return std::optional<int64_t>{};
-    }
-    return db.get_file(cidx::pathutil::abspath(path))
-        .transform([](const cidx::File &file) { return file.id; });
-  };
   for (const IncludeFact &fact : facts.includes) {
-    const auto source_id = file_id_for(fact.src_path);
-    if (!source_id) {
-      continue;
-    }
-    record(file_applicability, *source_id);
-    const std::string dst_path =
-        fact.resolved ? cidx::pathutil::abspath(fact.dst_path) : fact.spelling;
-    if (fact.resolved) {
-      if (const auto destination_id = file_id_for(fact.dst_path)) {
-        record(file_applicability, *destination_id);
-      }
-    }
-    const auto edge_identity = std::make_tuple(*source_id, dst_path);
-    record(edges, edge_identity);
-    record(sites, std::make_tuple(*source_id, dst_path, fact.begin_offset));
+    persist_include_fact(state, fact, config_id);
   }
   for (const MacroUseFact &fact : facts.macro_uses) {
-    if (const auto source_id = file_id_for(fact.src_path)) {
-      record(macro_uses,
-             std::make_tuple(*source_id, cidx::pathutil::abspath(fact.def_path),
-                             fact.name));
-    }
+    persist_macro_use(state, fact, config_id);
   }
-
-  const std::size_t unique_facts = config_facts + file_applicability.size() +
-                                   edges.size() + sites.size() +
-                                   macro_uses.size();
-  return {.emitted_facts = unique_facts,
-          .duplicates = attempted - unique_facts};
+  stats.inserted_or_updated += state.file_applicability.size();
+  const std::uint64_t unique_facts =
+      4 + state.file_applicability.size() + state.edge_identities.size() +
+      state.site_identities.size() + state.macro_identities.size();
+  stats.duplicates = stats.attempted - unique_facts;
+  stats.ignored = stats.attempted - stats.inserted_or_updated;
+  return stats;
 }
 
 } // namespace cidx::ast

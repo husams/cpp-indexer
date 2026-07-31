@@ -75,7 +75,7 @@ void note_driver_subprocess(double wall_seconds,
 [[nodiscard]] auto process_peak_rss_bytes() noexcept -> std::uint64_t;
 void note_toolchain_cache_lookup(bool hit) noexcept;
 
-void note_sqlite_prepare(double seconds) noexcept;
+void note_sqlite_prepare(double seconds, std::uint64_t sql_text_bytes) noexcept;
 void note_sqlite_step(double seconds, std::uint64_t virtual_machine_steps,
                       std::uint64_t fullscan_steps,
                       std::uint64_t reprepares) noexcept;

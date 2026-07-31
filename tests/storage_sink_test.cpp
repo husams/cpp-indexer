@@ -540,26 +540,51 @@ TEST_CASE("routed sink buckets isolate interleaved duplicate-heavy files") {
         std::ranges::find(edges.definition_ids(fixture.second_file), id) ==
         edges.definition_ids(fixture.second_file).end());
   }
+  CIDX_CHECK_BOOL(fixture.db.add_def_edge(first_definition_ids.front(),
+                                          second_ids.front(), 1) > 0);
 
-  const std::size_t first_applicability_facts =
-      fixture.db.association_fact_count(
-          fixture.first_file, symbols.symbol_ids(fixture.first_file),
-          edges.edge_ids(fixture.first_file),
-          edges.definition_ids(fixture.first_file));
-  const std::size_t second_applicability_facts =
-      fixture.db.association_fact_count(
-          fixture.second_file, symbols.symbol_ids(fixture.second_file),
-          edges.edge_ids(fixture.second_file),
-          edges.definition_ids(fixture.second_file));
-  CIDX_CHECK_BOOL(first_applicability_facts == 224);
-  CIDX_CHECK_BOOL(second_applicability_facts == 224);
-  CIDX_CHECK_BOOL(first_applicability_facts + second_applicability_facts ==
-                  448);
-  CIDX_CHECK_BOOL(fixture.db.association_fact_count(
-                      fixture.second_file,
-                      symbols.symbol_ids(fixture.first_file),
-                      edges.edge_ids(fixture.first_file),
-                      edges.definition_ids(fixture.first_file)) == 160);
+  const int64_t config =
+      fixture.db.add_translation_unit_config(cidx::TranslationUnitConfig{
+          .descriptor_hash = "sink-test", .descriptor_json = "{}"});
+  const auto first_stats = fixture.db.associate_facts_for_file(
+      fixture.first_file, config, symbols.symbol_ids(fixture.first_file),
+      edges.edge_ids(fixture.first_file),
+      edges.definition_ids(fixture.first_file));
+  const auto second_stats = fixture.db.associate_facts_for_file(
+      fixture.second_file, config, symbols.symbol_ids(fixture.second_file),
+      edges.edge_ids(fixture.second_file),
+      edges.definition_ids(fixture.second_file));
+  CIDX_CHECK_BOOL(first_stats.inserted >= 224);
+  CIDX_CHECK_BOOL(second_stats.inserted == 224);
+  CIDX_CHECK_BOOL(first_stats.attempted >= first_stats.inserted);
+  CIDX_CHECK_BOOL(second_stats.attempted >= second_stats.inserted);
+  CIDX_CHECK_BOOL(first_stats.ignored ==
+                  first_stats.attempted - first_stats.inserted);
+  CIDX_CHECK_BOOL(second_stats.ignored ==
+                  second_stats.attempted - second_stats.inserted);
+  CIDX_CHECK_BOOL(first_stats.temporary_rows == 160);
+  CIDX_CHECK_BOOL(second_stats.temporary_rows == 160);
+  const auto cross_file_stats = fixture.db.associate_facts_for_file(
+      fixture.second_file, config, symbols.symbol_ids(fixture.first_file),
+      edges.edge_ids(fixture.first_file),
+      edges.definition_ids(fixture.first_file));
+  CIDX_CHECK_BOOL(cross_file_stats.inserted >= 160);
+
+  const auto first_symbols = symbols.symbol_ids(fixture.first_file);
+  constexpr int active_limit = 8;
+  cidx::SqliteDb::VariableLimitOverrideForTesting limit_override(
+      fixture.db.raw_db(), active_limit);
+  for (const int requested_ids :
+       {active_limit - 1, active_limit, active_limit + 1}) {
+    const std::vector<int64_t> bounded_symbols(
+        first_symbols.begin(), first_symbols.begin() + requested_ids);
+    const auto bounded_stats = fixture.db.associate_facts_for_file(
+        fixture.first_file, config, bounded_symbols,
+        edges.edge_ids(fixture.first_file),
+        edges.definition_ids(fixture.first_file));
+    CIDX_CHECK_BOOL(bounded_stats.inserted > 0);
+    CIDX_CHECK_BOOL(bounded_stats.attempted >= bounded_stats.inserted);
+  }
 }
 
 TEST_CASE("edge sink caches lookups and tracks unique facts in visit order") {

@@ -81,7 +81,8 @@ SqliteStmt::SqliteStmt(sqlite3 *db, std::string_view sql) : db_(db) {
   if (profiling) {
     profile::note_sqlite_prepare(std::chrono::duration<double>(
                                      std::chrono::steady_clock::now() - started)
-                                     .count());
+                                     .count(),
+                                 sql.size());
   }
   if (rc != SQLITE_OK) {
     throw_db_error(db_, "prepare failed for \"" + std::string(sql) + "\"");
@@ -173,6 +174,13 @@ bool SqliteStmt::step() {
 void SqliteStmt::step_done() {
   while (step()) {
   }
+}
+
+void SqliteStmt::reset() {
+  if (sqlite3_reset(stmt_) != SQLITE_OK) {
+    throw_db_error(db_, "reset");
+  }
+  sqlite3_clear_bindings(stmt_);
 }
 
 bool SqliteStmt::readonly() const { return sqlite3_stmt_readonly(stmt_) != 0; }
@@ -275,7 +283,27 @@ void SqliteDb::exec(std::string_view sql_script) {
 }
 
 int64_t SqliteDb::changes() const {
-  return sqlite3_changes(const_cast<sqlite3 *>(db_));
+#if SQLITE_VERSION_NUMBER >= 3037000
+  return sqlite3_changes64(const_cast<sqlite3 *>(db_));
+#else
+  return static_cast<int64_t>(sqlite3_changes(const_cast<sqlite3 *>(db_)));
+#endif
+}
+
+int SqliteDb::variable_limit() const {
+  return sqlite3_limit(const_cast<sqlite3 *>(db_), SQLITE_LIMIT_VARIABLE_NUMBER,
+                       -1);
+}
+
+SqliteDb::VariableLimitOverrideForTesting::VariableLimitOverrideForTesting(
+    SqliteDb &db, int limit)
+    : db_(&db),
+      previous_(sqlite3_limit(db.db_, SQLITE_LIMIT_VARIABLE_NUMBER, limit)) {}
+
+SqliteDb::VariableLimitOverrideForTesting::~VariableLimitOverrideForTesting() {
+  if (db_ != nullptr) {
+    sqlite3_limit(db_->db_, SQLITE_LIMIT_VARIABLE_NUMBER, previous_);
+  }
 }
 
 auto SqliteDb::backup_to(std::string_view path) const -> void {

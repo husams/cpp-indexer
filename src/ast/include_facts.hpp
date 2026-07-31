@@ -68,9 +68,14 @@ struct IncludeFacts {
   std::vector<MacroUseFact> macro_uses;
 };
 
-struct IncludeFactCounts {
-  std::size_t emitted_facts = 0;
-  std::size_t duplicates = 0;
+struct IncludeFactStats {
+  std::uint64_t attempted = 0;
+  std::uint64_t inserted_or_updated = 0;
+  std::uint64_t ignored = 0;
+  std::uint64_t duplicates = 0;
+  std::uint64_t deleted = 0;
+  std::uint64_t cascade_deleted = 0;
+  std::uint64_t path_resolution_queries = 0;
 };
 
 // Deterministic identity of a normalized compilation configuration:
@@ -99,13 +104,7 @@ void resolve_include_guards(clang::Preprocessor &pp, IncludeFacts &out);
 // with a NULL dst_file_id so "why is this header present?" still answers.
 // Existing facts for each touched source file are deleted first, so a deleted
 // #include leaves no stale row.
-void persist_include_facts(cidx::Storage &db, const IncludeFacts &facts,
-                           const IncludeConfig &config);
-
-// Count the unique fact identities that persist_include_facts will publish
-// before it mutates storage, and report repeated upsert attempts separately.
-// This is the budget preflight for the bulk include pass.
-auto include_fact_count(cidx::Storage &db, const IncludeFacts &facts)
-    -> IncludeFactCounts;
+auto persist_include_facts(cidx::Storage &db, const IncludeFacts &facts,
+                           const IncludeConfig &config) -> IncludeFactStats;
 
 } // namespace cidx::ast

@@ -28,6 +28,11 @@
 
 namespace cidx {
 
+auto SqliteStorageService::data_version() -> std::int64_t {
+  auto statement = db_.prepare("PRAGMA data_version");
+  return statement.step() ? statement.col_int64(0) : 0;
+}
+
 using namespace detail;
 
 namespace {
@@ -132,11 +137,6 @@ void set_meta_value(SqliteStorageService &db, const char *key,
 }
 
 } // namespace
-
-std::int64_t SqliteStorageService::data_version() {
-  auto statement = db_.prepare("PRAGMA data_version");
-  return statement.step() ? statement.col_int64(0) : 0;
-}
 
 IndexIdentity SqliteStorageService::index_identity() {
   const auto files = identity_files(*this);

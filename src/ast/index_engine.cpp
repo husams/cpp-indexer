@@ -227,33 +227,52 @@ public:
   void run() {
     db_.delete_symbols_for_file(state_.rec->id);
     ExtractionPassRegistry registry;
-    const auto descriptor =
-        [](std::string id, std::vector<FrontendCapability> capabilities,
-           std::vector<std::string> consumed, std::vector<std::string> produced,
-           std::vector<std::string> dependencies, PassScope scope,
-           TraversalMode traversal,
-           FactCompleteness completeness = FactCompleteness::complete,
-           FactTrust trust = FactTrust::trusted,
-           std::size_t max_whole_tu_traversals =
-               0) -> ExtractionPassDescriptor {
-      return ExtractionPassDescriptor{
-          .id = std::move(id),
-          .version = 1,
-          .required_capabilities = std::move(capabilities),
-          .consumed_fact_families = std::move(consumed),
-          .produced_fact_families = std::move(produced),
-          .catalog_versions = {catalog::kCatalogVersion},
-          .dependencies = std::move(dependencies),
-          .scope = scope,
-          .traversal = traversal,
-          .completeness = completeness,
-          .trust = trust,
-          .budget = {.max_visited_constructs = 10'000'000,
-                     .max_emitted_facts = 20'000'000,
-                     .max_diagnostics = 1'024,
-                     .max_whole_tu_traversals = max_whole_tu_traversals,
-                     .declared = true}};
-    };
+    register_header_passes(registry);
+    register_main_passes(registry);
+    register_persistence_passes(registry);
+    IndexingPlan plan = build_plan();
+    FrontendSession session = make_frontend_session();
+    for (const FrontendPassProvider &provider : frontend_pass_providers()) {
+      provider(session, registry, plan);
+    }
+    record_pass_metrics(registry.run(plan, &session));
+  }
+
+private:
+  static auto descriptor(
+      std::string id, std::vector<FrontendCapability> capabilities,
+      std::vector<std::string> consumed, std::vector<std::string> produced,
+      std::vector<std::string> dependencies, PassScope scope,
+      TraversalMode traversal,
+      FactCompleteness completeness = FactCompleteness::complete,
+      FactTrust trust = FactTrust::trusted,
+      std::size_t max_whole_tu_traversals = 0) -> ExtractionPassDescriptor {
+    return ExtractionPassDescriptor{
+        .id = std::move(id),
+        .version = 1,
+        .required_capabilities = std::move(capabilities),
+        .consumed_fact_families = std::move(consumed),
+        .produced_fact_families = std::move(produced),
+        .catalog_versions = {catalog::kCatalogVersion},
+        .dependencies = std::move(dependencies),
+        .scope = scope,
+        .traversal = traversal,
+        .completeness = completeness,
+        .trust = trust,
+        .budget = {.max_visited_constructs = 10'000'000,
+                   .max_emitted_facts = 20'000'000,
+                   .max_diagnostics = 1'024,
+                   .max_whole_tu_traversals = max_whole_tu_traversals,
+                   .declared = true}};
+  }
+
+  void register_header_passes(ExtractionPassRegistry &registry) {
+    register_header_symbols(registry);
+    register_header_lifecycle(registry);
+    register_header_association(registry);
+  }
+
+  void register_header_symbols(ExtractionPassRegistry &registry) {
     registry.register_pass(
         descriptor("symbols.main", {FrontendCapability::ast}, {}, {"symbols"},
                    {}, PassScope::main_file, TraversalMode::declaration),
@@ -278,6 +297,9 @@ public:
             header.symbol_ids = symbols_.symbol_ids(header.file_id);
           }
         });
+  }
+
+  void register_header_lifecycle(ExtractionPassRegistry &registry) {
     registry.register_pass(
         descriptor("lifecycle.headers", {}, {"symbols"}, {"fact_lifecycle"},
                    {"symbols.headers"}, PassScope::owned_header,
@@ -332,6 +354,9 @@ public:
                    TraversalMode::body, FactCompleteness::partial,
                    FactTrust::inferred),
         [](PassExecutionContext & /*execution*/) -> void {});
+  }
+
+  void register_header_association(ExtractionPassRegistry &registry) {
     registry.register_pass(
         descriptor("namespaces.headers", {FrontendCapability::ast},
                    {"symbols", "relations"}, {"relations"},
@@ -362,28 +387,27 @@ public:
               db_.set_file_indexed(header.file_id, false);
               continue;
             }
-            const bool profiling = profile::active();
-            const auto metrics_started =
-                profiling ? ProfileClock::now() : ProfileClock::time_point{};
-            const auto fact_count = db_.association_fact_count(
-                header.file_id, header.symbol_ids, header.edge_ids,
-                header.definition_ids);
-            if (profiling) {
-              profile::add_timing("metrics_only_sql",
-                                  elapsed_seconds(metrics_started));
-              profile::add_counter("association_fact_count", fact_count);
-            }
-            execution.metrics.note_emitted(fact_count);
-            db_.associate_facts_for_file(
+            const AssociationStats stats = db_.associate_facts_for_file(
                 header.file_id, state_.normalized_config_id, header.symbol_ids,
                 header.edge_ids, header.definition_ids);
-            execution.metrics.note_fact_family("file_associations", fact_count,
-                                               fact_count);
+            profile::add_counter("applicability_attempted", stats.attempted);
+            profile::add_counter("applicability_inserted", stats.inserted);
+            profile::add_counter("applicability_ignored", stats.ignored);
+            profile::add_counter("applicability_deleted", stats.deleted);
+            profile::add_counter("applicability_temporary_rows",
+                                 stats.temporary_rows);
+            execution.metrics.note_emitted(stats.inserted);
+            execution.metrics.note_fact_family("file_associations",
+                                               stats.attempted, stats.inserted,
+                                               stats.ignored);
             db_.mark_file_indexed(header.file_id, header.mtime, header.md5);
             ++state_.out->headers.indexed;
             state_.out->headers.symbols += header.stored;
           }
         });
+  }
+
+  void register_main_passes(ExtractionPassRegistry &registry) {
     registry.register_pass(descriptor("lifecycle.main", {}, {},
                                       {"fact_lifecycle"}, {"lifecycle.headers"},
                                       PassScope::main_file,
@@ -430,48 +454,65 @@ public:
                    {"symbols", "relations"}, {"relations"}, {"statements.main"},
                    PassScope::main_file, TraversalMode::declaration),
         [](PassExecutionContext & /*execution*/) -> void {});
+  }
+
+  void register_persistence_passes(ExtractionPassRegistry &registry) {
+    register_presentation_pass(registry);
+    register_association_and_include_passes(registry);
+  }
+
+  void register_presentation_pass(ExtractionPassRegistry &registry) {
     registry.register_pass(
         descriptor("presentation.persist", {}, {"presentation_intents"},
                    {"display_names"},
                    {"declarations.headers", "declarations.main"},
                    PassScope::translation_unit, TraversalMode::lifecycle),
         [this](PassExecutionContext &execution) -> void {
-          std::ranges::sort(state_.presentation_intents, {},
-                            [](const PresentationIntent &intent) -> auto {
-                              return std::tie(intent.symbol_id,
-                                              intent.display_args);
-                            });
-          const std::size_t before = state_.presentation_intents.size();
-          const auto unique_end = std::ranges::unique(
-              state_.presentation_intents,
-              [](const PresentationIntent &left,
-                 const PresentationIntent &right) -> bool {
-                return left.symbol_id == right.symbol_id &&
-                       left.display_args == right.display_args;
-              });
-          state_.presentation_intents.erase(unique_end.begin(),
-                                            state_.presentation_intents.end());
-          execution.metrics.note_duplicate(before -
-                                           state_.presentation_intents.size());
-          std::vector<std::pair<std::int64_t, std::string>> updates;
-          updates.reserve(state_.presentation_intents.size());
-          for (const PresentationIntent &intent : state_.presentation_intents) {
-            const auto display = edges_.lookup_display_name(intent.symbol_id);
-            if (display) {
-              if (const auto rewritten = rewrite_template_display_name(
-                      *display, intent.display_args)) {
-                updates.emplace_back(intent.symbol_id, *rewritten);
-              }
-            }
-          }
-          execution.metrics.note_emitted(updates.size());
-          for (const auto &[symbol_id, display] : updates) {
-            edges_.update_display_name(symbol_id, display);
-          }
-          execution.metrics.note_fact_family(
-              "display_names", before, updates.size(),
-              before - state_.presentation_intents.size());
+          persist_presentation(execution);
         });
+  }
+
+  void persist_presentation(PassExecutionContext &execution) {
+    std::ranges::sort(state_.presentation_intents, {},
+                      [](const PresentationIntent &intent) -> auto {
+                        return std::tie(intent.symbol_id, intent.display_args);
+                      });
+    const std::size_t before = state_.presentation_intents.size();
+    const auto unique_end =
+        std::ranges::unique(state_.presentation_intents,
+                            [](const PresentationIntent &left,
+                               const PresentationIntent &right) -> bool {
+                              return left.symbol_id == right.symbol_id &&
+                                     left.display_args == right.display_args;
+                            });
+    state_.presentation_intents.erase(unique_end.begin(),
+                                      state_.presentation_intents.end());
+    execution.metrics.note_duplicate(before -
+                                     state_.presentation_intents.size());
+    std::vector<std::pair<std::int64_t, std::string>> updates;
+    updates.reserve(state_.presentation_intents.size());
+    for (const PresentationIntent &intent : state_.presentation_intents) {
+      const auto display = edges_.lookup_display_name(intent.symbol_id);
+      if (!display) {
+        continue;
+      }
+      const auto rewritten =
+          rewrite_template_display_name(*display, intent.display_args);
+      if (rewritten) {
+        updates.emplace_back(intent.symbol_id, *rewritten);
+      }
+    }
+    execution.metrics.note_emitted(updates.size());
+    for (const auto &[symbol_id, display] : updates) {
+      edges_.update_display_name(symbol_id, display);
+    }
+    execution.metrics.note_fact_family("display_names", before, updates.size(),
+                                       before -
+                                           state_.presentation_intents.size());
+  }
+
+  void
+  register_association_and_include_passes(ExtractionPassRegistry &registry) {
     auto main_association = descriptor(
         "main.associate", {}, {"symbols", "relations", "definitions"},
         {"file_associations"},
@@ -481,23 +522,19 @@ public:
     registry.register_pass(
         std::move(main_association),
         [this](PassExecutionContext &execution) -> void {
-          const bool profiling = profile::active();
-          const auto metrics_started =
-              profiling ? ProfileClock::now() : ProfileClock::time_point{};
-          const auto fact_count =
-              db_.association_fact_count(state_.rec->id, main_symbol_ids_,
-                                         main_edge_ids_, main_definition_ids_);
-          if (profiling) {
-            profile::add_timing("metrics_only_sql",
-                                elapsed_seconds(metrics_started));
-            profile::add_counter("association_fact_count", fact_count);
-          }
-          execution.metrics.note_emitted(fact_count);
-          db_.associate_facts_for_file(
+          const AssociationStats stats = db_.associate_facts_for_file(
               state_.rec->id, state_.normalized_config_id, main_symbol_ids_,
               main_edge_ids_, main_definition_ids_);
-          execution.metrics.note_fact_family("file_associations", fact_count,
-                                             fact_count);
+          profile::add_counter("applicability_attempted", stats.attempted);
+          profile::add_counter("applicability_inserted", stats.inserted);
+          profile::add_counter("applicability_ignored", stats.ignored);
+          profile::add_counter("applicability_deleted", stats.deleted);
+          profile::add_counter("applicability_temporary_rows",
+                               stats.temporary_rows);
+          execution.metrics.note_emitted(stats.inserted);
+          execution.metrics.note_fact_family("file_associations",
+                                             stats.attempted, stats.inserted,
+                                             stats.ignored);
         });
     registry.register_pass(
         descriptor("includes.persist", {FrontendCapability::preprocessor},
@@ -509,22 +546,22 @@ public:
             resolve_include_guards(*state_.pp, state_.includes);
           }
           execution.metrics.note_visited(state_.includes.includes.size());
-          const bool profiling = profile::active();
-          const auto metrics_started =
-              profiling ? ProfileClock::now() : ProfileClock::time_point{};
-          const IncludeFactCounts counts =
-              include_fact_count(db_, state_.includes);
-          if (profiling) {
-            profile::add_timing("metrics_only_sql",
-                                elapsed_seconds(metrics_started));
-            profile::add_counter("include_fact_count", counts.emitted_facts);
-          }
-          execution.metrics.note_duplicate(counts.duplicates);
-          execution.metrics.note_emitted(counts.emitted_facts);
-          persist_include_facts(db_, state_.includes, *state_.config);
-          execution.metrics.note_fact_family(
-              "include_facts", counts.emitted_facts + counts.duplicates,
-              counts.emitted_facts, counts.duplicates);
+          const IncludeFactStats stats =
+              persist_include_facts(db_, state_.includes, *state_.config);
+          profile::add_counter("include_attempted", stats.attempted);
+          profile::add_counter("include_inserted_or_updated",
+                               stats.inserted_or_updated);
+          profile::add_counter("include_ignored", stats.ignored);
+          profile::add_counter("include_deleted", stats.deleted);
+          profile::add_counter("include_cascade_deleted",
+                               stats.cascade_deleted);
+          profile::add_counter("include_path_resolution_queries",
+                               stats.path_resolution_queries);
+          execution.metrics.note_duplicate(stats.duplicates);
+          execution.metrics.note_emitted(stats.inserted_or_updated);
+          execution.metrics.note_fact_family("include_facts", stats.attempted,
+                                             stats.inserted_or_updated,
+                                             stats.ignored);
         });
     registry.register_pass(
         descriptor(
@@ -561,7 +598,9 @@ public:
               "evidence_artifact", before, state_.out->evidence.size(),
               before - state_.out->evidence.size());
         });
+  }
 
+  [[nodiscard]] static auto build_plan() -> IndexingPlan {
     IndexingPlan plan;
     plan.add("symbols.main");
     plan.add("symbols.headers");
@@ -580,7 +619,12 @@ public:
     plan.add("presentation.persist");
     plan.add("includes.persist");
     plan.add("evidence.persist");
-    FrontendSession session{
+
+    return plan;
+  }
+
+  auto make_frontend_session() -> FrontendSession {
+    return FrontendSession{
         .ast_context = &context_,
         .preprocessor = state_.pp,
         .declaration_ports = &static_cast<DeclarationPassPorts &>(edges_),
@@ -606,10 +650,9 @@ public:
                      ? nullptr
                      : function->getTemplateSpecializationArgs();
         }};
-    for (const FrontendPassProvider &provider : frontend_pass_providers()) {
-      provider(session, registry, plan);
-    }
-    const PassExecutionReport report = registry.run(plan, &session);
+  }
+
+  void record_pass_metrics(const PassExecutionReport &report) const {
     state_.out->pass_metrics.clear();
     state_.out->pass_metrics.reserve(report.passes.size());
     state_.out->registered_whole_tu_traversal_budget = 0;
@@ -640,8 +683,6 @@ public:
            .budget_exhausted = pass.metrics.budget_exhausted});
     }
   }
-
-private:
   // A not-yet-indexed OWNED non-system header discovered by the include
   // recorder, with its freshly minted file row.
   struct PendingHeader {
@@ -1359,6 +1400,209 @@ void IndexSession::invalidate(IndexInvalidationReason reason) {
 
 IndexSessionMetrics IndexSession::metrics() const { return impl_->metrics(); }
 
+void record_pass_timings(const IndexOneOutcome &out) {
+  profile::add_counter("registered_root_traversal_budget",
+                       out.registered_whole_tu_traversal_budget);
+  profile::add_counter("observed_root_traversals",
+                       out.observed_whole_tu_traversals);
+  for (const IndexPassMetrics &pass : out.pass_metrics) {
+    const double elapsed =
+        static_cast<double>(pass.elapsed_microseconds) / 1'000'000.0;
+    profile::add_timing("pass." + pass.id, elapsed);
+    if (pass.id.starts_with("symbols.")) {
+      profile::add_timing("root_symbols", elapsed);
+    } else if (pass.id.starts_with("declarations.")) {
+      profile::add_timing("root_declarations", elapsed);
+    } else if (pass.id.starts_with("definitions.")) {
+      profile::add_timing("root_definitions", elapsed);
+    } else if (pass.id.starts_with("namespaces.")) {
+      profile::add_timing("root_namespaces", elapsed);
+    }
+    if (pass.id.starts_with("statements.")) {
+      profile::add_timing("body_extraction", elapsed);
+    }
+    if (pass.id == "includes.persist") {
+      profile::add_timing("include_persistence", elapsed);
+    }
+    if (pass.id.ends_with(".associate")) {
+      profile::add_timing("applicability_association", elapsed);
+    }
+    if (pass.id.ends_with(".persist") || pass.id.ends_with(".associate")) {
+      profile::add_timing("fact_persistence", elapsed);
+    }
+    for (const auto &[family, counts] : pass.fact_families) {
+      profile::add_fact_family(family, counts.attempted, counts.persisted,
+                               counts.duplicates);
+    }
+  }
+}
+
+void record_session_profile(
+    const std::string &path, const IndexSessionMetrics &session_before,
+    const IndexSessionMetrics &current, const IndexOneOutcome &out,
+    const EngineState &state, std::uint64_t start_position,
+    const std::pair<std::int64_t, std::int64_t> &cardinality_before,
+    ProfileClock::time_point wall_started, std::clock_t cpu_started,
+    double child_wall_before) {
+  const auto add_delta = [&current, &session_before](
+                             std::string_view name,
+                             std::size_t IndexSessionMetrics::*member) {
+    profile::add_counter(name, static_cast<std::uint64_t>(
+                                   current.*member - session_before.*member));
+  };
+  add_delta("index_session.snapshot_rebuilds",
+            &IndexSessionMetrics::snapshot_rebuilds);
+  add_delta("index_session.descriptor_hits",
+            &IndexSessionMetrics::descriptor_hits);
+  add_delta("index_session.descriptor_misses",
+            &IndexSessionMetrics::descriptor_misses);
+  add_delta("index_session.configuration_id_hits",
+            &IndexSessionMetrics::configuration_id_hits);
+  add_delta("index_session.configuration_id_misses",
+            &IndexSessionMetrics::configuration_id_misses);
+  add_delta("index_session.cache_evictions",
+            &IndexSessionMetrics::cache_evictions);
+  add_delta("index_session.file_stat_reads",
+            &IndexSessionMetrics::file_stat_reads);
+  add_delta("index_session.file_hash_reads",
+            &IndexSessionMetrics::file_hash_reads);
+  add_delta("index_session.component_scans",
+            &IndexSessionMetrics::component_scans);
+  add_delta("index_session.ownership_hits",
+            &IndexSessionMetrics::ownership_hits);
+  add_delta("index_session.ownership_misses",
+            &IndexSessionMetrics::ownership_misses);
+  add_delta("index_session.repository_invalidations",
+            &IndexSessionMetrics::repository_invalidations);
+  add_delta("index_session.clone_invalidations",
+            &IndexSessionMetrics::clone_invalidations);
+  add_delta("index_session.component_invalidations",
+            &IndexSessionMetrics::component_invalidations);
+  add_delta("index_session.configuration_invalidations",
+            &IndexSessionMetrics::configuration_invalidations);
+  add_delta("index_session.generated_input_invalidations",
+            &IndexSessionMetrics::generated_input_invalidations);
+  add_delta("index_session.source_invalidations",
+            &IndexSessionMetrics::source_invalidations);
+  std::uint64_t preprocessed_bytes = file_bytes(path);
+  for (const IncludeFact &include : state.includes.includes) {
+    if (include.resolved) {
+      preprocessed_bytes += file_bytes(include.dst_path);
+    }
+  }
+  profile::record_translation_unit(
+      {.path = path,
+       .start_position = start_position,
+       .database_cardinality_before = cardinality_before.first,
+       .fact_cardinality_before = cardinality_before.second,
+       .source_bytes = file_bytes(path),
+       .preprocessed_bytes = preprocessed_bytes,
+       .include_count = state.includes.includes.size(),
+       .new_headers = static_cast<std::uint64_t>(out.headers.indexed),
+       .already_indexed_headers =
+           static_cast<std::uint64_t>(out.headers.already),
+       .configuration_state = std::to_string(state.normalized_config_id),
+       .wall_seconds = elapsed_seconds(wall_started),
+       .in_process_cpu_seconds =
+           static_cast<double>(std::clock() - cpu_started) /
+           static_cast<double>(CLOCKS_PER_SEC),
+       .child_process_wall_seconds =
+           profile::driver_subprocess_wall_seconds() - child_wall_before,
+       .peak_rss_bytes = profile::process_peak_rss_bytes()});
+}
+
+void record_index_profile(
+    bool profiling, const std::string &path,
+    const IndexSessionMetrics &session_before,
+    const IndexSessionMetrics &current, const IndexOneOutcome &out,
+    const EngineState &state, std::uint64_t start_position,
+    const std::pair<std::int64_t, std::int64_t> &cardinality_before,
+    ProfileClock::time_point wall_started, std::clock_t cpu_started,
+    double child_wall_before) {
+  if (!profiling) {
+    return;
+  }
+  record_pass_timings(out);
+  record_session_profile(path, session_before, current, out, state,
+                         start_position, cardinality_before, wall_started,
+                         cpu_started, child_wall_before);
+}
+
+void execute_index_one_frontend(CompilationSetup &setup, EngineState &state,
+                                IndexOneOutcome &out, bool profiling) {
+  IndexFrontendActionFactory factory(state);
+  const auto clang_started =
+      profiling ? ProfileClock::now() : ProfileClock::time_point{};
+  try {
+    (void)setup.tool.run(&factory);
+  } catch (const PassBudgetExceeded &error) {
+    out.parse_failed = true;
+    out.error = error.what();
+  }
+  if (profiling) {
+    const double clang_tool_inclusive = elapsed_seconds(clang_started);
+    const double pass_seconds = std::transform_reduce(
+        out.pass_metrics.begin(), out.pass_metrics.end(), 0.0, std::plus<>(),
+        [](const IndexPassMetrics &pass) {
+          return static_cast<double>(pass.elapsed_microseconds) / 1'000'000.0;
+        });
+    profile::add_timing("clang_tool_inclusive", clang_tool_inclusive);
+    // LibTooling runs the registered visitors and persistence passes inside
+    // tool.run(). Subtract their disjoint registry timings so this attribution
+    // remains exclusive instead of double-counting those categories.
+    profile::add_timing("clang_front_end",
+                        std::max(0.0, clang_tool_inclusive - pass_seconds));
+  }
+}
+
+struct IndexOneSetup {
+  IndexOneSetup(cidx::Storage &db, const cidx::File &rec,
+                const std::string &path, bool graph_enabled,
+                IndexFailurePoint failure, IndexOneOutcome &out,
+                TranslationUnitConfig resolved_config,
+                ComponentOwnershipIndex &ownership,
+                IndexSessionMetrics &metrics)
+      : resolved(std::move(resolved_config)), setup(resolved.arguments, path),
+        collector(out.diagnostics), injector(failure), ports(db, &injector),
+        ast_ports{.workspace = ports.workspace_catalog_read(),
+                  .source = ports.source_read(),
+                  .symbols_read = ports.symbol_read(),
+                  .symbols_write = ports.symbol_write(),
+                  .types_write = ports.type_write(),
+                  .facts_write = ports.fact_write(),
+                  .definitions_write = ports.definition_write(),
+                  .unit_of_work = ports.unit_of_work()} {
+    setup.tool.setDiagnosticConsumer(&collector);
+    config.tu_file_id = rec.id;
+    config.driver = resolved.driver;
+    config.working_dir = resolved.working_dir;
+    config.arguments = resolved.arguments;
+    config.lang_mode = resolved.language;
+    config.resource_dir = resolved.resource_dir;
+    state.db = &db;
+    state.ports = &ast_ports;
+    state.rec = &rec;
+    state.path = path;
+    state.graph_enabled = graph_enabled;
+    state.strict = read_strict_mode();
+    state.failure_injector = &injector;
+    state.out = &out;
+    state.config = &config;
+    state.ownership = &ownership;
+    state.session_metrics = &metrics;
+    state.unit = ports.unit_of_work().begin();
+  }
+
+  TranslationUnitConfig resolved;
+  CompilationSetup setup;
+  DiagCollector collector;
+  PipelineFailureInjector injector;
+  cidx::storage::SqliteStoragePorts ports;
+  cidx::IncludeConfig config;
+  cidx::storage::AstStoragePorts ast_ports;
+  EngineState state;
+};
+
 IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
                               const std::string &path, bool graph_enabled,
                               IndexFailurePoint failure,
@@ -1366,6 +1610,115 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
   IndexSession session(db);
   return run_index_one(db, session, rec, path, graph_enabled, failure,
                        no_front_end_reuse);
+}
+
+void record_final_profile(
+    IndexSession &session, IndexSessionMetrics &profiled_metrics,
+    bool profiling, const std::string &path,
+    const IndexSessionMetrics &session_before, const IndexOneOutcome &out,
+    const EngineState &state, std::uint64_t start_position,
+    const std::pair<std::int64_t, std::int64_t> &cardinality_before,
+    ProfileClock::time_point wall_started, std::clock_t cpu_started,
+    double child_wall_before) {
+  if (!profiling) {
+    return;
+  }
+  const IndexSessionMetrics current = session.metrics();
+  profiled_metrics = current;
+  record_index_profile(profiling, path, session_before, current, out, state,
+                       start_position, cardinality_before, wall_started,
+                       cpu_started, child_wall_before);
+}
+
+void rollback_index_one(EngineState &state, bool profiling) {
+  state.unit->rollback();
+  if (profiling) {
+    profile::note_transaction_rollback();
+  }
+}
+
+bool prepare_front_end_reuse(const TranslationUnitConfig &resolved,
+                             bool no_front_end_reuse, bool profiling,
+                             IndexOneOutcome &out) {
+  const std::vector<std::string> &args = resolved.arguments;
+  const FrontEndReusePlan reuse_plan =
+      plan_front_end_reuse(resolved, no_front_end_reuse);
+  if (profiling) {
+    profile::add_counter(
+        "front_end_reuse.mechanism." + reuse_plan.identity.mechanism, 1);
+    profile::add_counter("front_end_reuse.explicitly_disabled",
+                         no_front_end_reuse ? 1 : 0);
+    profile::add_counter("front_end_reuse.generated_artifacts", 0);
+  }
+  if (const auto diagnostic = preflight_build_declared_pch(resolved)) {
+    out.parse_failed = true;
+    out.error = *diagnostic;
+    out.failed_flags = args;
+    if (profiling) {
+      profile::add_counter("front_end_reuse.build_declared_pch_diagnostics",
+                           1);
+    }
+    return false;
+  }
+  return true;
+}
+
+IndexOneOutcome finalize_index_one(
+    cidx::Storage &db, IndexSession &session, const std::string &path,
+    const SourceSnapshot &source, const std::vector<std::string> &args,
+    EngineState &state, IndexOneOutcome &out, bool profiling,
+    const IndexSessionMetrics &session_before, IndexSessionMetrics &metrics,
+    IndexSessionMetrics &profiled_metrics,
+    const std::function<void(IndexInvalidationReason)> &rebuild,
+    std::uint64_t start_position,
+    const std::pair<std::int64_t, std::int64_t> &cardinality_before,
+    ProfileClock::time_point wall_started, std::clock_t cpu_started,
+    double child_wall_before) {
+
+  if (!state.tu_handled) {
+    out.parse_failed = true;
+    out.error = "cannot parse " + path;
+    rollback_index_one(state, profiling);
+    out.session_metrics = session.metrics();
+    record_final_profile(session, profiled_metrics, profiling, path,
+                         session_before, out, state, start_position,
+                         cardinality_before, wall_started, cpu_started,
+                         child_wall_before);
+    return out;
+  }
+  const auto verification_started =
+      profiling ? ProfileClock::now() : ProfileClock::time_point{};
+  apply_diagnostic_policy(path, state.strict, args, out);
+  ++metrics.source_change_checks;
+  ++metrics.file_stat_reads;
+  ++metrics.file_hash_reads;
+  if (!source.matches(path)) {
+    rebuild(IndexInvalidationReason::source_mutation);
+    out.source_changed = true;
+    out.error = path + ": source changed during indexing; retry required";
+  } else if (out.source_changed && out.error.empty()) {
+    out.error = path + ": source changed during indexing; retry required";
+  }
+  if (profiling) {
+    profile::add_timing("verification", elapsed_seconds(verification_started));
+  }
+  if (!out.parse_failed && !out.source_changed) {
+    const auto commit_started =
+        profiling ? ProfileClock::now() : ProfileClock::time_point{};
+    state.unit->commit();
+    if (profiling) {
+      profile::note_transaction_commit();
+      profile::add_timing("commit", elapsed_seconds(commit_started));
+    }
+  } else {
+    rollback_index_one(state, profiling);
+  }
+  record_final_profile(session, profiled_metrics, profiling, path,
+                       session_before, out, state, start_position,
+                       cardinality_before, wall_started, cpu_started,
+                       child_wall_before);
+  out.session_metrics = session.metrics();
+  return out;
 }
 
 IndexOneOutcome run_index_one(cidx::Storage &db, IndexSession &session,
@@ -1393,9 +1746,7 @@ IndexOneOutcome run_index_one(cidx::Storage &db, IndexSession &session,
   }
   std::pair<std::int64_t, std::int64_t> cardinality_before{};
   if (profiling) {
-    const auto metrics_started = ProfileClock::now();
     cardinality_before = db.indexing_cardinality();
-    profile::add_timing("metrics_only_sql", elapsed_seconds(metrics_started));
   }
   const auto workspace_started =
       profiling ? ProfileClock::now() : ProfileClock::time_point{};
@@ -1403,240 +1754,33 @@ IndexOneOutcome run_index_one(cidx::Storage &db, IndexSession &session,
   out.source_md5 = source.md5;
   const TranslationUnitDescriptor &descriptor =
       session.impl_->prepared_descriptor(path, rec.id, source.md5);
-  const TranslationUnitConfig resolved =
-      configuration_without_source(descriptor);
-  const std::vector<std::string> &args = resolved.arguments;
-  const FrontEndReusePlan reuse_plan =
-      plan_front_end_reuse(resolved, no_front_end_reuse);
-  if (profiling) {
-    profile::add_counter(
-        "front_end_reuse.mechanism." + reuse_plan.identity.mechanism, 1);
-    profile::add_counter("front_end_reuse.explicitly_disabled",
-                         no_front_end_reuse ? 1 : 0);
-    profile::add_counter("front_end_reuse.generated_artifacts", 0);
-  }
-  if (const auto diagnostic = preflight_build_declared_pch(resolved)) {
-    out.parse_failed = true;
-    out.error = *diagnostic;
-    out.failed_flags = args;
-    if (profiling) {
-      profile::add_counter("front_end_reuse.build_declared_pch_diagnostics", 1);
-    }
+  TranslationUnitConfig resolved = configuration_without_source(descriptor);
+  if (!prepare_front_end_reuse(resolved, no_front_end_reuse, profiling, out)) {
     return out;
   }
   if (profiling) {
     profile::add_timing("workspace_snapshot_configuration",
                         elapsed_seconds(workspace_started));
   }
-  CompilationSetup setup(args, path);
-  DiagCollector collector(out.diagnostics);
-  setup.tool.setDiagnosticConsumer(&collector);
-  PipelineFailureInjector injector(failure);
-  cidx::storage::SqliteStoragePorts ports(db, &injector);
-
-  // v31: the configuration the include tier records against is the one this
-  // parse actually used -- the same resolved args, driver, and resource dir --
-  // so a cleanup plan can revalidate a removal under exactly this TU later.
-  // Working dir is "." to match CompilationSetup's FixedCompilationDatabase.
-  cidx::IncludeConfig config;
-  config.tu_file_id = rec.id;
-  config.driver = resolved.driver;
-  config.working_dir = resolved.working_dir;
-  config.arguments = args;
-  config.lang_mode = resolved.language;
-  config.resource_dir = resolved.resource_dir;
-
-  EngineState state;
-  cidx::storage::AstStoragePorts ast_ports{
-      ports.workspace_catalog_read(), ports.source_read(), ports.symbol_read(),
-      ports.symbol_write(),           ports.type_write(),  ports.fact_write(),
-      ports.definition_write(),       ports.unit_of_work()};
-  state.db = &db;
-  state.ports = &ast_ports;
-  state.rec = &rec;
-  state.path = path;
-  state.graph_enabled = graph_enabled;
-  state.strict = read_strict_mode();
-  state.failure_injector = &injector;
-  state.out = &out;
-  state.config = &config;
-  state.ownership = &session.impl_->ownership();
-  state.session_metrics = &session.impl_->metrics_;
-  state.unit = ports.unit_of_work().begin();
+  IndexOneSetup prepared(db, rec, path, graph_enabled, failure, out,
+                         std::move(resolved), session.impl_->ownership(),
+                         session.impl_->metrics_);
+  CompilationSetup &setup = prepared.setup;
+  EngineState &state = prepared.state;
+  const std::vector<std::string> &args = prepared.resolved.arguments;
   if (profiling) {
     profile::note_transaction_begin();
   }
   state.normalized_config_id = session.impl_->configuration_id(descriptor);
 
-  IndexFrontendActionFactory factory(state);
-  const auto clang_started =
-      profiling ? ProfileClock::now() : ProfileClock::time_point{};
-  try {
-    (void)setup.tool.run(&factory);
-  } catch (const PassBudgetExceeded &error) {
-    out.parse_failed = true;
-    out.error = error.what();
-  }
-  if (profiling) {
-    const double clang_tool_inclusive = elapsed_seconds(clang_started);
-    const double pass_seconds = std::transform_reduce(
-        out.pass_metrics.begin(), out.pass_metrics.end(), 0.0, std::plus<>(),
-        [](const IndexPassMetrics &pass) {
-          return static_cast<double>(pass.elapsed_microseconds) / 1'000'000.0;
-        });
-    profile::add_timing("clang_tool_inclusive", clang_tool_inclusive);
-    // LibTooling runs the registered visitors and persistence passes inside
-    // tool.run(). Subtract their disjoint registry timings so this attribution
-    // remains exclusive instead of double-counting those categories.
-    profile::add_timing("clang_front_end",
-                        std::max(0.0, clang_tool_inclusive - pass_seconds));
-  }
-  const auto record_profile = [&] {
-    if (!profiling) {
-      return;
-    }
-    profile::add_counter("registered_root_traversal_budget",
-                         out.registered_whole_tu_traversal_budget);
-    profile::add_counter("observed_root_traversals",
-                         out.observed_whole_tu_traversals);
-    for (const IndexPassMetrics &pass : out.pass_metrics) {
-      const double elapsed =
-          static_cast<double>(pass.elapsed_microseconds) / 1'000'000.0;
-      profile::add_timing("pass." + pass.id, elapsed);
-      if (pass.id.starts_with("symbols.")) {
-        profile::add_timing("root_symbols", elapsed);
-      } else if (pass.id.starts_with("declarations.")) {
-        profile::add_timing("root_declarations", elapsed);
-      } else if (pass.id.starts_with("definitions.")) {
-        profile::add_timing("root_definitions", elapsed);
-      } else if (pass.id.starts_with("namespaces.")) {
-        profile::add_timing("root_namespaces", elapsed);
-      }
-      if (pass.id.starts_with("statements.")) {
-        profile::add_timing("body_extraction", elapsed);
-      }
-      if (pass.id == "includes.persist") {
-        profile::add_timing("include_persistence", elapsed);
-      }
-      if (pass.id.ends_with(".associate")) {
-        profile::add_timing("applicability_association", elapsed);
-      }
-      if (pass.id.ends_with(".persist") || pass.id.ends_with(".associate")) {
-        profile::add_timing("fact_persistence", elapsed);
-      }
-      for (const auto &[family, counts] : pass.fact_families) {
-        profile::add_fact_family(family, counts.attempted, counts.persisted,
-                                 counts.duplicates);
-      }
-    }
-    const IndexSessionMetrics current = session.metrics();
-    const auto add_delta = [&current, &session_before](
-                               std::string_view name,
-                               std::size_t IndexSessionMetrics::*member) {
-      profile::add_counter(name, static_cast<std::uint64_t>(
-                                     current.*member - session_before.*member));
-    };
-    add_delta("index_session.snapshot_rebuilds",
-              &IndexSessionMetrics::snapshot_rebuilds);
-    add_delta("index_session.descriptor_hits",
-              &IndexSessionMetrics::descriptor_hits);
-    add_delta("index_session.descriptor_misses",
-              &IndexSessionMetrics::descriptor_misses);
-    add_delta("index_session.configuration_id_hits",
-              &IndexSessionMetrics::configuration_id_hits);
-    add_delta("index_session.configuration_id_misses",
-              &IndexSessionMetrics::configuration_id_misses);
-    add_delta("index_session.cache_evictions",
-              &IndexSessionMetrics::cache_evictions);
-    add_delta("index_session.file_stat_reads",
-              &IndexSessionMetrics::file_stat_reads);
-    add_delta("index_session.file_hash_reads",
-              &IndexSessionMetrics::file_hash_reads);
-    add_delta("index_session.component_scans",
-              &IndexSessionMetrics::component_scans);
-    add_delta("index_session.ownership_hits",
-              &IndexSessionMetrics::ownership_hits);
-    add_delta("index_session.ownership_misses",
-              &IndexSessionMetrics::ownership_misses);
-    add_delta("index_session.repository_invalidations",
-              &IndexSessionMetrics::repository_invalidations);
-    add_delta("index_session.clone_invalidations",
-              &IndexSessionMetrics::clone_invalidations);
-    add_delta("index_session.component_invalidations",
-              &IndexSessionMetrics::component_invalidations);
-    add_delta("index_session.configuration_invalidations",
-              &IndexSessionMetrics::configuration_invalidations);
-    add_delta("index_session.generated_input_invalidations",
-              &IndexSessionMetrics::generated_input_invalidations);
-    add_delta("index_session.source_invalidations",
-              &IndexSessionMetrics::source_invalidations);
-    session.impl_->profiled_metrics_ = current;
-    std::uint64_t preprocessed_bytes = file_bytes(path);
-    for (const IncludeFact &include : state.includes.includes) {
-      if (include.resolved) {
-        preprocessed_bytes += file_bytes(include.dst_path);
-      }
-    }
-    profile::record_translation_unit(
-        {.path = path,
-         .start_position = start_position,
-         .database_cardinality_before = cardinality_before.first,
-         .fact_cardinality_before = cardinality_before.second,
-         .source_bytes = file_bytes(path),
-         .preprocessed_bytes = preprocessed_bytes,
-         .include_count = state.includes.includes.size(),
-         .new_headers = static_cast<std::uint64_t>(out.headers.indexed),
-         .already_indexed_headers =
-             static_cast<std::uint64_t>(out.headers.already),
-         .configuration_state = std::to_string(state.normalized_config_id),
-         .wall_seconds = elapsed_seconds(wall_started),
-         .in_process_cpu_seconds =
-             static_cast<double>(std::clock() - cpu_started) /
-             static_cast<double>(CLOCKS_PER_SEC),
-         .child_process_wall_seconds =
-             profile::driver_subprocess_wall_seconds() - child_wall_before,
-         .peak_rss_bytes = profile::process_peak_rss_bytes()});
-  };
-  if (!state.tu_handled) {
-    out.parse_failed = true;
-    out.error = "cannot parse " + path;
-    out.session_metrics = session.metrics();
-    if (profiling) {
-      profile::note_transaction_rollback();
-    }
-    record_profile();
-    return out;
-  }
-  const auto verification_started =
-      profiling ? ProfileClock::now() : ProfileClock::time_point{};
-  apply_diagnostic_policy(path, state.strict, args, out);
-  ++session.impl_->metrics_.source_change_checks;
-  ++session.impl_->metrics_.file_stat_reads;
-  ++session.impl_->metrics_.file_hash_reads;
-  if (!source.matches(path)) {
-    session.impl_->rebuild(IndexInvalidationReason::source_mutation);
-    out.source_changed = true;
-    out.error = path + ": source changed during indexing; retry required";
-  } else if (out.source_changed && out.error.empty()) {
-    out.error = path + ": source changed during indexing; retry required";
-  }
-  if (profiling) {
-    profile::add_timing("verification", elapsed_seconds(verification_started));
-  }
-  if (!out.parse_failed && !out.source_changed) {
-    const auto commit_started =
-        profiling ? ProfileClock::now() : ProfileClock::time_point{};
-    state.unit->commit();
-    if (profiling) {
-      profile::note_transaction_commit();
-      profile::add_timing("commit", elapsed_seconds(commit_started));
-    }
-  } else if (profiling) {
-    profile::note_transaction_rollback();
-  }
-  record_profile();
-  out.session_metrics = session.metrics();
-  return out;
+  execute_index_one_frontend(setup, state, out, profiling);
+  return finalize_index_one(
+      db, session, path, source, args, state, out, profiling, session_before,
+      session.impl_->metrics_, session.impl_->profiled_metrics_,
+      [&session](IndexInvalidationReason reason) {
+        session.impl_->rebuild(reason);
+      },
+      start_position, cardinality_before, wall_started, cpu_started,
+      child_wall_before);
 }
-
 } // namespace cidx::ast

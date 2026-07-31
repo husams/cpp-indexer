@@ -232,7 +232,7 @@ public:
   int64_t add_include_edge(const IncludeEdge &edge) override;
   int64_t add_include_site(const IncludeSite &site) override;
   void add_include_macro_use(const IncludeMacroUse &use) override;
-  void delete_include_configs_for_tu(int64_t file_id) override;
+  IncludeDeletionStats delete_include_configs_for_tu(int64_t file_id) override;
 
 private:
   SqliteStorageService *db_;

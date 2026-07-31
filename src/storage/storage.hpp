@@ -101,6 +101,14 @@ struct ExternalIdentityReconciliationMetrics {
   std::uint64_t cpu_nanoseconds = 0;
 };
 
+struct AssociationStats {
+  std::uint64_t attempted = 0;
+  std::uint64_t inserted = 0;
+  std::uint64_t ignored = 0;
+  std::uint64_t deleted = 0;
+  std::uint64_t temporary_rows = 0;
+};
+
 class SqliteStorageService {
 public:
   // read_only opens with SQLITE_OPEN_READONLY and performs NO mutation on
@@ -394,15 +402,11 @@ public:
   fact_ids_for_config(int64_t file_id, const std::string &fact_kind,
                       const std::vector<int64_t> &config_ids,
                       FactCoverage coverage = FactCoverage::one);
-  void associate_facts_for_file(int64_t file_id, int64_t config_id,
-                                const std::vector<int64_t> &symbol_ids,
-                                const std::vector<int64_t> &edge_ids,
-                                const std::vector<int64_t> &definition_ids);
-  auto association_fact_count(int64_t file_id,
-                              const std::vector<int64_t> &symbol_ids,
-                              const std::vector<int64_t> &edge_ids,
-                              const std::vector<int64_t> &definition_ids)
-      -> std::size_t;
+  AssociationStats
+  associate_facts_for_file(int64_t file_id, int64_t config_id,
+                           const std::vector<int64_t> &symbol_ids,
+                           const std::vector<int64_t> &edge_ids,
+                           const std::vector<int64_t> &definition_ids);
   // Location scope matches definition OR declaration site (§3.5).
   std::vector<Symbol>
   list_symbols(const std::optional<int64_t> &component_id = std::nullopt,
@@ -533,7 +537,7 @@ public:
   // deleted #include -- or a whole configuration retired by a changed compile
   // command -- leaves no stale row, while a shared header's facts recorded
   // under OTHER TUs' configurations are untouched.
-  void delete_include_configs_for_tu(int64_t tu_file_id);
+  IncludeDeletionStats delete_include_configs_for_tu(int64_t tu_file_id);
 
   // Direct include edges out of / into a file. `include_system` keeps
   // system-classified targets; otherwise they are filtered. Ordered by
@@ -814,9 +818,7 @@ public:
   // Raw connection — exposed for tests (schema assertions on :memory: DBs)
   // and future maintenance commands. Not part of the indexing flow.
   SqliteDb &raw_db() { return db_; }
-
-  // SQLite connection data-version counter used by session invalidation.
-  [[nodiscard]] std::int64_t data_version();
+  [[nodiscard]] auto data_version() -> std::int64_t;
 
   // Runtime qualification and maintenance APIs. Backup uses SQLite's online
   // backup API; maintenance is explicit because ANALYZE changes statistics.
