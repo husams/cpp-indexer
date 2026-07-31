@@ -478,7 +478,9 @@ void SqliteStorageService::add_include_macro_use(const IncludeMacroUse &m) {
   st.step_done();
 }
 
-void SqliteStorageService::delete_include_configs_for_tu(int64_t tu_file_id) {
+IncludeDeletionStats
+SqliteStorageService::delete_include_configs_for_tu(int64_t tu_file_id) {
+  IncludeDeletionStats deleted;
   std::vector<int64_t> config_ids;
   auto ids = db_.prepare(
       "SELECT DISTINCT translation_unit_config_id FROM include_config "
@@ -487,16 +489,24 @@ void SqliteStorageService::delete_include_configs_for_tu(int64_t tu_file_id) {
   while (ids.step()) {
     config_ids.push_back(ids.col_int64(0));
   }
-  auto tu = db_.prepare("DELETE FROM translation_unit WHERE file_id = ?");
+  auto tu = db_.prepare(
+      "DELETE FROM translation_unit WHERE file_id = ? RETURNING rowid");
   tu.bind(1, tu_file_id);
-  tu.step_done();
+  while (tu.step()) {
+    ++deleted.direct;
+  }
   auto fc = db_.prepare("DELETE FROM file_config WHERE file_id = ? AND role = "
-                        "'translation_unit'");
+                        "'translation_unit' RETURNING file_id");
   fc.bind(1, tu_file_id);
-  fc.step_done();
-  auto st = db_.prepare("DELETE FROM include_config WHERE tu_file_id = ?");
+  while (fc.step()) {
+    ++deleted.direct;
+  }
+  auto st = db_.prepare(
+      "DELETE FROM include_config WHERE tu_file_id = ? RETURNING rowid");
   st.bind(1, tu_file_id);
-  st.step_done();
+  while (st.step()) {
+    ++deleted.direct;
+  }
   // A normalized descriptor may be shared by several TUs. Retire header
   // applicability only when no remaining TU or fact still supports it.
   for (const int64_t config_id : config_ids) {
@@ -509,13 +519,17 @@ void SqliteStorageService::delete_include_configs_for_tu(int64_t tu_file_id) {
         "                WHERE ic.translation_unit_config_id = ?) "
         "AND NOT EXISTS (SELECT 1 FROM include_macro_use m "
         "                JOIN include_config ic ON ic.id = m.config_id "
-        "                WHERE ic.translation_unit_config_id = ?)");
+        "                WHERE ic.translation_unit_config_id = ?) "
+        "RETURNING file_id");
     headers.bind(1, config_id);
     headers.bind(2, config_id);
     headers.bind(3, config_id);
     headers.bind(4, config_id);
-    headers.step_done();
+    while (headers.step()) {
+      ++deleted.direct;
+    }
   }
+  return deleted;
 }
 
 std::vector<IncludeEdge>

@@ -360,23 +360,19 @@ public:
               db_.set_file_indexed(header.file_id, false);
               continue;
             }
-            const bool profiling = profile::active();
-            const auto metrics_started =
-                profiling ? ProfileClock::now() : ProfileClock::time_point{};
-            const auto fact_count = db_.association_fact_count(
-                header.file_id, header.symbol_ids, header.edge_ids,
-                header.definition_ids);
-            if (profiling) {
-              profile::add_timing("metrics_only_sql",
-                                  elapsed_seconds(metrics_started));
-              profile::add_counter("association_fact_count", fact_count);
-            }
-            execution.metrics.note_emitted(fact_count);
-            db_.associate_facts_for_file(
+            const AssociationStats stats = db_.associate_facts_for_file(
                 header.file_id, state_.normalized_config_id, header.symbol_ids,
                 header.edge_ids, header.definition_ids);
-            execution.metrics.note_fact_family("file_associations", fact_count,
-                                               fact_count);
+            profile::add_counter("applicability_attempted", stats.attempted);
+            profile::add_counter("applicability_inserted", stats.inserted);
+            profile::add_counter("applicability_ignored", stats.ignored);
+            profile::add_counter("applicability_deleted", stats.deleted);
+            profile::add_counter("applicability_temporary_rows",
+                                 stats.temporary_rows);
+            execution.metrics.note_emitted(stats.inserted);
+            execution.metrics.note_fact_family("file_associations",
+                                               stats.attempted, stats.inserted,
+                                               stats.ignored);
             db_.mark_file_indexed(header.file_id, header.mtime, header.md5);
             ++state_.out->headers.indexed;
             state_.out->headers.symbols += header.stored;
@@ -479,23 +475,19 @@ public:
     registry.register_pass(
         std::move(main_association),
         [this](PassExecutionContext &execution) -> void {
-          const bool profiling = profile::active();
-          const auto metrics_started =
-              profiling ? ProfileClock::now() : ProfileClock::time_point{};
-          const auto fact_count =
-              db_.association_fact_count(state_.rec->id, main_symbol_ids_,
-                                         main_edge_ids_, main_definition_ids_);
-          if (profiling) {
-            profile::add_timing("metrics_only_sql",
-                                elapsed_seconds(metrics_started));
-            profile::add_counter("association_fact_count", fact_count);
-          }
-          execution.metrics.note_emitted(fact_count);
-          db_.associate_facts_for_file(
+          const AssociationStats stats = db_.associate_facts_for_file(
               state_.rec->id, state_.normalized_config_id, main_symbol_ids_,
               main_edge_ids_, main_definition_ids_);
-          execution.metrics.note_fact_family("file_associations", fact_count,
-                                             fact_count);
+          profile::add_counter("applicability_attempted", stats.attempted);
+          profile::add_counter("applicability_inserted", stats.inserted);
+          profile::add_counter("applicability_ignored", stats.ignored);
+          profile::add_counter("applicability_deleted", stats.deleted);
+          profile::add_counter("applicability_temporary_rows",
+                               stats.temporary_rows);
+          execution.metrics.note_emitted(stats.inserted);
+          execution.metrics.note_fact_family("file_associations",
+                                             stats.attempted, stats.inserted,
+                                             stats.ignored);
         });
     registry.register_pass(
         descriptor("includes.persist", {FrontendCapability::preprocessor},
@@ -507,22 +499,22 @@ public:
             resolve_include_guards(*state_.pp, state_.includes);
           }
           execution.metrics.note_visited(state_.includes.includes.size());
-          const bool profiling = profile::active();
-          const auto metrics_started =
-              profiling ? ProfileClock::now() : ProfileClock::time_point{};
-          const IncludeFactCounts counts =
-              include_fact_count(db_, state_.includes);
-          if (profiling) {
-            profile::add_timing("metrics_only_sql",
-                                elapsed_seconds(metrics_started));
-            profile::add_counter("include_fact_count", counts.emitted_facts);
-          }
-          execution.metrics.note_duplicate(counts.duplicates);
-          execution.metrics.note_emitted(counts.emitted_facts);
-          persist_include_facts(db_, state_.includes, *state_.config);
-          execution.metrics.note_fact_family(
-              "include_facts", counts.emitted_facts + counts.duplicates,
-              counts.emitted_facts, counts.duplicates);
+          const IncludeFactStats stats =
+              persist_include_facts(db_, state_.includes, *state_.config);
+          profile::add_counter("include_attempted", stats.attempted);
+          profile::add_counter("include_inserted_or_updated",
+                               stats.inserted_or_updated);
+          profile::add_counter("include_ignored", stats.ignored);
+          profile::add_counter("include_deleted", stats.deleted);
+          profile::add_counter("include_cascade_deleted",
+                               stats.cascade_deleted);
+          profile::add_counter("include_path_resolution_queries",
+                               stats.path_resolution_queries);
+          execution.metrics.note_duplicate(stats.duplicates);
+          execution.metrics.note_emitted(stats.inserted_or_updated);
+          execution.metrics.note_fact_family("include_facts", stats.attempted,
+                                             stats.inserted_or_updated,
+                                             stats.ignored);
         });
     registry.register_pass(
         descriptor(
@@ -1389,9 +1381,7 @@ IndexOneOutcome run_index_one(cidx::Storage &db, IndexSession &session,
   }
   std::pair<std::int64_t, std::int64_t> cardinality_before{};
   if (profiling) {
-    const auto metrics_started = ProfileClock::now();
     cardinality_before = db.indexing_cardinality();
-    profile::add_timing("metrics_only_sql", elapsed_seconds(metrics_started));
   }
   const auto workspace_started =
       profiling ? ProfileClock::now() : ProfileClock::time_point{};

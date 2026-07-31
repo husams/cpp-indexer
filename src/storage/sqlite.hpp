@@ -10,6 +10,7 @@
 // library version.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -70,6 +71,7 @@ public:
   bool step();
   // Runs the statement to completion (e.g. DML with RETURNING).
   void step_done();
+  void reset();
 
   [[nodiscard]] bool readonly() const;
   [[nodiscard]] int column_count() const;
@@ -99,7 +101,21 @@ public:
 
   SqliteStmt prepare(std::string_view sql);
   void exec(std::string_view sql_script); // multi-statement, throws on error
-  [[nodiscard]] int64_t changes() const;  // rows affected by the last DML
+  [[nodiscard]] int variable_limit() const;
+  class VariableLimitOverrideForTesting {
+  public:
+    VariableLimitOverrideForTesting(SqliteDb &db, int limit);
+    ~VariableLimitOverrideForTesting();
+    VariableLimitOverrideForTesting(const VariableLimitOverrideForTesting &) =
+        delete;
+    VariableLimitOverrideForTesting &
+    operator=(const VariableLimitOverrideForTesting &) = delete;
+
+  private:
+    SqliteDb *db_ = nullptr;
+    int previous_ = 0;
+  };
+  [[nodiscard]] int64_t changes() const; // rows affected by the last DML
   auto backup_to(std::string_view path) const -> void;
   auto backup_to_fd(int destination_fd) const -> void;
   [[nodiscard]] auto profile() const -> SqliteProfile { return profile_; }

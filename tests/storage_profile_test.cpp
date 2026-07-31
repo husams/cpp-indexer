@@ -4,10 +4,12 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <unistd.h>
 #include <vector>
 
+#include "profile/index_profile.hpp"
 #include "storage/sqlite.hpp"
 #include "storage/storage.hpp"
 #include "util/errors.hpp"
@@ -125,4 +127,57 @@ TEST_CASE("read-only replay is non-mutating and backup preserves identity") {
   CHECK(restored.stats().symbols == before.symbols);
   CHECK(restored.stats().edges == before.edges);
   CHECK(pragma_text(restored.raw_db(), "journal_mode") == "delete");
+}
+
+TEST_CASE("SQLite changes and variable limits are connection-local") {
+  cidx::SqliteDb database(":memory:");
+  database.exec(
+      "CREATE TABLE values_table(id INTEGER PRIMARY KEY, value TEXT)");
+  const int original_limit = database.variable_limit();
+  CHECK(original_limit > 0);
+  {
+    const int lowered = std::max(1, original_limit - 1);
+    cidx::SqliteDb::VariableLimitOverrideForTesting override(database, lowered);
+    CHECK(database.variable_limit() == lowered);
+  }
+  CHECK(database.variable_limit() == original_limit);
+
+  auto insert = database.prepare(
+      "INSERT OR IGNORE INTO values_table(id, value) VALUES (?, ?)");
+  insert.bind(1, int64_t{1});
+  insert.bind(2, std::string_view{"first"});
+  insert.step_done();
+  CHECK(database.changes() == 1);
+  insert.reset();
+  insert.bind(1, int64_t{1});
+  insert.bind(2, std::string_view{"duplicate"});
+  insert.step_done();
+  CHECK(database.changes() == 0);
+
+  auto update =
+      database.prepare("UPDATE values_table SET value = ? WHERE id = ?");
+  update.bind(1, std::string_view{"updated"});
+  update.bind(2, int64_t{1});
+  update.step_done();
+  CHECK(database.changes() == 1);
+
+  auto remove = database.prepare("DELETE FROM values_table WHERE id = ?");
+  remove.bind(1, int64_t{1});
+  remove.step_done();
+  CHECK(database.changes() == 1);
+}
+
+TEST_CASE("profile records prepared SQL text bytes") {
+  const std::string directory = make_temp_dir();
+  const std::string profile_path = directory + "/profile.json";
+  {
+    cidx::profile::Session session(profile_path, std::nullopt);
+    cidx::SqliteDb database(":memory:");
+    auto statement = database.prepare("SELECT 1");
+    CHECK(statement.step());
+  }
+  std::ifstream input(profile_path);
+  const std::string profile((std::istreambuf_iterator<char>(input)),
+                            std::istreambuf_iterator<char>());
+  CHECK(profile.find("prepared_sql_text_bytes") != std::string::npos);
 }

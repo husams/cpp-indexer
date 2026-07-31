@@ -99,8 +99,8 @@ is measured and which is inferred.
 | body extraction | `<value>` | `<value>` | |
 | fact persistence | `<value>` | `<attempted/persisted/duplicate by family>` | |
 | include persistence | `<value>` | `<include path-resolution queries>` | |
-| applicability association | `<value>` | `association_fact_count=<value>` | |
-| metrics-only SQL | `<value>` | `include_fact_count=<value>` | |
+| applicability association | `<value>` | `attempted/inserted/ignored/deleted/temporary_rows=<value>` | |
+| include persistence | `<value>` | `attempted/inserted_or_updated/ignored/deleted/cascade_deleted/path_resolution_queries=<value>` | |
 | external identity reconciliation | `<value>` | `<calls/rows matched/changed>` | HSE-114 is the hot-path baseline consumer |
 | SQLite prepare | `<value>` | `<prepare/reprepare>` | |
 | SQLite VDBE execution | `<value>` | `<step/VM/full-scan>` | |
@@ -116,8 +116,8 @@ resolution is counted at each preprocessor resolution callback.
 
 ## Targeted attribution experiments
 
-Quantitatively cover metrics-only SQL, identity reconciliation, applicability
-maintenance, workspace/file validation, and database-growth-sensitive
+Quantitatively cover identity reconciliation, applicability maintenance,
+include persistence, workspace/file validation, and database-growth-sensitive
 lookup/write work. Record the intervention, controlled variables, estimate,
 uncertainty, and semantic parity for each.
 

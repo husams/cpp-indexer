@@ -414,6 +414,11 @@ struct IncludeConfig {
   std::optional<int64_t> translation_unit_config_id;
 };
 
+struct IncludeDeletionStats {
+  std::uint64_t direct = 0;
+  std::uint64_t cascade = 0;
+};
+
 enum class TranslationUnitConfigState : std::uint8_t {
   registered,
   unregistered,

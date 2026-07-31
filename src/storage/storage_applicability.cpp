@@ -1,5 +1,6 @@
 #include "storage/storage.hpp"
 
+#include <algorithm>
 #include <map>
 #include <string>
 #include <string_view>
@@ -13,87 +14,121 @@ namespace {
 using detail::kSymbolColsS;
 using detail::symbol_from_offset;
 
-void insert_simple(SqliteDb &db, std::string_view sql, int64_t file_id,
-                   int64_t config_id, int64_t generation) {
+void ensure_applicability_staging(SqliteDb &db) {
+  db.exec("CREATE TEMP TABLE IF NOT EXISTS cidx_applicability_ids ("
+          "bucket TEXT NOT NULL, fact_id INTEGER NOT NULL, "
+          "PRIMARY KEY(bucket, fact_id));"
+          "CREATE TEMP TABLE IF NOT EXISTS cidx_applicability_generation ("
+          "generation INTEGER NOT NULL);");
+}
+
+auto stage_ids(SqliteDb &db, std::string_view bucket,
+               const std::vector<int64_t> &ids) -> std::uint64_t {
+  if (ids.empty()) {
+    return 0;
+  }
+  auto st = db.prepare(
+      "INSERT OR IGNORE INTO temp.cidx_applicability_ids(bucket, fact_id) "
+      "VALUES (?, ?)");
+  std::uint64_t inserted = 0;
+  for (const int64_t id : ids) {
+    st.bind(1, bucket);
+    st.bind(2, id);
+    st.step_done();
+    inserted += static_cast<std::uint64_t>(db.changes());
+    st.reset();
+  }
+  return inserted;
+}
+
+auto insert_staged(SqliteDb &db, std::string_view fact_kind,
+                   std::string_view table, std::string_view id_expression,
+                   std::string_view filter_column, std::string_view bucket,
+                   int64_t file_id, int64_t config_id, int64_t generation)
+    -> std::uint64_t {
+  auto st = db.prepare(
+      "INSERT OR IGNORE INTO fact_applicability "
+      "(fact_kind, fact_id, file_id, config_id, generation) "
+      "SELECT ?, t." +
+      std::string(id_expression) + ", ?, ?, ? FROM " + std::string(table) +
+      " t JOIN temp.cidx_applicability_ids ids ON ids.bucket = ? AND " +
+      "ids.fact_id = t." + std::string(filter_column));
+  st.bind(1, fact_kind);
+  st.bind(2, file_id);
+  st.bind(3, config_id);
+  st.bind(4, generation);
+  st.bind(5, bucket);
+  st.step_done();
+  return static_cast<std::uint64_t>(db.changes());
+}
+
+auto run_derived(SqliteDb &db, std::string_view sql, int64_t file_id,
+                 int64_t config_id, int64_t generation) -> std::uint64_t {
   auto st = db.prepare(sql);
   st.bind(1, file_id);
   st.bind(2, config_id);
   st.bind(3, generation);
   st.bind(4, file_id);
+  st.bind(5, config_id);
+  st.bind(6, generation);
   st.step_done();
-}
-
-void insert_fact_ids(SqliteDb &db, std::string_view fact_kind,
-                     std::string_view table, std::string_view id_expression,
-                     std::string_view filter_column, int64_t file_id,
-                     int64_t config_id, int64_t generation,
-                     const std::vector<int64_t> &ids) {
-  if (ids.empty()) {
-    return;
-  }
-  std::string sql = "INSERT OR IGNORE INTO fact_applicability "
-                    "(fact_kind, fact_id, file_id, config_id, generation) "
-                    "SELECT ?, " +
-                    std::string(id_expression) + ", ?, ?, ? FROM " +
-                    std::string(table) + " WHERE " +
-                    std::string(filter_column) + " IN (";
-  for (std::size_t i = 0; i < ids.size(); ++i) {
-    if (i != 0) {
-      sql += ",";
-    }
-    sql += "?";
-  }
-  sql += ")";
-  auto st = db.prepare(sql);
-  st.bind(1, fact_kind);
-  st.bind(2, file_id);
-  st.bind(3, config_id);
-  st.bind(4, generation);
-  for (std::size_t i = 0; i < ids.size(); ++i) {
-    st.bind(static_cast<int>(i + 5), ids[i]);
-  }
-  st.step_done();
+  return static_cast<std::uint64_t>(db.changes());
 }
 
 } // namespace
 
-void SqliteStorageService::associate_facts_for_file(
+AssociationStats SqliteStorageService::associate_facts_for_file(
     int64_t file_id, int64_t config_id, const std::vector<int64_t> &symbol_ids,
     const std::vector<int64_t> &edge_ids,
     const std::vector<int64_t> &definition_ids) {
-  auto next = db_.prepare(
+  AssociationStats stats;
+  stats.attempted = symbol_ids.size() + edge_ids.size() + definition_ids.size();
+  ensure_applicability_staging(db_);
+
+  auto reset_generation =
+      db_.prepare("DELETE FROM temp.cidx_applicability_generation");
+  reset_generation.step_done();
+  auto seed_generation = db_.prepare(
+      "INSERT INTO temp.cidx_applicability_generation(generation) "
       "SELECT COALESCE(MAX(generation), 0) + 1 FROM fact_applicability "
       "WHERE file_id = ? AND config_id = ?");
-  next.bind(1, file_id);
-  next.bind(2, config_id);
-  const int64_t generation = next.step() ? next.col_int64(0) : 1;
+  seed_generation.bind(1, file_id);
+  seed_generation.bind(2, config_id);
+  seed_generation.step_done();
+  auto generation_row =
+      db_.prepare("SELECT generation FROM temp.cidx_applicability_generation");
+  if (!generation_row.step()) {
+    throw StorageError("applicability generation staging failed");
+  }
+  const int64_t generation = generation_row.col_int64(0);
 
   auto clear = db_.prepare(
       "DELETE FROM fact_applicability WHERE file_id = ? AND config_id = ?");
   clear.bind(1, file_id);
   clear.bind(2, config_id);
   clear.step_done();
+  stats.deleted = static_cast<std::uint64_t>(db_.changes());
 
-  if (!symbol_ids.empty()) {
-    std::string sql = "INSERT OR IGNORE INTO fact_applicability "
-                      "(fact_kind, fact_id, file_id, config_id, generation) "
-                      "SELECT 'symbol', id, ?, ?, ? FROM symbol WHERE id IN (";
-    for (std::size_t i = 0; i < symbol_ids.size(); ++i) {
-      if (i != 0) {
-        sql += ",";
-      }
-      sql += "?";
-    }
-    sql += ")";
-    auto st = db_.prepare(sql);
-    st.bind(1, file_id);
-    st.bind(2, config_id);
-    st.bind(3, generation);
-    for (std::size_t i = 0; i < symbol_ids.size(); ++i) {
-      st.bind(static_cast<int>(i + 4), symbol_ids[i]);
-    }
-    st.step_done();
-  }
+  auto reset_ids = db_.prepare("DELETE FROM temp.cidx_applicability_ids");
+  reset_ids.step_done();
+  const std::uint64_t symbol_rows = stage_ids(db_, "symbol", symbol_ids);
+  const std::uint64_t edge_rows = stage_ids(db_, "edge", edge_ids);
+  const std::uint64_t definition_rows =
+      stage_ids(db_, "definition", definition_ids);
+  stats.temporary_rows = symbol_rows + edge_rows + definition_rows;
+
+  std::uint64_t base_inserted = 0;
+  base_inserted += insert_staged(db_, "symbol", "symbol", "id", "id", "symbol",
+                                 file_id, config_id, generation);
+  base_inserted += insert_staged(db_, "definition", "definition", "id", "id",
+                                 "definition", file_id, config_id, generation);
+  base_inserted += insert_staged(db_, "edge", "edge", "id", "id", "edge",
+                                 file_id, config_id, generation);
+  base_inserted +=
+      insert_staged(db_, "def_edge", "def_edge", "rowid", "src_def_id",
+                    "definition", file_id, config_id, generation);
+  stats.inserted = base_inserted;
+
   {
     auto st = db_.prepare(
         "INSERT OR IGNORE INTO fact_applicability "
@@ -101,191 +136,120 @@ void SqliteStorageService::associate_facts_for_file(
         "SELECT 'decl_site', ds.rowid, ?, ?, ? FROM decl_site ds JOIN "
         "fact_applicability fa ON fa.fact_kind = 'symbol' AND "
         "fa.fact_id = ds.symbol_id AND fa.file_id = ? AND fa.config_id = ? "
-        "WHERE ds.file_id = ?");
+        "AND fa.generation = ? WHERE ds.file_id = ?");
     st.bind(1, file_id);
     st.bind(2, config_id);
     st.bind(3, generation);
     st.bind(4, file_id);
     st.bind(5, config_id);
-    st.bind(6, file_id);
+    st.bind(6, generation);
+    st.bind(7, file_id);
     st.step_done();
+    stats.inserted += static_cast<std::uint64_t>(db_.changes());
   }
-  insert_fact_ids(db_, "definition", "definition", "id", "id", file_id,
-                  config_id, generation, definition_ids);
-  insert_fact_ids(db_, "edge", "edge", "id", "id", file_id, config_id,
-                  generation, edge_ids);
-  insert_fact_ids(db_, "def_edge", "def_edge", "rowid", "src_def_id", file_id,
-                  config_id, generation, definition_ids);
-  insert_simple(
+  stats.inserted += run_derived(
       db_,
       "INSERT OR IGNORE INTO fact_applicability "
       "(fact_kind, fact_id, file_id, config_id, generation) "
-      "SELECT 'diagnostic', id, ?, ?, ? FROM diagnostic WHERE file_id = ?",
+      "SELECT 'parameter', p.owner_id, ?, ?, ? FROM parameter p JOIN "
+      "fact_applicability fa ON fa.fact_kind = 'symbol' AND fa.fact_id = "
+      "p.owner_id AND fa.file_id = ? AND fa.config_id = ? AND fa.generation = "
+      "?",
       file_id, config_id, generation);
-
-  // Signature and type facts inherit the applicability of their owning
-  // symbols. The same rule is used for derived entity facts below.
+  stats.inserted += run_derived(
+      db_,
+      "INSERT OR IGNORE INTO fact_applicability "
+      "(fact_kind, fact_id, file_id, config_id, generation) "
+      "SELECT 'symbol_type', st.symbol_id, ?, ?, ? FROM symbol_type st JOIN "
+      "fact_applicability fa ON fa.fact_kind = 'symbol' AND fa.fact_id = "
+      "st.symbol_id AND fa.file_id = ? AND fa.config_id = ? AND fa.generation "
+      "= ?",
+      file_id, config_id, generation);
+  stats.inserted += run_derived(
+      db_,
+      "INSERT OR IGNORE INTO fact_applicability "
+      "(fact_kind, fact_id, file_id, config_id, generation) "
+      "SELECT DISTINCT 'type_node', st.type_id, ?, ?, ? FROM symbol_type st "
+      "JOIN fact_applicability fa ON fa.fact_kind = 'symbol' AND "
+      "fa.fact_id = st.symbol_id AND fa.file_id = ? AND fa.config_id = ? AND "
+      "fa.generation = ? WHERE st.type_id IS NOT NULL",
+      file_id, config_id, generation);
+  stats.inserted += run_derived(
+      db_,
+      "INSERT OR IGNORE INTO fact_applicability "
+      "(fact_kind, fact_id, file_id, config_id, generation) "
+      "SELECT DISTINCT 'type_edge', te.src_id, ?, ?, ? FROM type_edge te JOIN "
+      "fact_applicability fa ON fa.fact_kind = 'type_node' AND fa.fact_id = "
+      "te.src_id AND fa.file_id = ? AND fa.config_id = ? AND fa.generation = ?",
+      file_id, config_id, generation);
+  stats.inserted += run_derived(
+      db_,
+      "INSERT OR IGNORE INTO fact_applicability "
+      "(fact_kind, fact_id, file_id, config_id, generation) "
+      "SELECT 'entity_node', en.id, ?, ?, ? FROM entity_node en JOIN "
+      "fact_applicability fa ON fa.fact_kind = 'symbol' AND fa.fact_id = "
+      "en.id AND fa.file_id = ? AND fa.config_id = ? AND fa.generation = ?",
+      file_id, config_id, generation);
+  stats.inserted += run_derived(
+      db_,
+      "INSERT OR IGNORE INTO fact_applicability "
+      "(fact_kind, fact_id, file_id, config_id, generation) "
+      "SELECT DISTINCT 'entity_edge', ee.rowid, ?, ?, ? FROM entity_edge ee "
+      "JOIN fact_applicability fa ON fa.fact_kind = 'symbol' AND "
+      "fa.fact_id = ee.src_id AND fa.file_id = ? AND fa.config_id = ? AND "
+      "fa.generation = ?",
+      file_id, config_id, generation);
+  stats.inserted += run_derived(
+      db_,
+      "INSERT OR IGNORE INTO fact_applicability "
+      "(fact_kind, fact_id, file_id, config_id, generation) "
+      "SELECT 'template_param', tp.owner_id, ?, ?, ? FROM template_param tp "
+      "JOIN fact_applicability fa ON fa.fact_kind = 'symbol' AND "
+      "fa.fact_id = tp.owner_id AND fa.file_id = ? AND fa.config_id = ? AND "
+      "fa.generation = ?",
+      file_id, config_id, generation);
+  stats.inserted += run_derived(
+      db_,
+      "INSERT OR IGNORE INTO fact_applicability "
+      "(fact_kind, fact_id, file_id, config_id, generation) "
+      "SELECT 'template_arg', ta.owner_id, ?, ?, ? FROM template_arg ta JOIN "
+      "fact_applicability fa ON fa.fact_kind = 'symbol' AND fa.fact_id = "
+      "ta.owner_id AND fa.file_id = ? AND fa.config_id = ? AND fa.generation = "
+      "?",
+      file_id, config_id, generation);
+  stats.inserted += run_derived(
+      db_,
+      "INSERT OR IGNORE INTO fact_applicability "
+      "(fact_kind, fact_id, file_id, config_id, generation) "
+      "SELECT 'call_arg', ca.edge_id, ?, ?, ? FROM call_arg ca JOIN "
+      "fact_applicability fa ON fa.fact_kind = 'edge' AND fa.fact_id = "
+      "ca.edge_id AND fa.file_id = ? AND fa.config_id = ? AND fa.generation = "
+      "?",
+      file_id, config_id, generation);
+  stats.inserted += run_derived(
+      db_,
+      "INSERT OR IGNORE INTO fact_applicability "
+      "(fact_kind, fact_id, file_id, config_id, generation) "
+      "SELECT 'possible_call', pc.src_def_id, ?, ?, ? FROM possible_call pc "
+      "JOIN fact_applicability fa ON fa.fact_kind = 'definition' AND "
+      "fa.fact_id = pc.src_def_id AND fa.file_id = ? AND fa.config_id = ? AND "
+      "fa.generation = ?",
+      file_id, config_id, generation);
   {
-    const auto run = [&](std::string_view sql) {
-      auto st = db_.prepare(sql);
-      st.bind(1, file_id);
-      st.bind(2, config_id);
-      st.bind(3, generation);
-      st.bind(4, file_id);
-      st.bind(5, config_id);
-      st.step_done();
-    };
-    run("INSERT OR IGNORE INTO fact_applicability "
+    auto st = db_.prepare(
+        "INSERT OR IGNORE INTO fact_applicability "
         "(fact_kind, fact_id, file_id, config_id, generation) "
-        "SELECT 'parameter', p.owner_id, ?, ?, ? FROM parameter p JOIN "
-        "fact_applicability fa ON fa.fact_kind = 'symbol' AND fa.fact_id = "
-        "p.owner_id AND fa.file_id = ? AND fa.config_id = ?");
-    run("INSERT OR IGNORE INTO fact_applicability "
-        "(fact_kind, fact_id, file_id, config_id, generation) "
-        "SELECT 'symbol_type', st.symbol_id, ?, ?, ? FROM symbol_type st JOIN "
-        "fact_applicability fa ON fa.fact_kind = 'symbol' AND fa.fact_id = "
-        "st.symbol_id AND fa.file_id = ? AND fa.config_id = ?");
-    run("INSERT OR IGNORE INTO fact_applicability "
-        "(fact_kind, fact_id, file_id, config_id, generation) "
-        "SELECT DISTINCT 'type_node', st.type_id, ?, ?, ? FROM symbol_type st "
-        "JOIN fact_applicability fa ON fa.fact_kind = 'symbol' AND "
-        "fa.fact_id = st.symbol_id AND fa.file_id = ? AND fa.config_id = ? "
-        "WHERE st.type_id IS NOT NULL");
-    run("INSERT OR IGNORE INTO fact_applicability "
-        "(fact_kind, fact_id, file_id, config_id, generation) "
-        "SELECT 'type_edge', te.src_id, ?, ?, ? FROM type_edge te JOIN "
-        "fact_applicability fa ON fa.fact_kind = 'type_node' AND fa.fact_id = "
-        "te.src_id AND fa.file_id = ? AND fa.config_id = ?");
-    run("INSERT OR IGNORE INTO fact_applicability "
-        "(fact_kind, fact_id, file_id, config_id, generation) "
-        "SELECT 'entity_node', en.id, ?, ?, ? FROM entity_node en JOIN "
-        "fact_applicability fa ON fa.fact_kind = 'symbol' AND fa.fact_id = "
-        "en.id AND fa.file_id = ? AND fa.config_id = ?");
-    run("INSERT OR IGNORE INTO fact_applicability "
-        "(fact_kind, fact_id, file_id, config_id, generation) "
-        "SELECT 'entity_edge', ee.rowid, ?, ?, ? FROM entity_edge ee JOIN "
-        "fact_applicability fa ON fa.fact_kind = 'symbol' AND fa.fact_id = "
-        "ee.src_id AND fa.file_id = ? AND fa.config_id = ?");
-    run("INSERT OR IGNORE INTO fact_applicability "
-        "(fact_kind, fact_id, file_id, config_id, generation) "
-        "SELECT 'template_param', tp.owner_id, ?, ?, ? FROM template_param tp "
-        "JOIN fact_applicability fa ON fa.fact_kind = 'symbol' AND "
-        "fa.fact_id = tp.owner_id AND fa.file_id = ? AND fa.config_id = ?");
-    run("INSERT OR IGNORE INTO fact_applicability "
-        "(fact_kind, fact_id, file_id, config_id, generation) "
-        "SELECT 'template_arg', ta.owner_id, ?, ?, ? FROM template_arg ta "
-        "JOIN fact_applicability fa ON fa.fact_kind = 'symbol' AND "
-        "fa.fact_id = ta.owner_id AND fa.file_id = ? AND fa.config_id = ?");
-    run("INSERT OR IGNORE INTO fact_applicability "
-        "(fact_kind, fact_id, file_id, config_id, generation) "
-        "SELECT 'call_arg', ca.edge_id, ?, ?, ? FROM call_arg ca JOIN "
-        "fact_applicability fa ON fa.fact_kind = 'edge' AND fa.fact_id = "
-        "ca.edge_id AND fa.file_id = ? AND fa.config_id = ?");
-    run("INSERT OR IGNORE INTO fact_applicability "
-        "(fact_kind, fact_id, file_id, config_id, generation) "
-        "SELECT 'possible_call', pc.src_def_id, ?, ?, ? FROM possible_call pc "
-        "JOIN fact_applicability fa ON fa.fact_kind = 'definition' AND "
-        "fa.fact_id = pc.src_def_id AND fa.file_id = ? AND fa.config_id = ?");
+        "SELECT 'diagnostic', id, ?, ?, ? FROM diagnostic WHERE file_id = ?");
+    st.bind(1, file_id);
+    st.bind(2, config_id);
+    st.bind(3, generation);
+    st.bind(4, file_id);
+    st.step_done();
+    stats.inserted += static_cast<std::uint64_t>(db_.changes());
   }
-}
-
-auto SqliteStorageService::association_fact_count(
-    int64_t file_id, const std::vector<int64_t> &symbol_ids,
-    const std::vector<int64_t> &edge_ids,
-    const std::vector<int64_t> &definition_ids) -> std::size_t {
-  const auto count_with_ids =
-      [this](std::string_view sql,
-             const std::vector<int64_t> &ids) -> std::size_t {
-    if (ids.empty()) {
-      return std::size_t{0};
-    }
-    std::string statement(sql);
-    statement += " (";
-    for (std::size_t i = 0; i < ids.size(); ++i) {
-      if (i != 0) {
-        statement += ",";
-      }
-      statement += "?";
-    }
-    statement += ")";
-    auto query = db_.prepare(statement);
-    for (std::size_t i = 0; i < ids.size(); ++i) {
-      query.bind(static_cast<int>(i + 1), ids[i]);
-    }
-    return query.step() ? static_cast<std::size_t>(query.col_int64(0)) : 0;
-  };
-  const auto count_file = [this](std::string_view sql,
-                                 int64_t id) -> std::size_t {
-    auto query = db_.prepare(sql);
-    query.bind(1, id);
-    return query.step() ? static_cast<std::size_t>(query.col_int64(0)) : 0;
-  };
-  const auto count_decl_sites =
-      [this, file_id](const std::vector<int64_t> &ids) -> std::size_t {
-    if (ids.empty()) {
-      return std::size_t{0};
-    }
-    std::string statement =
-        "SELECT COUNT(*) FROM decl_site WHERE file_id = ? AND symbol_id IN (";
-    for (std::size_t i = 0; i < ids.size(); ++i) {
-      if (i != 0) {
-        statement += ",";
-      }
-      statement += "?";
-    }
-    statement += ")";
-    auto query = db_.prepare(statement);
-    query.bind(1, file_id);
-    for (std::size_t i = 0; i < ids.size(); ++i) {
-      query.bind(static_cast<int>(i + 2), ids[i]);
-    }
-    return query.step() ? static_cast<std::size_t>(query.col_int64(0)) : 0;
-  };
-
-  std::size_t total = 0;
-  total +=
-      count_with_ids("SELECT COUNT(*) FROM symbol WHERE id IN", symbol_ids);
-  total += count_decl_sites(symbol_ids);
-  total += count_with_ids("SELECT COUNT(*) FROM definition WHERE id IN",
-                          definition_ids);
-  total += count_with_ids("SELECT COUNT(*) FROM edge WHERE id IN", edge_ids);
-  total += count_with_ids("SELECT COUNT(*) FROM def_edge WHERE src_def_id IN",
-                          definition_ids);
-  total +=
-      count_file("SELECT COUNT(*) FROM diagnostic WHERE file_id = ?", file_id);
-
-  total += count_with_ids(
-      "SELECT COUNT(DISTINCT owner_id) FROM parameter WHERE owner_id IN",
-      symbol_ids);
-  total += count_with_ids(
-      "SELECT COUNT(DISTINCT symbol_id) FROM symbol_type WHERE symbol_id IN",
-      symbol_ids);
-  total += count_with_ids(
-      "SELECT COUNT(DISTINCT type_id) FROM symbol_type WHERE symbol_id IN",
-      symbol_ids);
-  total +=
-      count_with_ids("SELECT COUNT(DISTINCT te.src_id) FROM type_edge te JOIN "
-                     "symbol_type st "
-                     "ON st.type_id = te.src_id WHERE st.symbol_id IN",
-                     symbol_ids);
-  total += count_with_ids(
-      "SELECT COUNT(DISTINCT id) FROM entity_node WHERE id IN", symbol_ids);
-  total += count_with_ids(
-      "SELECT COUNT(DISTINCT ee.rowid) FROM entity_edge ee WHERE ee.src_id IN",
-      symbol_ids);
-  total += count_with_ids(
-      "SELECT COUNT(DISTINCT owner_id) FROM template_param WHERE owner_id IN",
-      symbol_ids);
-  total += count_with_ids(
-      "SELECT COUNT(DISTINCT owner_id) FROM template_arg WHERE owner_id IN",
-      symbol_ids);
-  total += count_with_ids(
-      "SELECT COUNT(DISTINCT edge_id) FROM call_arg WHERE edge_id IN",
-      edge_ids);
-  total += count_with_ids("SELECT COUNT(DISTINCT src_def_id) FROM "
-                          "possible_call WHERE src_def_id IN",
-                          definition_ids);
-  return total;
+  stats.attempted += stats.inserted - base_inserted;
+  stats.ignored = stats.attempted - std::min(stats.attempted, stats.inserted);
+  return stats;
 }
 
 ConfiguredSymbols

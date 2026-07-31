@@ -319,7 +319,8 @@ public:
   virtual int64_t add_include_edge(const IncludeEdge &edge) = 0;
   virtual int64_t add_include_site(const IncludeSite &site) = 0;
   virtual void add_include_macro_use(const IncludeMacroUse &use) = 0;
-  virtual void delete_include_configs_for_tu(int64_t file_id) = 0;
+  virtual IncludeDeletionStats
+  delete_include_configs_for_tu(int64_t file_id) = 0;
 };
 
 class SchemaCatalogReadPort {
