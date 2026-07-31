@@ -25,7 +25,9 @@ ExpansionLoc to_expansion(const clang::SourceManager &sm,
     // Absolutize a relative spelling against the CWD WITHOUT resolving
     // symlinks (os.path.abspath parity; /var must not become /private/var).
     llvm::SmallString<256> abs(out.file);
-    llvm::sys::fs::make_absolute(abs);
+    if (llvm::sys::fs::make_absolute(abs)) {
+      return out;
+    }
     llvm::sys::path::remove_dots(abs, /*remove_dot_dot=*/true);
     out.file = std::string(abs);
   }
