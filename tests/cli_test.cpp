@@ -747,9 +747,37 @@ TEST_CASE("args: index collects FILE... and --source") {
   CHECK(*pa.source == "comp");
 }
 
+TEST_CASE("args: index accepts profiling paths and documents the opt-in flag") {
+  const cli::ParsedArgs parsed = cli::parse_args(
+      {"index", "a.cpp", "--profile-json", "/tmp/cidx-profile.json",
+       "--profile-sqlite-config", "/tmp/cidx-sqlite.json"});
+  CHECK(parsed.profile_json ==
+        std::optional<std::string>{"/tmp/cidx-profile.json"});
+  CHECK(parsed.profile_sqlite_configuration ==
+        std::optional<std::string>{"/tmp/cidx-sqlite.json"});
+
+  const cli::ParsedArgs help = cli::parse_args({"index", "--help"});
+  REQUIRE(help.help_text);
+  CHECK(help.help_text->find("--profile-json") != std::string::npos);
+
+  const ParseFail missing_profile =
+      parse_fail({"index", "--profile-sqlite-config", "/tmp/sqlite.json"});
+  CHECK(missing_profile.code == 2);
+  CHECK(missing_profile.msg.find("requires --profile-json") !=
+        std::string::npos);
+  CHECK(parse_fail({"index", "--profile-json"}).code == 2);
+
+  const cli::ParsedArgs resolve = cli::parse_args(
+      {"resolve", "--profile-json", "/tmp/cidx-resolve-profile.json"});
+  CHECK(resolve.profile_json ==
+        std::optional<std::string>{"/tmp/cidx-resolve-profile.json"});
+  CHECK(parse_fail({"resolve", "--profile-sqlite-config", "/tmp/sqlite.json"})
+            .code == 2);
+}
+
 TEST_CASE("args: index status and explain expose fact-set readiness") {
-  cli::ParsedArgs pa = cli::parse_args({"index", "status", "--fact-set",
-                                        "entity-graph"});
+  cli::ParsedArgs pa =
+      cli::parse_args({"index", "status", "--fact-set", "entity-graph"});
   CHECK(pa.command == "index");
   CHECK(pa.index_status);
   CHECK(*pa.index_fact_set == "entity-graph");
@@ -824,7 +852,7 @@ TEST_CASE("resolve compatibility adapter reports transform failure") {
     if (!baseline.complete) {
       for (const auto &run : baseline.runs) {
         MESSAGE(run.transform_id << " " << transform_run_status_name(run.status)
-                << " " << run.diagnostic);
+                                 << " " << run.diagnostic);
       }
     }
     REQUIRE(baseline.complete);
@@ -836,6 +864,19 @@ TEST_CASE("resolve compatibility adapter reports transform failure") {
   CHECK(result.err.find("resolve failed") != std::string::npos);
   Storage db(cache + "/index.db");
   CHECK_FALSE(db.graph_resolved());
+}
+
+TEST_CASE("resolve profiling records transform wall time") {
+  const std::string cache = make_temp_dir();
+  const std::string profile_path = cache + "/resolve-profile.json";
+  const CmdResult result =
+      run_cli({"resolve", "--profile-json", profile_path}, cache);
+  REQUIRE(result.rc == 0);
+  const std::string profile = read_file(profile_path);
+  const std::string key = "\"transforms\": ";
+  const std::size_t position = profile.find(key);
+  REQUIRE(position != std::string::npos);
+  CHECK(std::stod(profile.substr(position + key.size())) > 0.0);
 }
 
 TEST_CASE("args: --version sets the version flag (top level only)") {
@@ -883,16 +924,22 @@ TEST_CASE("args: -h returns help text; validation beats help") {
   CHECK(pa.help_text->find("show at most N matches (0 = all; default 25)") !=
         std::string::npos);
 
-  // resolve takes no options other than -h (the destructive --rebuild flag
-  // was removed in v0.4.1 — it cleared all edges with no re-extract path).
+  // resolve exposes only telemetry options in addition to -h (the destructive
+  // --rebuild flag was removed in v0.4.1 — it cleared all edges with no
+  // re-extract path).
   pa = cli::parse_args({"resolve", "-h"});
   REQUIRE(pa.help_text);
-  CHECK(*pa.help_text ==
-        "finalize cross-repo edges and roll up edge counts\n"
-        "Usage: cidx resolve [OPTIONS]\n"
-        "\n"
-        "Options:\n"
-        "  -h,--help                   Print this help message and exit\n");
+  CHECK(
+      *pa.help_text ==
+      "finalize cross-repo edges and roll up edge counts\n"
+      "Usage: cidx resolve [OPTIONS]\n"
+      "\n"
+      "Options:\n"
+      "  -h,--help                   Print this help message and exit\n"
+      "  --profile-json TEXT         write opt-in transform telemetry to PATH\n"
+      "  --profile-sqlite-config TEXT\n"
+      "                              apply benchmark-only SQLite settings from "
+      "PATH\n");
 
   // Subcommand help carries the full "cidx file list" usage line.
   pa = cli::parse_args({"file", "list", "-h"});
@@ -2014,20 +2061,35 @@ TEST_SUITE("clang") {
 
   TEST_CASE("index session reuses one snapshot toolchain and configuration") {
     const std::string dir = make_temp_dir();
-    const std::string source = dir + "/session.cpp";
-    write_file(source, "int session_symbol() { return 1; }\n");
+    const std::string first_source = dir + "/session_a.cpp";
+    const std::string second_source = dir + "/session_b.cpp";
+    const std::string header = dir + "/session.hpp";
+    write_file(header, "inline int session_value() { return 1; }\n");
+    write_file(first_source,
+               "#include \"session.hpp\"\n"
+               "int session_symbol_a() { return session_value(); }\n");
+    write_file(second_source,
+               "#include \"session.hpp\"\n"
+               "int session_symbol_b() { return session_value() + 1; }\n");
 
     Storage db(":memory:");
     db.add_component("session", dir);
-    const int64_t file_id = db.add_file_path(
-        source, std::nullopt, std::nullopt,
-        std::vector<std::string>{"-std=c++23"}, std::string("clang++"));
-    const auto file = db.get_file_by_id(file_id);
-    REQUIRE(file.has_value());
+    const int64_t first_file_id =
+        db.add_file_path(first_source, std::nullopt, std::nullopt,
+                         std::vector<std::string>{"-std=c++23", first_source},
+                         std::string("clang++"));
+    const int64_t second_file_id =
+        db.add_file_path(second_source, std::nullopt, std::nullopt,
+                         std::vector<std::string>{"-std=c++23", second_source},
+                         std::string("clang++"));
+    const auto first_file = db.get_file_by_id(first_file_id);
+    const auto second_file = db.get_file_by_id(second_file_id);
+    REQUIRE(first_file.has_value());
+    REQUIRE(second_file.has_value());
 
     cidx::ast::IndexSession session(db);
     const auto first =
-        cidx::ast::run_index_one(db, session, *file, source, true);
+        cidx::ast::run_index_one(db, session, *first_file, first_source, true);
     REQUIRE(!first.parse_failed);
     const auto after_first = session.metrics();
     CHECK(after_first.generation == 1);
@@ -2035,21 +2097,118 @@ TEST_SUITE("clang") {
     CHECK(after_first.descriptor_misses == 1);
     CHECK(after_first.configuration_id_misses == 1);
 
-    const auto second =
-        cidx::ast::run_index_one(db, session, *file, source, true);
+    const auto second = cidx::ast::run_index_one(db, session, *second_file,
+                                                 second_source, true);
     REQUIRE(!second.parse_failed);
     const auto after_second = session.metrics();
     CHECK(after_second.snapshot_rebuilds == 1);
-    CHECK(after_second.descriptor_hits == 1);
+    CHECK(after_second.descriptor_hits == 0);
+    CHECK(after_second.descriptor_misses == 2);
     CHECK(after_second.configuration_id_hits == 1);
     CHECK(after_second.driver_subprocesses == after_first.driver_subprocesses);
-    CHECK(after_second.file_hash_reads == 4);
+    CHECK(after_second.file_hash_reads >= 6);
     CHECK(after_second.source_change_checks == 2);
+    CHECK(after_second.component_scans == 1);
+    CHECK(after_second.ownership_misses == 1);
+    CHECK(after_second.ownership_hits == 1);
 
     session.invalidate();
     const auto invalidated = session.metrics();
     CHECK(invalidated.generation == 2);
     CHECK(invalidated.snapshot_rebuilds == 2);
+  }
+
+  TEST_CASE("index session invalidates named production cache triggers") {
+    const std::string dir = make_temp_dir();
+    const std::string index = dir + "/index.db";
+    const std::string source = dir + "/session.cpp";
+    const std::string generated = dir + "/generated.hpp";
+    write_file(generated, "#define GENERATED_VALUE 1\n");
+    write_file(source, "int session_symbol() { return GENERATED_VALUE; }\n");
+
+    Storage db(index);
+    const int64_t repository = db.add_repository("session-repo");
+    const int64_t initial_clone = db.add_clone(repository, dir, "initial");
+    db.set_active_clone(repository, initial_clone);
+    const int64_t component = db.add_component("session", dir);
+    db.set_component_repository(component, repository);
+    const int64_t file_id = db.add_file_path(
+        source, std::nullopt, std::nullopt,
+        std::vector<std::string>{"-std=c++23", "-include", generated},
+        std::string("clang++"));
+    const auto file = db.get_file_by_id(file_id);
+    REQUIRE(file.has_value());
+
+    cidx::ast::IndexSession session(db);
+    auto run = [&](const char *trigger) {
+      INFO("trigger=" << std::string(trigger));
+      const auto outcome =
+          cidx::ast::run_index_one(db, session, *file, source, true);
+      REQUIRE(!outcome.parse_failed);
+      REQUIRE(!outcome.source_changed);
+    };
+    run("initial");
+    const auto stable_before = session.metrics();
+    run("unchanged");
+    CHECK(session.metrics().generation == stable_before.generation);
+
+    {
+      Storage mutator(index);
+      mutator.update_file_compile_options(
+          file_id, {"-std=c++23", "-DSESSION_CONFIG=1", "-include", generated});
+    }
+    run("compile-options");
+    const auto configuration_metrics = session.metrics();
+    CHECK_MESSAGE(configuration_metrics.configuration_invalidations == 1,
+                  "generation="
+                      << configuration_metrics.generation << " repository="
+                      << configuration_metrics.repository_invalidations
+                      << " clone=" << configuration_metrics.clone_invalidations
+                      << " component="
+                      << configuration_metrics.component_invalidations
+                      << " source="
+                      << configuration_metrics.source_invalidations);
+
+    {
+      Storage mutator(index);
+      mutator.raw_db().exec(
+          "UPDATE component SET kind = 'external' WHERE name = 'session'");
+    }
+    run("component");
+    CHECK(session.metrics().component_invalidations == 1);
+
+    {
+      Storage mutator(index);
+      mutator.add_repository("second-repository");
+    }
+    run("repository");
+    CHECK(session.metrics().repository_invalidations == 1);
+
+    {
+      Storage mutator(index);
+      const int64_t next_clone =
+          mutator.add_clone(repository, dir + "/alternate", "alternate");
+      mutator.set_active_clone(repository, next_clone);
+    }
+    CHECK_THROWS_AS(cidx::ast::run_index_one(db, session, *file, source, true),
+                    cidx::WorkspaceError);
+    CHECK(session.metrics().clone_invalidations == 1);
+    {
+      Storage mutator(index);
+      mutator.set_active_clone(repository, initial_clone);
+    }
+    run("clone-restored");
+    CHECK(session.metrics().clone_invalidations == 2);
+
+    write_file(generated, "#define GENERATED_VALUE 2\n");
+    run("generated-input");
+    CHECK(session.metrics().generated_input_invalidations == 1);
+
+    write_file(source,
+               "int session_symbol() { return GENERATED_VALUE + 1; }\n");
+    run("source");
+    CHECK(session.metrics().source_invalidations == 1);
+    CHECK(session.metrics().cache_evictions > 0);
   }
 
   TEST_CASE("index TU publication is atomic at every injected failure point") {

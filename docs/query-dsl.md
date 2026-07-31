@@ -204,4 +204,8 @@ it already covers, but is not yet extended for `path()`/`rank()`/
 `reverse_type_use()`), semantic predicate macros beyond the ones already
 exposed as builder helpers, and a `cidx query` CLI are deferred — see the
 [compatibility section](query-plan.md#compatibility). The existing
-`GraphQuery`/`EntityQuery` APIs are untouched and remain fully supported.
+`GraphQuery`/`EntityQuery` APIs remain fully supported as compatibility
+adapters. Declarative `EntityQuery` seeds, relation steps, and QueryPlan
+predicates lower to the same canonical CXQ plan executed by the shared
+read-only executor; callback filters, case-insensitive name matching, and edge
+evidence retain their legacy compatibility behavior for this release window.

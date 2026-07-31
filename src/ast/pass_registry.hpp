@@ -13,6 +13,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace clang {
@@ -129,6 +130,12 @@ struct ExtractionPassDescriptor {
 };
 
 struct PassMetrics {
+  struct FactFamily {
+    std::size_t attempted = 0;
+    std::size_t persisted = 0;
+    std::size_t duplicates = 0;
+  };
+
   std::size_t visited_constructs = 0;
   std::size_t emitted_facts = 0;
   std::size_t unknown_constructs = 0;
@@ -137,11 +144,14 @@ struct PassMetrics {
   std::chrono::microseconds elapsed{};
   bool budget_exhausted = false;
   std::vector<std::string> diagnostic_messages;
+  std::map<std::string, FactFamily, std::less<>> fact_families;
 
   void note_visited(std::size_t count = 1);
   void note_emitted(std::size_t count = 1);
   void note_unknown(std::size_t count = 1) { unknown_constructs += count; }
   void note_duplicate(std::size_t count = 1) { duplicates += count; }
+  void note_fact_family(std::string_view family, std::size_t attempted,
+                        std::size_t persisted, std::size_t duplicates = 0);
   void note_diagnostic(std::string message);
 
   void bind(std::string pass_id, PassBudget budget);

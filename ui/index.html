@@ -31,6 +31,11 @@
             <option value="entity">Entity / architecture</option>
             <option value="include">Include / files</option>
             <option value="type">Type / signatures</option>
+            <option value="evidence">Evidence / explanation path</option>
+            <option value="diff">Diff / changed graph</option>
+            <option value="effect">Effect / unknown boundary</option>
+            <option value="proof">Proof / refutation</option>
+            <option value="counterexample">TLA+ / safety violation</option>
           </select>
         </label>
         <label>
@@ -74,6 +79,10 @@
             <div id="inspector" class="inspector-content">
               <p class="muted">Select a node or edge to inspect its portable identity, status, and evidence.</p>
             </div>
+          </section>
+          <section class="panel overlay-panel">
+            <div class="panel-heading"><h2>Analysis overlay</h2><button id="export-overlay" class="tiny-button" type="button">Export</button></div>
+            <div id="overlay-panel" class="overlay-content"><p class="muted">Choose an evidence, diff, effect, proof, or TLA+ fixture.</p></div>
           </section>
           <section class="panel">
             <div class="panel-heading"><h2>Visual truth</h2></div>

@@ -58,6 +58,10 @@ public:
   // sites -- see SqliteStorageService::edge_sites_page().
   virtual std::vector<EdgeSiteRow> edge_sites_page(int64_t edge_id, int offset,
                                                    int limit) = 0;
+  virtual std::optional<EdgeSiteRow> edge_site_by_key(int64_t edge_id,
+                                                      int64_t file_id,
+                                                      int64_t line,
+                                                      int64_t col) = 0;
   // Whether ANY of an edge's sites is config-conditional -- an indexed
   // EXISTS aggregate over the edge's own (primary-key-bounded) site rows,
   // never materializing the site list, so this stays exact and cheap

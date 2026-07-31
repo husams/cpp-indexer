@@ -33,6 +33,7 @@ namespace cidx::ast {
 enum class IndexFailurePoint : std::uint8_t;
 
 struct SourceSnapshot {
+  std::optional<double> mtime;
   std::optional<std::string> md5;
 
   static SourceSnapshot capture(const std::string &path);
@@ -52,8 +53,19 @@ struct IndexPassMetrics {
   std::size_t unknown_constructs = 0;
   std::size_t duplicates = 0;
   std::size_t diagnostics = 0;
+  std::map<std::string, PassMetrics::FactFamily, std::less<>> fact_families;
   std::int64_t elapsed_microseconds = 0;
   bool budget_exhausted = false;
+};
+
+enum class IndexInvalidationReason : std::uint8_t {
+  manual,
+  repository_switch,
+  clone_change,
+  component_update,
+  compile_option_update,
+  generated_input_change,
+  source_mutation,
 };
 
 struct IndexSessionMetrics {
@@ -71,6 +83,14 @@ struct IndexSessionMetrics {
   std::size_t file_hash_reads = 0;
   std::size_t source_change_checks = 0;
   std::size_t component_scans = 0;
+  std::size_t ownership_hits = 0;
+  std::size_t ownership_misses = 0;
+  std::size_t repository_invalidations = 0;
+  std::size_t clone_invalidations = 0;
+  std::size_t component_invalidations = 0;
+  std::size_t configuration_invalidations = 0;
+  std::size_t generated_input_invalidations = 0;
+  std::size_t source_invalidations = 0;
 };
 
 struct IndexOneOutcome {
@@ -79,6 +99,7 @@ struct IndexOneOutcome {
   std::vector<cidx::Diagnostic> diagnostics;
   bool parse_failed = false;   // load failure or fatal diags (ClangParseError)
   bool source_changed = false; // bytes changed during the parse
+  std::optional<double> source_mtime;
   std::optional<std::string> source_md5; // digest captured before the parse
   std::string error;
   std::vector<std::string> failed_flags; // final args, for the log dump
@@ -97,16 +118,18 @@ public:
   IndexSession(const IndexSession &) = delete;
   IndexSession &operator=(const IndexSession &) = delete;
 
-  void invalidate();
+  void
+  invalidate(IndexInvalidationReason reason = IndexInvalidationReason::manual);
   [[nodiscard]] IndexSessionMetrics metrics() const;
 
 private:
   class Impl;
   std::unique_ptr<Impl> impl_;
-  friend IndexOneOutcome
-  run_index_one(cidx::Storage &db, IndexSession &session,
-                const cidx::File &rec, const std::string &path,
-                bool graph_enabled, IndexFailurePoint failure);
+  friend IndexOneOutcome run_index_one(cidx::Storage &db, IndexSession &session,
+                                       const cidx::File &rec,
+                                       const std::string &path,
+                                       bool graph_enabled,
+                                       IndexFailurePoint failure);
 };
 
 // Deterministic fault points used by the production TU pipeline tests. The

@@ -286,6 +286,24 @@ Stats SqliteStorageService::stats() {
   return s;
 }
 
+auto SqliteStorageService::indexing_cardinality()
+    -> std::pair<std::int64_t, std::int64_t> {
+  const auto count = [this](std::string_view sql) {
+    auto statement = db_.prepare(sql);
+    return statement.step() ? statement.col_int64(0) : std::int64_t{0};
+  };
+  const auto database =
+      count("SELECT (SELECT COUNT(*) FROM file) + "
+            "(SELECT COUNT(*) FROM symbol) + (SELECT COUNT(*) FROM edge) + "
+            "(SELECT COUNT(*) FROM definition) + "
+            "(SELECT COUNT(*) FROM include_edge)");
+  const auto facts = count("SELECT (SELECT COUNT(*) FROM edge) + "
+                           "(SELECT COUNT(*) FROM definition) + "
+                           "(SELECT COUNT(*) FROM include_edge) + "
+                           "(SELECT COUNT(*) FROM fact_applicability)");
+  return {database, facts};
+}
+
 auto SqliteStorageService::integrity_ok() -> bool {
   auto st = db_.prepare("PRAGMA integrity_check");
   return st.step() && st.col_text(0) == "ok";
@@ -702,6 +720,36 @@ SqliteStorageService::edge_sites_page(int64_t edge_id, int offset, int limit) {
     }
   }
   return out;
+}
+
+std::optional<SqliteStorageService::EdgeSiteRow>
+SqliteStorageService::edge_site_by_key(int64_t edge_id, int64_t file_id,
+                                       int64_t line, int64_t col) {
+  auto st = db_.prepare(
+      "SELECT edge_id,file_id,line,col,conditional,args_sig,recv_src_kind,"
+      "recv_type_usr,recv_decl_usr,recv_param_pos,recv_type_is_value "
+      "FROM edge_site_read WHERE edge_id = ? AND file_id = ? "
+      "AND COALESCE(line,0) = ? AND COALESCE(col,0) = ?");
+  st.bind(1, edge_id);
+  st.bind(2, file_id);
+  st.bind(3, line);
+  st.bind(4, col);
+  if (!st.step()) {
+    return std::nullopt;
+  }
+  EdgeSiteRow row;
+  row.edge_id = st.col_int64(0);
+  row.file_id = opt_int64(st, 1);
+  row.line = opt_int64(st, 2);
+  row.col = opt_int64(st, 3);
+  row.conditional = st.col_int64(4) != 0;
+  row.args_sig = opt_text(st, 5);
+  row.recv_src_kind = opt_text(st, 6);
+  row.recv_type_usr = opt_text(st, 7);
+  row.recv_decl_usr = opt_text(st, 8);
+  row.recv_param_pos = opt_int64(st, 9);
+  row.recv_type_is_value = opt_int64(st, 10);
+  return row;
 }
 
 bool SqliteStorageService::edge_has_conditional_site(int64_t edge_id) {

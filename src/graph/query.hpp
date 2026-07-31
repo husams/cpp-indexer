@@ -13,15 +13,22 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 #include "catalogs/generated_catalog.hpp"
 #include "graph/records.hpp"
+#include "query/plan.hpp"
 #include "storage/ports.hpp"
+
+namespace cidx::query {
+class QueryReadPort;
+} // namespace cidx::query
 
 namespace cidx::graph {
 
@@ -83,6 +90,15 @@ public:
   // Convenience: open from path (reserved for a service opened at path).
   // Throws NoIndexError when the DB file does not exist.
   static GraphQuery open(const std::string &db_path);
+
+  // Canonical QueryPlan constructor for legacy symbol reads. Compatibility
+  // entry points use this as their shared declarative representation before
+  // adapting result rows back to Sym/Edge/Site records.
+  query::Plan
+  plan_for(int64_t sym_id,
+           const std::optional<std::string> &relation = std::nullopt,
+           const std::string &direction = "out", int min_depth = 1,
+           int max_depth = 1);
 
   // Total number of edges. 0 means the graph layer is empty.
   int64_t edge_count();
@@ -277,6 +293,10 @@ public:
 
 private:
   storage::GraphReadPort &db_;
+  // SqliteQueryReadAdapter implements both read ports.  Keep the graph port
+  // constructor for existing test doubles, while using the QueryPlan executor
+  // whenever the richer adapter is available.
+  query::QueryReadPort *query_read_ = nullptr;
   std::string db_path_;
   std::optional<bool> resolved_; // memoized _is_resolved
   std::optional<std::unordered_map<
@@ -300,6 +320,22 @@ private:
 
   // Resolve site file_id to abs path using the file cache.
   Site make_site(const EdgeSiteRow &row);
+
+  std::vector<int64_t> adapter_ids(const query::Plan &plan);
+  bool adapter_symbol_exists(int64_t sym_id);
+  bool adapter_edge_exists(int64_t edge_id);
+  bool adapter_type_exists(int64_t type_id);
+  std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>>
+  adapter_site_keys(int64_t edge_id, int limit);
+  std::vector<
+      std::tuple<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t>>
+  adapter_edge_rows(int64_t sym_id, const std::string &direction, int limit);
+  // Execute a row-shaped codebase plan to completion and retain its emitted
+  // id order. The caller uses the ids only as compatibility-record keys.
+  std::vector<int64_t> adapter_ordered_ids(const query::Plan &plan);
+  std::optional<std::unordered_set<int64_t>>
+  adapter_peer_ids(int64_t sym_id, const std::string &direction,
+                   const std::optional<std::vector<int64_t>> &kind_ids);
 };
 
 } // namespace cidx::graph

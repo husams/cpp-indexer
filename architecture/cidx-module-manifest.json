@@ -23,10 +23,10 @@
     {
       "id": "foundation.util",
       "layer": "foundation",
-      "paths": ["src/util/**"],
+      "paths": ["src/util/**", "src/profile/**"],
       "allowedDependencies": ["foundation.util", "model.contracts"],
-      "allowedExternal": ["filesystem", "process"],
-      "description": "Small platform utilities; filesystem and process access live here."
+      "allowedExternal": ["filesystem", "process", "sqlite"],
+      "description": "Small platform utilities and opt-in telemetry; filesystem, process, and telemetry-only SQLite access live here."
     },
     {
       "id": "workspace.toolchain",
@@ -125,6 +125,7 @@
       "paths": ["src/graph/**"],
       "allowedDependencies": [
         "analysis.graph",
+        "query.plan",
         "persistence.sqlite",
         "foundation.util",
         "model.contracts"

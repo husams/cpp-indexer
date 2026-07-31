@@ -1,4 +1,4 @@
-import { applyBudget, GRAPH_VIEW_VERSION, usageOf, type Budget, type GraphEdge, type GraphGroup, type GraphKind, type GraphNode, type GraphViewResult, type EvidenceReference, type PortableReference, type SiteReference } from "./graph-view.ts";
+import { applyBudget, GRAPH_VIEW_VERSION, usageOf, type Budget, type CounterexampleOverlay, type DiffOverlay, type EffectOverlay, type EvidenceOverlay, type EvidenceReference, type GraphEdge, type GraphGroup, type GraphKind, type GraphNode, type GraphViewResult, type OverlayIdentity, type PortableReference, type ProofOverlay, type SiteReference } from "./graph-view.ts";
 
 const fixtureBudget: Budget = { maxNodes: 32, maxEdges: 48, maxGroups: 8, maxLabelChars: 2_400, maxEvidenceRefs: 64, maxSites: 256, maxSiteBytes: 32_768 };
 const universe = "fixture:canonical-v1";
@@ -24,7 +24,83 @@ const evidence: readonly EvidenceReference[] = [
   { id: "ev:render-call-site", class: "source", role: "call-site", summary: "render is called by preview", location: { path: "src/preview.cpp", line: 42, column: 9 } },
   { id: "ev:derived-entity", class: "derived", role: "derived", summary: "component relation derived from catalog", artifact: "query-result:entity-fixture" },
   { id: "ev:external-type", class: "inferred", role: "type-use", summary: "external type identity is unresolved locally" },
+  { id: "ev:proof-refutation", class: "proof", role: "derived", summary: "proof producer refuted the canvas invariant", artifact: "tlaplus:CanvasSafety:counterexample-1" },
 ];
+
+function overlayIdentity(resultId: string, evidenceId: string | undefined, source: OverlayIdentity["source"], limitation?: string): OverlayIdentity {
+  return { resultId, ...(evidenceId === undefined ? {} : { evidenceId }), ...(source === undefined ? {} : { source }), ...(limitation === undefined ? {} : { limitation }) };
+}
+
+function overlayFixtures(resultId: string, render: PortableReference, preview: PortableReference, draw: PortableReference): GraphViewResult["overlays"] {
+  const source = { path: "src/renderer.cpp", line: 72 };
+  const evidenceOverlay: EvidenceOverlay = {
+    kind: "evidence",
+    title: "Bounded call explanation",
+    items: [
+      { id: "finding:render", label: "render call finding", strength: "direct", identity: overlayIdentity(resultId, "ev:render-call-site", { path: "src/preview.cpp", line: 42 }) },
+      { id: "finding:draw", label: "draw is inferred beyond the indexed site", strength: "inferred", identity: overlayIdentity(resultId, "ev:derived-entity", undefined, "inference boundary: callee body not indexed") },
+    ],
+    path: [
+      { sequence: 0, label: "preview", relation: "calls", identity: overlayIdentity(resultId, "ev:render-call-site", { path: "src/preview.cpp", line: 42 }) },
+      { sequence: 1, label: "render", relation: "calls", identity: overlayIdentity(resultId, "ev:render-call-site", source) },
+      { sequence: 2, label: "draw", relation: "inferred calls", identity: overlayIdentity(resultId, "ev:derived-entity", undefined, "bounded explanation path") },
+    ],
+  };
+  const diffOverlay: DiffOverlay = {
+    kind: "diff",
+    title: "Workspace graph diff",
+    oldWorkspace: { key: "workspace:fixture", version: "workspace-v1" },
+    newWorkspace: { key: "workspace:fixture", version: "workspace-v2" },
+    oldFactSet: { key: "facts:symbol", version: "facts-v1" },
+    newFactSet: { key: "facts:symbol", version: "facts-v2" },
+    entries: [
+      { id: "diff:added", label: "paint dependency", state: "added", newRef: draw, identity: overlayIdentity(resultId, "ev:external-type", undefined, "new fact only") },
+      { id: "diff:removed", label: "legacy preview edge", state: "removed", oldRef: preview, identity: overlayIdentity(resultId, "ev:render-call-site", { path: "src/preview.cpp", line: 42 }) },
+      { id: "diff:changed", label: "render effect summary", state: "changed", oldRef: render, newRef: render, identity: overlayIdentity(resultId, "ev:render-declaration", { path: "src/renderer.hpp", line: 18 }) },
+      { id: "diff:invalidated", label: "stale type fact", state: "invalidated", oldRef: render, newRef: render, identity: overlayIdentity(resultId, undefined, undefined, "fact-set identity changed") },
+      { id: "diff:unchanged", label: "source declaration", state: "unchanged", oldRef: render, newRef: render, identity: overlayIdentity(resultId, "ev:render-declaration", { path: "src/renderer.hpp", line: 18 }) },
+    ],
+  };
+  const effectOverlay: EffectOverlay = {
+    kind: "effect",
+    title: "Effect summary",
+    summary: "render may mutate the canvas; the external paint effect is unknown.",
+    regions: [
+      { id: "effect:canvas", label: "canvas state", state: "known", identity: overlayIdentity(resultId, "ev:render-declaration", source) },
+      { id: "effect:vendor", label: "vendor graphics state", state: "unknown", identity: overlayIdentity(resultId, "ev:external-type", undefined, "external implementation not available") },
+    ],
+    callDependencies: [{ id: "effect:draw", label: "render → draw", state: "conditional", identity: overlayIdentity(resultId, "ev:render-call-site", source) }],
+    assumptions: [{ id: "effect:assumption", label: "canvas handle remains valid", state: "conditional", identity: overlayIdentity(resultId, "ev:derived-entity", undefined, "assumption supplied by producer") }],
+    targetCoverage: [{ id: "effect:target", label: "renderer.cpp", state: "known", identity: overlayIdentity(resultId, "ev:render-declaration", source) }],
+    unknownBoundaries: [{ id: "effect:unknown", label: "unresolved vendor::paint", state: "unknown", identity: overlayIdentity(resultId, "ev:external-type", undefined, "external boundary") }],
+  };
+  const proofOverlay: ProofOverlay = {
+    kind: "proof",
+    title: "Proof obligations",
+    claims: [
+      { id: "proof:root", label: "render preserves canvas invariant", state: "refuted", identity: overlayIdentity(resultId, "ev:proof-refutation", source) },
+      { id: "proof:condition", parentId: "proof:root", label: "vendor paint is total", state: "conditional", identity: overlayIdentity(resultId, "ev:external-type", undefined, "depends on external model") },
+      { id: "proof:open", parentId: "proof:root", label: "draw releases the canvas handle", state: "open", identity: overlayIdentity(resultId, "ev:render-call-site", undefined, "no proof artifact supplied") },
+      { id: "proof:assumption", parentId: "proof:condition", label: "graphics model is trusted", state: "assumed", identity: overlayIdentity(resultId, "ev:derived-entity", undefined, "trusted model declaration") },
+      { id: "proof:proved", parentId: "proof:condition", label: "renderer declaration is reachable", state: "proved", identity: overlayIdentity(resultId, "ev:render-declaration", { path: "src/renderer.hpp", line: 18 }) },
+      { id: "proof:inferred", parentId: "proof:root", label: "draw is the only observed callee", state: "inferred", identity: overlayIdentity(resultId, "ev:derived-entity", undefined, "bounded call graph") },
+    ],
+    trustedModels: ["canvas-safety-v1"],
+    assumptions: ["vendor::paint is modeled as an external function"],
+  };
+  const counterexampleOverlay: CounterexampleOverlay = {
+    kind: "counterexample",
+    title: "TLA+ safety violation",
+    specification: "CanvasSafety",
+    violation: "Invariant CanvasHandleValid is false at step 2",
+    steps: [
+      { index: 0, action: "Init", state: [{ name: "handleValid", value: "TRUE" }, { name: "frame", value: "0" }], identity: overlayIdentity(resultId, "ev:proof-refutation", source) },
+      { index: 1, action: "CallRender", state: [{ name: "handleValid", value: "TRUE" }, { name: "frame", value: "1" }], identity: overlayIdentity(resultId, "ev:render-call-site", { path: "src/preview.cpp", line: 42 }) },
+      { index: 2, action: "VendorPaint", state: [{ name: "handleValid", value: "FALSE" }, { name: "frame", value: "1" }], identity: overlayIdentity(resultId, "ev:proof-refutation", undefined, "TLA+ counterexample state") },
+    ],
+  };
+  return { evidence: evidenceOverlay, diff: diffOverlay, effect: effectOverlay, proof: proofOverlay, counterexample: counterexampleOverlay, exportMaxBytes: 16_384 };
+}
 
 function baseResult(slice: GraphKind, nodes: readonly GraphNode[], edges: readonly GraphEdge[], groups: readonly GraphGroup[], resultId: string, extra: Partial<GraphViewResult> = {}): GraphViewResult {
   const result: GraphViewResult = {
@@ -60,6 +136,18 @@ export function canonicalFixture(slice: Exclude<GraphKind, "group" | "file">): G
   if (slice === "entity") return entityFixture();
   if (slice === "include") return includeFixture();
   return typeFixture();
+}
+
+export type OverlayFixture = "evidence" | "diff" | "effect" | "proof" | "counterexample";
+
+export function overlayFixture(kind: OverlayFixture): GraphViewResult {
+  const resultId = `result:overlay:${kind}:v1`;
+  const render = ref("symbol", "symbol:renderer::render");
+  const preview = ref("symbol", "symbol:preview::preview");
+  const draw = ref("symbol", "symbol:canvas::draw");
+  const base = symbolFixture();
+  const overlays = overlayFixtures(resultId, render, preview, draw);
+  return applyBudget({ ...base, resultId, queryIdentity: `cxq:fixture:overlay:${kind}`, evidence: [...evidence], overlays, ...(kind === "proof" || kind === "counterexample" ? { markers: ["refuted" as const] } : {}) }, fixtureBudget);
 }
 
 function symbolFixture(): GraphViewResult {

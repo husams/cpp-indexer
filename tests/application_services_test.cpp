@@ -156,6 +156,30 @@ TEST_CASE(
   CHECK(std::get<cidx::application::IndexRequest>(bare_request).action ==
         cidx::application::IndexAction::update);
 
+  const auto profiled_index = cidx::cli::parse_application_request(
+      {"index", "fixture.cpp", "--profile-json", "/tmp/cidx-profile.json",
+       "--profile-sqlite-config", "/tmp/cidx-sqlite.json"});
+  const auto &profiled_command =
+      std::get<cidx::application::CommandRequest>(profiled_index.value);
+  const auto &profiled_request =
+      std::get<cidx::application::IndexRequest>(profiled_command);
+  CHECK(profiled_request.profile_json ==
+        std::optional<std::string>{"/tmp/cidx-profile.json"});
+  CHECK(profiled_request.profile_sqlite_configuration ==
+        std::optional<std::string>{"/tmp/cidx-sqlite.json"});
+  const auto throws_usage_error =
+      [](const std::vector<std::string> &arguments) {
+        try {
+          static_cast<void>(cidx::cli::parse_application_request(arguments));
+          return false;
+        } catch (const cidx::UsageError &) {
+          return true;
+        }
+      };
+  CHECK(throws_usage_error(
+      {"index", "--profile-sqlite-config", "/tmp/sqlite.json"}));
+  CHECK(throws_usage_error({"index", "--profile-json"}));
+
   const auto compatibility =
       cidx::cli::parse_application_request({"search", "nodes"});
   REQUIRE(std::holds_alternative<cidx::cli::CompatibilityRequest>(

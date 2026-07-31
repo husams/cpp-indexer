@@ -1,5 +1,7 @@
 #include "util/subprocess.hpp"
 
+#include "profile/index_profile.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -105,6 +107,8 @@ RunResult run(const std::vector<std::string> &argv, double timeout_sec,
   }
 
   using clock = std::chrono::steady_clock;
+  const bool profiling_enabled = profile::active();
+  const auto started = profiling_enabled ? clock::now() : clock::time_point{};
   const auto deadline =
       clock::now() + std::chrono::duration_cast<clock::duration>(
                          std::chrono::duration<double>(timeout_sec));
@@ -208,6 +212,11 @@ RunResult run(const std::vector<std::string> &argv, double timeout_sec,
     res.exit_code = WEXITSTATUS(status);
   } else if (WIFSIGNALED(status)) {
     res.exit_code = -WTERMSIG(status); // Python returncode parity
+  }
+  if (profiling_enabled) {
+    profile::note_driver_subprocess(
+        std::chrono::duration<double>(clock::now() - started).count(),
+        res.peak_bytes);
   }
   return res;
 }

@@ -1,0 +1,5 @@
+# The backlog database is a binary file: never let git try to merge it.
+# On conflict, resolve with `backlog export` / `backlog import --replace`.
+backlog.db binary -diff merge=binary
+backlog.db-wal binary -diff
+backlog.db-shm binary -diff

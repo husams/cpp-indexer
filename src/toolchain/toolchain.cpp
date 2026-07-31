@@ -14,6 +14,7 @@
 #include <sstream>
 
 #include "ast/clang_version.hpp"
+#include "profile/index_profile.hpp"
 #include "util/env.hpp"
 #include "util/pathutil.hpp"
 #include "util/subprocess.hpp"
@@ -69,7 +70,6 @@ std::string strip(const std::string &s) {
   const std::size_t e = s.find_last_not_of(ws);
   return s.substr(b, e - b + 1);
 }
-
 
 bool is_dir(const std::string &path) {
   struct stat st{};
@@ -175,6 +175,7 @@ Toolchain::driver_search_dirs(const std::string &driver,
                               const std::string &lang) {
   const auto key = std::make_pair(driver, lang);
   const auto it = search_dirs_memo_.find(key);
+  profile::note_toolchain_cache_lookup(it != search_dirs_memo_.end());
   if (it != search_dirs_memo_.end()) {
     ++metrics_.configuration_hits;
     return it->second;
@@ -213,6 +214,7 @@ Toolchain::driver_search_dirs(const std::string &driver,
 
 std::optional<std::string> Toolchain::gcc_version(const std::string &driver) {
   const auto it = gcc_version_memo_.find(driver);
+  profile::note_toolchain_cache_lookup(it != gcc_version_memo_.end());
   if (it != gcc_version_memo_.end()) {
     ++metrics_.configuration_hits;
     return it->second;
@@ -241,6 +243,7 @@ std::pair<bool, bool> Toolchain::glibc_probe(const std::string &driver,
                                              bool cpp) {
   const auto key = std::make_pair(driver, cpp);
   const auto it = glibc_memo_.find(key);
+  profile::note_toolchain_cache_lookup(it != glibc_memo_.end());
   if (it != glibc_memo_.end()) {
     ++metrics_.configuration_hits;
     return it->second;
@@ -340,6 +343,7 @@ Toolchain::pick_best_resource(const std::vector<std::string> &candidates) {
 }
 
 std::optional<std::string> Toolchain::resource_include() {
+  profile::note_toolchain_cache_lookup(resource_memo_set_);
   if (resource_memo_set_) {
     return resource_memo_;
   }
@@ -418,6 +422,7 @@ std::optional<std::string> Toolchain::resource_include() {
 // host defaults + driver replication
 
 std::optional<std::string> Toolchain::sysroot() {
+  profile::note_toolchain_cache_lookup(sysroot_memo_set_);
   if (sysroot_memo_set_) {
     return sysroot_memo_;
   }
@@ -436,6 +441,7 @@ std::vector<std::string> Toolchain::driver_flags(const std::string &driver,
   const auto key = std::make_pair(driver, cpp);
   const auto it = driver_flags_memo_.find(key);
   const bool cached = it != driver_flags_memo_.end();
+  profile::note_toolchain_cache_lookup(cached);
   if (cached && !it->second.warned_no_resource) {
     ++metrics_.configuration_hits;
     return it->second.flags;
