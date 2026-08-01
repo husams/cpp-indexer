@@ -135,6 +135,7 @@ jobs:
         run: |
           set -euo pipefail
           runtime="$RUNNER_TEMP/merged-backlog-runtime"
+          rm -rf "$runtime"
           install -d "$runtime/.backlog"
           cp -R "$GITHUB_WORKSPACE/delivery/.backlog/hooks" \
             "$runtime/.backlog/hooks"
@@ -169,6 +170,7 @@ jobs:
           else
             branch="$(jq -r '.pull_request.head.ref' "$EVENT_FILE")"
             title="$(jq -r '.pull_request.title // ""' "$EVENT_FILE")"
+            pr_number="$(jq -r '.pull_request.number' "$EVENT_FILE")"
             pr_url="$(jq -r '.pull_request.html_url' "$EVENT_FILE")"
           fi
 
@@ -191,6 +193,18 @@ jobs:
           fi
 
           echo "Backlog task: $task_key"
+
+          current_pr_number="$("$BL" show "$task_key" --json | jq -r '.pr_number // empty')"
+          if [[ -n "$current_pr_number" && "$current_pr_number" != "$pr_number" ]]; then
+            case "$EVENT_NAME:$EVENT_ACTION" in
+              pull_request_target:opened)
+                ;;
+              *)
+                echo "Ignoring event for superseded PR #$pr_number; task records PR #$current_pr_number."
+                exit 0
+                ;;
+            esac
+          fi
 
           if [[ "$EVENT_NAME" == "workflow_run" ]]; then
             case "$conclusion" in
