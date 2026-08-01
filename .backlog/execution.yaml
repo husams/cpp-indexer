@@ -1,0 +1,8 @@
+shell_enabled: true
+allowed_commands:
+  - ctest
+allowed_working_directories:
+  - .
+max_timeout_seconds: 900
+max_output_bytes: 1048576
+max_batch_seconds: 1800

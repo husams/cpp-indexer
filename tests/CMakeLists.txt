@@ -36,6 +36,25 @@ set(CIDX_DEFAULT_TESTS
   front_end_reuse_acceptance_test
 )
 
+find_program(CIDX_BACKLOG_EXECUTABLE NAMES backlog)
+if(CIDX_BACKLOG_EXECUTABLE)
+  add_test(
+    NAME backlog_done_validation_e2e
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/backlog_done_validation_e2e.py"
+            --source-root "${CMAKE_SOURCE_DIR}"
+            --backlog "${CIDX_BACKLOG_EXECUTABLE}")
+else()
+  add_test(
+    NAME backlog_done_validation_e2e
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/backlog_done_validation_e2e.py"
+            --source-root "${CMAKE_SOURCE_DIR}")
+endif()
+set_tests_properties(backlog_done_validation_e2e PROPERTIES
+  LABELS "default"
+  SKIP_RETURN_CODE 77)
+
 foreach(test_name IN LISTS CIDX_DEFAULT_TESTS)
   add_executable(${test_name} ${test_name}.cpp)
   target_compile_options(${test_name} PRIVATE -Wall -Wextra)

@@ -603,9 +603,21 @@ jobs:
           -DCMAKE_CXX_COMPILER=g++-13
           -DLLVM_DIR=/usr/lib/llvm-22/lib/cmake/llvm
           -DClang_DIR=/usr/lib/llvm-22/lib/cmake/clang
+      - name: Install Backlog test runtime
+        env:
+          BACKLOG_PLUGIN_REVISION: 40739f8b6ce7615705ee3eb7bf0dcb986ed6adb2
+        run: |
+          git init "$RUNNER_TEMP/backlog-plugin"
+          git -C "$RUNNER_TEMP/backlog-plugin" remote add origin \
+            https://github.com/husams/backlog-plugin
+          git -C "$RUNNER_TEMP/backlog-plugin" fetch --depth 1 origin \
+            "$BACKLOG_PLUGIN_REVISION"
+          git -C "$RUNNER_TEMP/backlog-plugin" checkout --detach FETCH_HEAD
       - name: Build
         run: cmake --build build --parallel 2
       - name: Run C++ default tests
+        env:
+          BACKLOG_BIN: ${{ runner.temp }}/backlog-plugin/skills/backlog/bin/backlog
         run: ctest --test-dir build -L default --output-on-failure
 
   web-offline:
