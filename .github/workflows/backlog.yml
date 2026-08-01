@@ -13,9 +13,9 @@ name: Sync pull requests to Backlog
 #     not failed — branches here are frequently named after the Linear issue
 #     (codex/hse-27-...) rather than the backlog key.
 #
-# NEVER add a step that checks out, downloads, or executes the pull request's
-# code: this workflow runs as pull_request_target with access to the backlog
-# credentials.
+# Pull-request code is never checked out or executed before merge. The closed,
+# merged path checks out only GitHub's recorded merge commit so the trusted
+# project hook can validate the exact revision before recording Done.
 
 on:
   pull_request_target:
@@ -53,8 +53,8 @@ jobs:
     runs-on: cpp-indexer-runner
     env:
       BACKLOG_DB: postgres
-      BACK_LOG_URL: ${{ secrets.BACK_LOG_URL }}
       BACKLOG_PROJECT: ${{ vars.BACKLOG_PROJECT }}
+      BACKLOG_PLUGIN_REVISION: 40739f8b6ce7615705ee3eb7bf0dcb986ed6adb2
 
     steps:
       - name: Install prerequisites
@@ -70,15 +70,61 @@ jobs:
       - name: Install Backlog
         shell: bash
         run: |
-          git clone --depth 1 https://github.com/husams/backlog-plugin \
-            "$RUNNER_TEMP/backlog-plugin"
+          git init "$RUNNER_TEMP/backlog-plugin"
+          git -C "$RUNNER_TEMP/backlog-plugin" remote add origin \
+            https://github.com/husams/backlog-plugin
+          git -C "$RUNNER_TEMP/backlog-plugin" fetch --depth 1 origin \
+            "$BACKLOG_PLUGIN_REVISION"
+          git -C "$RUNNER_TEMP/backlog-plugin" checkout --detach FETCH_HEAD
 
       - name: Show backlog store
         shell: bash
+        env:
+          BACK_LOG_URL: ${{ secrets.BACK_LOG_URL }}
         # Prints backend, scope, project and host — never the credentials — so a
         # connection or project-slug problem is obvious before any action runs.
         run: |
           "$RUNNER_TEMP/backlog-plugin/skills/backlog/bin/backlog" where
+
+      - name: Check out merged delivery revision
+        if: >-
+          github.event_name == 'pull_request_target' &&
+          github.event.action == 'closed' &&
+          github.event.pull_request.merged == true
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          path: delivery
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Verify merged delivery trust boundary
+        if: >-
+          github.event_name == 'pull_request_target' &&
+          github.event.action == 'closed' &&
+          github.event.pull_request.merged == true
+        shell: bash
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          MERGED_REVISION: ${{ github.event.pull_request.merge_commit_sha }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$MERGED_REVISION" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "Merged pull request has no valid merge_commit_sha."
+            exit 1
+          fi
+          checkout="$GITHUB_WORKSPACE/delivery"
+          git -C "$checkout" fetch --no-tags origin \
+            "refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+          test "$(git -C "$checkout" rev-parse HEAD)" = "$MERGED_REVISION"
+          git -C "$checkout" merge-base --is-ancestor \
+            "$MERGED_REVISION" "refs/remotes/origin/$BASE_REF"
+          remote_url="$(git -C "$checkout" remote get-url origin)"
+          test "${remote_url%.git}" = \
+            "https://github.com/$EXPECTED_REPOSITORY"
+          test -z "$(git -C "$checkout" status --porcelain \
+            --untracked-files=normal)"
 
       - name: Apply GitHub event
         shell: bash
@@ -87,6 +133,9 @@ jobs:
           EVENT_ACTION: ${{ github.event.action }}
           EVENT_FILE: ${{ github.event_path }}
           ACTOR: github:${{ github.actor }}
+          BACK_LOG_URL: ${{ secrets.BACK_LOG_URL }}
+          MERGED_PROJECT_ROOT: ${{ github.workspace }}/delivery
+          MERGED_REVISION: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
           set -euo pipefail
 
@@ -185,8 +234,14 @@ jobs:
             closed)
               merged="$(jq -r '.pull_request.merged' "$EVENT_FILE")"
               if [[ "$merged" == "true" ]]; then
-                "$BL" pr set "$task_key" --url "$pr_url" --state merged \
-                  --actor "$ACTOR"
+                (
+                  cd "$MERGED_PROJECT_ROOT"
+                  BACKLOG_PROJECT_ROOT="$MERGED_PROJECT_ROOT" \
+                  BACKLOG_DELIVERY_REVISION="$MERGED_REVISION" \
+                  BACKLOG_DELIVERY_PR_URL="$pr_url" \
+                    "$BL" pr set "$task_key" --url "$pr_url" --state merged \
+                    --actor github-actions
+                )
               else
                 "$BL" pr set "$task_key" --url "$pr_url" --state closed \
                   --actor "$ACTOR"
