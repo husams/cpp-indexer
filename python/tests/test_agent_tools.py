@@ -212,11 +212,26 @@ class AgentToolsTests(unittest.TestCase):
                     self._assert_matrix_frame(case, python_frame, case_id)
                     self.assertIn("cpp", surfaces, case_id)
                     self._assert_matrix_frame(case, cpp_frame, case_id)
+                    self.assertEqual(
+                        self._canonical_json(
+                            self._without_producer_backend(python_frame)
+                        ),
+                        self._canonical_json(
+                            self._without_producer_backend(cpp_frame)
+                        ),
+                        case_id,
+                    )
+                    if case_id == "rejected_cxq":
+                        self.assertEqual(
+                            self._canonical_json(python_frame),
+                            self._canonical_json(cpp_frame),
+                            case_id,
+                        )
                     if library is not None:
                         self.assertEqual(library, tools.invoke(request), case_id)
                         self.assertEqual(
-                            library["response"]["result"],
-                            python_frame["response"]["result"],
+                            self._canonical_json(library["response"]["result"]),
+                            self._canonical_json(python_frame["response"]["result"]),
                             case_id,
                         )
 
@@ -244,18 +259,31 @@ class AgentToolsTests(unittest.TestCase):
                             self.assertEqual(cli_process.returncode, 0, case_id)
                             cli_result = json.loads(cli_process.stdout)
                             self.assertEqual(
-                                cli_result,
-                                python_frame["response"]["result"],
+                                self._canonical_json(cli_result),
+                                self._canonical_json(
+                                    python_frame["response"]["result"]
+                                ),
                                 case_id,
                             )
         finally:
             path.unlink(missing_ok=True)
 
     @staticmethod
+    def _canonical_json(value: object) -> str:
+        return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+
+    @staticmethod
+    def _without_producer_backend(frame: dict) -> dict:
+        normalized = json.loads(json.dumps(frame))
+        normalized["response"]["producer"].pop("backend", None)
+        return normalized
+
+    @staticmethod
     def _assert_matrix_frame(case: dict, frame: dict, case_id: str) -> None:
         response = frame["response"]
         expected = case
-        assert response["status"] == expected["expected_status"], case_id
+        if expected["expected_status"] is not None:
+            assert response["status"] == expected["expected_status"], case_id
         assert response["completeness"]["truncated"] == expected["expected_truncated"], case_id
         assert response["completeness"]["budget"] == expected["expected_budget"], case_id
         result = response["result"]
@@ -266,9 +294,12 @@ class AgentToolsTests(unittest.TestCase):
             assert result["count"] == expected["expected_count"], case_id
         for key in expected["expected_result_keys"]:
             assert key in result, (case_id, key)
-        diagnostic_codes = {item["code"] for item in response["diagnostics"]}
-        assert set(expected["expected_diagnostics"]).issubset(diagnostic_codes), case_id
-        assert not diagnostic_codes.intersection(expected.get("forbidden_diagnostics", [])), case_id
+        diagnostic_codes = [item["code"] for item in response["diagnostics"]]
+        non_freshness_codes = [code for code in diagnostic_codes if code != "unknown"]
+        assert non_freshness_codes == expected["expected_diagnostics"], case_id
+        assert not set(non_freshness_codes).intersection(
+            expected.get("forbidden_diagnostics", [])
+        ), case_id
         if expected["expected_row_file_null"]:
             assert result["rows"][0]["file"] is None, case_id
 

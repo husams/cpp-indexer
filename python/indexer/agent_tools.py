@@ -223,17 +223,21 @@ class AgentTools:
         }
 
     def invoke_json(self, line: str) -> str:
+        request: AgentRequest | None = None
         try:
             value = json.loads(line)
             if not isinstance(value, dict):
                 raise ValueError("E_PROTOCOL_SCHEMA: request must be an object")
+            request = AgentRequest.from_dict(value)
             return json.dumps(
-                self.invoke(value), ensure_ascii=True, separators=(",", ":")
+                self.invoke(request), ensure_ascii=True, separators=(",", ":")
             )
         except (PlanError, ValueError, json.JSONDecodeError) as error:
             index = self._db.index_identity()
+            operation = request.tool if request is not None else "query"
+            max_results = request.max_results if request is not None else 1000
             envelope = ResultEnvelope(
-                operation="query",
+                operation=operation,
                 status=Status.ERROR,
                 identity=_envelope_identity(index),
                 producer=Producer(backend="cpp"),
@@ -257,11 +261,11 @@ class AgentTools:
                 {
                     "protocol": PROTOCOL,
                     "version": PROTOCOL_VERSION,
-                    "tool": "query",
+                    "tool": operation,
                     "response": envelope,
                     "truncated": False,
                     "budget": {
-                        "max_results": 1000,
+                        "max_results": max_results,
                         "exhausted": False,
                         "exhausted_at": None,
                     },

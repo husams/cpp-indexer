@@ -936,8 +936,13 @@ TEST_CASE("agent tools share the cross-surface golden fixture matrix") {
     const auto result = object_field(response_json, "result");
     REQUIRE(result != nullptr);
 
-    CHECK(string_field(response_json, "status") ==
-          string_field(golden, "expected_status"));
+    const auto *expected_status = object_field(golden, "expected_status");
+    REQUIRE(expected_status != nullptr);
+    if (expected_status->t == cidx::json_out::Value::T::Str) {
+      CHECK(string_field(response_json, "status") == expected_status->s);
+    } else {
+      REQUIRE(expected_status->t == cidx::json_out::Value::T::Null);
+    }
     CHECK(response.completeness.truncated ==
           (object_field(golden, "expected_truncated")->b));
     CHECK(response.completeness.budget ==
@@ -957,15 +962,17 @@ TEST_CASE("agent tools share the cross-surface golden fixture matrix") {
     }
 
     const auto codes = diagnostic_codes(response);
-    for (const auto &code : string_array_field(golden, "expected_diagnostics")) {
-      CHECK(has_string(codes, code));
-    }
+    std::vector<std::string> non_freshness_codes;
+    std::ranges::copy_if(codes, std::back_inserter(non_freshness_codes),
+                         [](const auto &code) { return code != "unknown"; });
+    CHECK(non_freshness_codes ==
+          string_array_field(golden, "expected_diagnostics"));
     if (const auto *forbidden = object_field(golden, "forbidden_diagnostics");
         forbidden != nullptr) {
       REQUIRE(forbidden->t == cidx::json_out::Value::T::Arr);
       for (const auto &item : forbidden->a) {
         REQUIRE(item.t == cidx::json_out::Value::T::Str);
-        CHECK_FALSE(has_string(codes, item.s));
+        CHECK_FALSE(has_string(non_freshness_codes, item.s));
       }
     }
     if (object_field(golden, "expected_row_file_null")->b) {
