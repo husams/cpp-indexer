@@ -126,6 +126,19 @@ jobs:
           test -z "$(git -C "$checkout" status --porcelain \
             --untracked-files=normal)"
 
+      - name: Prepare merged Backlog runtime
+        if: >-
+          github.event_name == 'pull_request_target' &&
+          github.event.action == 'closed' &&
+          github.event.pull_request.merged == true
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime="$RUNNER_TEMP/merged-backlog-runtime"
+          install -d "$runtime/.backlog"
+          cp -R "$GITHUB_WORKSPACE/delivery/.backlog/hooks" \
+            "$runtime/.backlog/hooks"
+
       - name: Apply GitHub event
         shell: bash
         env:
@@ -134,6 +147,7 @@ jobs:
           EVENT_FILE: ${{ github.event_path }}
           ACTOR: github:${{ github.actor }}
           BACK_LOG_URL: ${{ secrets.BACK_LOG_URL }}
+          MERGED_BACKLOG_RUNTIME: ${{ runner.temp }}/merged-backlog-runtime
           MERGED_PROJECT_ROOT: ${{ github.workspace }}/delivery
           MERGED_REVISION: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
@@ -234,9 +248,9 @@ jobs:
             closed)
               merged="$(jq -r '.pull_request.merged' "$EVENT_FILE")"
               if [[ "$merged" == "true" ]]; then
-                (
-                  cd "$MERGED_PROJECT_ROOT"
-                  BACKLOG_PROJECT_ROOT="$MERGED_PROJECT_ROOT" \
+              (
+                cd "$MERGED_BACKLOG_RUNTIME"
+                BACKLOG_PROJECT_ROOT="$MERGED_PROJECT_ROOT" \
                   BACKLOG_DELIVERY_REVISION="$MERGED_REVISION" \
                   BACKLOG_DELIVERY_PR_URL="$pr_url" \
                     "$BL" pr set "$task_key" --url "$pr_url" --state merged \
