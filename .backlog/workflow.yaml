@@ -6,39 +6,131 @@ states:
     display: Created
     category: backlog
     initial: true
+    task_types: [feature, story, bug, subtask]
 
   - slug: incomplete
     display: Incomplete
     category: backlog
+    task_types: [feature, story, bug, subtask]
 
   - slug: ready
     display: Ready
     category: ready
+    task_types: [feature, story, bug, subtask]
 
   - slug: in_progress
     display: In Progress
     category: active
+    task_types: [feature, story, bug, subtask]
 
   - slug: in_review
     display: In Review
     category: review
+    task_types: [feature, story, bug, subtask]
 
   - slug: needs_work
     display: Needs Work
     category: active
+    task_types: [feature, story, bug, subtask]
 
   - slug: accepted
     display: Accepted
     category: done
     satisfies_dependencies: true
+    task_types: [feature, story, bug, subtask]
 
   - slug: done
     display: Done
     category: done
     satisfies_dependencies: true
     terminal: true
+    task_types: [feature, story, bug, subtask]
+
+  - slug: planned
+    display: Planned
+    category: backlog
+    initial: true
+    task_types: [iteration]
+
+  - slug: open
+    display: Open
+    category: active
+    task_types: [iteration]
+
+  - slug: closed
+    display: Closed
+    category: done
+    satisfies_dependencies: true
+    terminal: true
+    task_types: [iteration]
 
 transitions:
+  # Iteration lifecycle
+  - task_types: [iteration]
+    from: planned
+    action: iteration.opened
+    to: open
+
+  - task_types: [iteration]
+    from: open
+    action: iteration.closed
+    to: closed
+    gates: [iteration_members_finished, iteration_comments_closed]
+
+  - task_types: [iteration]
+    from: closed
+    action: iteration.reopened
+    to: open
+    gates: [iteration_members_finished]
+
+  # Iteration comments are review-managed lifecycle events. They are explicit
+  # no-ops in every Iteration state; closure is gated independently above.
+  - task_types: [iteration]
+    from: planned
+    action: feedback.posted
+    to: planned
+
+  - task_types: [iteration]
+    from: planned
+    action: feedback.reopened
+    to: planned
+
+  - task_types: [iteration]
+    from: planned
+    action: feedback.resolved
+    to: planned
+
+  - task_types: [iteration]
+    from: open
+    action: feedback.posted
+    to: open
+
+  - task_types: [iteration]
+    from: open
+    action: feedback.reopened
+    to: open
+
+  - task_types: [iteration]
+    from: open
+    action: feedback.resolved
+    to: open
+
+  - task_types: [iteration]
+    from: closed
+    action: feedback.posted
+    to: closed
+
+  - task_types: [iteration]
+    from: closed
+    action: feedback.reopened
+    to: closed
+
+  - task_types: [iteration]
+    from: closed
+    action: feedback.resolved
+    to: closed
+
+
   # Backlog refinement
   - task_types: [feature, story, subtask]
     from: created
