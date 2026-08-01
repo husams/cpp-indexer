@@ -96,8 +96,7 @@ void encode_string(std::ostringstream &out, const std::string &s) {
         if (c < 0x20) {
           // Other control chars: \uXXXX lowercase
           char buf[7];
-          std::snprintf(buf, sizeof(buf), "\\u%04x",
-                        static_cast<unsigned>(c));
+          std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned>(c));
           out << buf;
         } else {
           out << static_cast<char>(c);
@@ -155,7 +154,8 @@ void encode_string(std::ostringstream &out, const std::string &s) {
 // depth = current nesting level (0 = top level).
 void emit(std::ostringstream &out, const Value &v, int depth) {
   const std::string indent(static_cast<std::string::size_type>(2 * depth), ' ');
-  const std::string inner(static_cast<std::string::size_type>(2 * (depth + 1)), ' ');
+  const std::string inner(static_cast<std::string::size_type>(2 * (depth + 1)),
+                          ' ');
 
   switch (v.t) {
   case Value::T::Null:
@@ -207,11 +207,56 @@ void emit(std::ostringstream &out, const Value &v, int depth) {
   }
 }
 
+void emit_compact(std::ostringstream &out, const Value &v) {
+  switch (v.t) {
+  case Value::T::Null:
+    out << "null";
+    break;
+  case Value::T::Bool:
+    out << (v.b ? "true" : "false");
+    break;
+  case Value::T::Int:
+    out << v.i;
+    break;
+  case Value::T::Str:
+    encode_string(out, v.s);
+    break;
+  case Value::T::Arr:
+    out << '[';
+    for (std::size_t i = 0; i < v.a.size(); ++i) {
+      if (i != 0) {
+        out << ',';
+      }
+      emit_compact(out, v.a[i]);
+    }
+    out << ']';
+    break;
+  case Value::T::Obj:
+    out << '{';
+    for (std::size_t i = 0; i < v.o.size(); ++i) {
+      if (i != 0) {
+        out << ',';
+      }
+      encode_string(out, v.o[i].first);
+      out << ':';
+      emit_compact(out, v.o[i].second);
+    }
+    out << '}';
+    break;
+  }
+}
+
 } // namespace
 
 std::string dumps_indent2(const Value &v) {
   std::ostringstream out;
   emit(out, v, 0);
+  return out.str();
+}
+
+std::string dumps_compact(const Value &v) {
+  std::ostringstream out;
+  emit_compact(out, v);
   return out.str();
 }
 

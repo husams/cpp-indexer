@@ -4072,14 +4072,20 @@ private:
   }
 
 public:
-  // Finish: default cap, default node fields.
-  Result finish(Stream st) {
+  // Finish: default cap, default node fields. An explicit caller cap replaces
+  // the legacy default cap and records exhaustion for the agent transport.
+  Result finish(Stream st, std::optional<int64_t> result_cap = std::nullopt) {
     Result res;
     res.view = st.view;
     res.path_rows_examined = st.path_rows_examined;
     res.path_reconstruction_descents_examined =
         st.path_reconstruction_descents_examined;
     reject_ambiguous_ungrouped(st);
+    bool budget_exhausted = false;
+    const int64_t cap = result_cap.value_or(kDefaultResultCap);
+    if (result_cap && *result_cap < 1) {
+      throw PlanError("E_BUDGET: max_results must be positive");
+    }
     if (st.shape == Shape::Scalar) {
       // count() after path()/reverse_type_use() counts witnesses and
       // aggregates their status; every other count() (nodes, rows, or a
@@ -4120,8 +4126,12 @@ public:
       return res;
     }
     if (st.shape == Shape::Path) {
-      if (!st.limit_in_effect &&
-          static_cast<int64_t>(st.paths.size()) > kDefaultResultCap) {
+      if (result_cap && std::cmp_greater(st.paths.size(), cap)) {
+        st.paths.resize(static_cast<std::size_t>(cap));
+        st.truncated = true;
+        budget_exhausted = true;
+      } else if (!result_cap && !st.limit_in_effect &&
+                 static_cast<int64_t>(st.paths.size()) > kDefaultResultCap) {
         st.paths.resize(kDefaultResultCap);
         st.truncated = true;
       }
@@ -4136,6 +4146,9 @@ public:
                     });
       res.unknown = st.unknown;
       res.paths = std::move(st.paths);
+      if (budget_exhausted) {
+        res.exhausted_budget = result_cap;
+      }
       return res;
     }
     if (st.shape == Shape::Nodes) {
@@ -4146,8 +4159,14 @@ public:
                          "name", "kind"});
       }
     }
-    if (!st.limit_in_effect &&
-        static_cast<int64_t>(st.rows.size()) > kDefaultResultCap) {
+    if (result_cap && std::cmp_greater(st.rows.size(), cap)) {
+      st.rows.resize(static_cast<std::size_t>(cap));
+      st.row_ids.resize(static_cast<std::size_t>(cap));
+      st.row_status.resize(static_cast<std::size_t>(cap));
+      st.truncated = true;
+      budget_exhausted = true;
+    } else if (!result_cap && !st.limit_in_effect &&
+               static_cast<int64_t>(st.rows.size()) > kDefaultResultCap) {
       st.rows.resize(kDefaultResultCap);
       st.row_ids.resize(kDefaultResultCap);
       st.row_status.resize(kDefaultResultCap);
@@ -4160,6 +4179,9 @@ public:
     res.unknown = st.unknown;
     res.fields = st.fields;
     res.rows = std::move(st.rows);
+    if (budget_exhausted) {
+      res.exhausted_budget = result_cap;
+    }
     return res;
   }
 };
@@ -4273,6 +4295,7 @@ protocol::ResultEnvelope Result::to_envelope() const {
     payload.emplace_back("count", Value::of(static_cast<int64_t>(rows.size())));
   }
   payload.emplace_back("truncated", Value::of(truncated));
+  payload.emplace_back("index", index_identity_json(index));
   if (shape == Shape::Path) {
     Array path_values;
     for (const auto &witness : paths) {
@@ -4338,6 +4361,7 @@ protocol::ResultEnvelope Result::to_envelope() const {
   }
   envelope.completeness.truncated = truncated;
   envelope.completeness.stale = index.freshness == "stale";
+  envelope.completeness.budget = exhausted_budget;
   envelope.result = Value::obj(std::move(payload));
   envelope.evidence.push_back(
       protocol::EvidenceNode{.id = "queryplan",
@@ -4352,7 +4376,7 @@ protocol::ResultEnvelope Result::to_envelope() const {
       .schema_version = index.schema_version,
       .catalog_version = catalog::kCatalogVersion,
       .catalog_hash = std::string(catalog::kCatalogHash)});
-  if (truncated) {
+  if (truncated && exhausted_budget) {
     envelope.diagnostics.push_back(protocol::Diagnostic{
         .code = "truncated_budget",
         .severity = "warning",
@@ -4374,7 +4398,7 @@ protocol::ResultEnvelope Result::to_envelope() const {
         .message = "index contents are stale for the workspace",
         .next_action =
             "re-index the affected sources before relying on this result"});
-  } else if (index.freshness != "current") {
+  } else if (index.freshness != "current" && !truncated) {
     envelope.diagnostics.push_back(protocol::Diagnostic{
         .code = "unknown",
         .severity = "warning",
@@ -4385,14 +4409,15 @@ protocol::ResultEnvelope Result::to_envelope() const {
   return envelope;
 }
 
-Result Executor::run(const Plan &plan, std::optional<int64_t> after_id) {
+Result Executor::run(const Plan &plan, std::optional<int64_t> after_id,
+                     std::optional<int64_t> result_cap) {
   const Plan normalized = validate(plan);
   if (active_plan_observer != nullptr) {
     (*active_plan_observer)(normalized);
   }
   Exec exec(read_);
   Stream st = exec.run_plan(normalized, after_id);
-  Result res = exec.finish(std::move(st));
+  Result res = exec.finish(std::move(st), result_cap);
   res.index = read_.index_identity();
   return res;
 }

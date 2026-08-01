@@ -90,6 +90,9 @@ target_compile_definitions(result_protocol_test PRIVATE
   CIDX_ERROR_TRUNCATED_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/../spec/contracts/golden/error-truncated-envelope.json"
   CIDX_PROTOCOL_VECTORS="${CMAKE_CURRENT_SOURCE_DIR}/../spec/contracts/golden/protocol-vectors.json")
 
+target_compile_definitions(application_services_test PRIVATE
+  CIDX_AGENT_MATRIX_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/golden/agent_tools_matrix.json")
+
 # query_plan_test pins canonical CXQ plan JSON against the cross-language
 # golden shared with python/tests/test_queryplan.py (regenerate with
 # CIDX_UPDATE_GOLDEN=1 -- keep both suites in sync).

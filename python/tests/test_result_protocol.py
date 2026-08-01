@@ -120,10 +120,15 @@ def test_query_result_adapter_preserves_stale_and_truncated_semantics() -> None:
     assert envelope.identity.fact_sets == ("symbols",)
 
     result.truncated = True
+    result.exhausted_budget = 1
     truncated = from_query_result(result, result.index)
     assert truncated.status is Status.PARTIAL
     assert truncated.completeness.truncated
     assert truncated.diagnostics[0].code == "truncated_budget"
+
+    result.exhausted_budget = None
+    query_limited = from_query_result(result, result.index)
+    assert query_limited.diagnostics == []
 
     result.index = result.index.__class__(
         result.index.schema_version,

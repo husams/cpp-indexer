@@ -641,7 +641,9 @@ DefaultApplicationServices::query(const QueryRequest &request,
     query::Executor executor(*context.read_ports().query);
     protocol::ResultEnvelope result = base_result("query", context);
     result.result =
-        request.explain ? executor.explain(plan) : executor.run(plan).to_json();
+        request.explain
+            ? executor.explain(plan)
+            : executor.run(plan, std::nullopt, request.max_results).to_json();
     return result;
   } catch (const std::exception &error) {
     return service_error("query", context, "invalid_input", error.what());

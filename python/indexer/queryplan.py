@@ -1424,6 +1424,7 @@ class Result:
     rows: list[tuple[Any, ...]] = field(default_factory=list)
     paths: list[PathWitness] = field(default_factory=list)
     index: IndexIdentity | None = None
+    exhausted_budget: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         if self.shape == "scalar":
@@ -1768,7 +1769,8 @@ class Executor:
 
     # -- public -------------------------------------------------------------
 
-    def run(self, plan: Plan, after_id: Optional[int] = None) -> Result:
+    def run(self, plan: Plan, after_id: Optional[int] = None,
+            result_cap: Optional[int] = None) -> Result:
         """Run `plan`. `after_id` is the shared C++/Python execution cursor,
         not part of the plan IR (it is invisible to `validate()`,
         `plan_to_dict()`, and golden plan-parity tests). It restricts the
@@ -1781,9 +1783,11 @@ class Executor:
         result. Every existing caller omits this argument and gets
         byte-identical behavior to before it existed.
         """
+        if result_cap is not None and result_cap < 1:
+            _fail("E_BUDGET", "max_results must be positive")
         normalized = validate(plan)
         st = self._run_plan(normalized, after_id)
-        result = self._finish(st)
+        result = self._finish(st, result_cap)
         result.index = self._db.index_identity()
         return result
 
@@ -3665,7 +3669,8 @@ class Executor:
         st.partial = any(partial for partial, _ in statuses)
         st.unknown = any(unknown for _, unknown in statuses)
 
-    def _finish(self, st: _Stream) -> Result:
+    def _finish(self, st: _Stream, result_cap: Optional[int] = None) -> Result:
+        budget_exhausted = False
         self._reject_ambiguous_ungrouped(st)
         if st.shape == "scalar":
             # count() after path()/reverse_type_use() counts witnesses and
@@ -3702,7 +3707,11 @@ class Executor:
                     st.path_reconstruction_descents_examined),
                 scalar=scalar)
         if st.shape == "path":
-            if not st.limit_in_effect and len(st.paths) > DEFAULT_RESULT_CAP:
+            if result_cap is not None and len(st.paths) > result_cap:
+                del st.paths[result_cap:]
+                st.truncated = True
+                budget_exhausted = True
+            elif result_cap is None and not st.limit_in_effect and len(st.paths) > DEFAULT_RESULT_CAP:
                 del st.paths[DEFAULT_RESULT_CAP:]
                 st.truncated = True
             # See the scalar/path_stream branch above: `st.source_partial` is the
@@ -3716,7 +3725,8 @@ class Executor:
                 path_rows_examined=st.path_rows_examined,
                 path_reconstruction_descents_examined=(
                     st.path_reconstruction_descents_examined),
-                paths=st.paths)
+                paths=st.paths,
+                exhausted_budget=result_cap if budget_exhausted else None)
         if st.shape == "nodes":
             if st.view not in (SYMBOL_VIEW, ENTITY_VIEW):
                 self._materialize(st, ("id", "identity_key"))
@@ -3725,7 +3735,13 @@ class Executor:
                     st,
                     ("id", "usr", "semantic_universe", "identity_key", "name", "kind"),
                 )
-        if not st.limit_in_effect and len(st.rows) > DEFAULT_RESULT_CAP:
+        if result_cap is not None and len(st.rows) > result_cap:
+            del st.rows[result_cap:]
+            del st.row_ids[result_cap:]
+            del st.row_status[result_cap:]
+            st.truncated = True
+            budget_exhausted = True
+        elif result_cap is None and not st.limit_in_effect and len(st.rows) > DEFAULT_RESULT_CAP:
             del st.rows[DEFAULT_RESULT_CAP:]
             del st.row_ids[DEFAULT_RESULT_CAP:]
             del st.row_status[DEFAULT_RESULT_CAP:]
@@ -3737,4 +3753,5 @@ class Executor:
             path_rows_examined=st.path_rows_examined,
             path_reconstruction_descents_examined=(
                 st.path_reconstruction_descents_examined),
-            fields=st.fields, rows=st.rows)
+            fields=st.fields, rows=st.rows,
+            exhausted_budget=result_cap if budget_exhausted else None)

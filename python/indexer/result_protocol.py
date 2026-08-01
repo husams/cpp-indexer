@@ -439,6 +439,7 @@ def from_query_result(result: Any, index: Any, *, operation: str = "query") -> R
                   else len(result.paths) if result.shape == "path"
                   else len(result.rows)),
         "truncated": result.truncated,
+        "index": result.index.to_dict() if result.index else None,
     }
     if result.shape == "path":
         payload["paths"] = [w.to_dict() for w in result.paths]
@@ -457,12 +458,16 @@ def from_query_result(result: Any, index: Any, *, operation: str = "query") -> R
             source_fingerprint=index.source_fingerprint,
         ),
         producer=Producer(backend="python"),
-        completeness=Completeness(state=state, truncated=result.truncated, stale=stale),
+        completeness=Completeness(
+            state=state,
+            truncated=result.truncated,
+            stale=stale,
+            budget=getattr(result, "exhausted_budget", None)),
         result=payload,
         evidence=[Evidence("queryplan", "derived", "producer-verified", "bounded QueryPlan execution")],
         artifacts=[ArtifactRef("semantic-index", f"semantic-index/schema/{index.schema_version}", index.schema_version)],
     )
-    if result.truncated:
+    if result.truncated and getattr(result, "exhausted_budget", None) is not None:
         envelope.diagnostics.append(Diagnostic(
             "truncated_budget", "warning",
             "result was bounded by the QueryPlan execution budget",

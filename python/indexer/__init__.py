@@ -98,6 +98,7 @@ from .extensions import (
     validate_package,
     version_satisfies,
 )
+from .agent_tools import AgentRequest, AgentTools
 
 __all__ = [
     "Storage",
@@ -194,4 +195,6 @@ __all__ = [
     "runtime_environment",
     "validate_package",
     "version_satisfies",
+    "AgentRequest",
+    "AgentTools",
 ]

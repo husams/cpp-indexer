@@ -276,6 +276,7 @@
         "python/indexer/entity_rollup.py",
         "python/indexer/model.py",
         "python/indexer/queryplan.py",
+        "python/indexer/agent_tools.py",
         "python/indexer/relink.py",
         "python/indexer/utils/files.py",
         "python/indexer/utils/__init__.py"
@@ -307,7 +308,8 @@
         "python/indexer/clang/**",
         "python/indexer/astcmd.py",
         "python/indexer/backfill_alias_edges.py",
-        "python/indexer/compiledb.py"
+        "python/indexer/compiledb.py",
+        "python/indexer/agent_tools.py"
       ],
       "sourceSuffixes": [".py"],
       "allowedDependencies": ["sdk.python", "sdk.python.compat"],
@@ -360,6 +362,7 @@
     {"name": "cidx-diff", "kind": "executable", "module": "product.cli", "links": ["cidx_core"]},
     {"name": "cidx-queryplan-example", "kind": "optional-executable", "module": "product.cli", "links": ["cidx_core"]},
     {"name": "cidx-clang-tidy", "kind": "generated-target", "module": "compat.core-bundle", "links": []},
+    {"name": "cidx-agent", "kind": "executable", "module": "product.cli", "links": ["cidx_core"]},
     {"name": "front_end_reuse_probe", "kind": "test-executable", "module": "compat.core-bundle", "links": ["cidx_core"]}
   ],
   "targetExceptions": [
@@ -404,6 +407,15 @@
       "boundary": "optional product executable -> compatibility bundle",
       "owner": "Platform M1 build maintainers",
       "rationale": "The optional query-plan example still consumes the transitional cidx_core aggregation target.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-62",
+      "dependencies": ["cidx_core"]
+    },
+    {
+      "target": "cidx-agent",
+      "boundary": "agent product executable -> compatibility bundle",
+      "owner": "Platform M1 build maintainers",
+      "rationale": "The agent transport executable consumes the transitional cidx_core aggregation target.",
       "expiresOn": "2026-12-31",
       "removalIssue": "HSE-62",
       "dependencies": ["cidx_core"]
