@@ -967,6 +967,16 @@ TEST_CASE("agent tools share the cross-surface golden fixture matrix") {
                          [](const auto &code) { return code != "unknown"; });
     CHECK(non_freshness_codes ==
           string_array_field(golden, "expected_diagnostics"));
+    if (const auto *expected_error = object_field(golden, "cli_error");
+        expected_error != nullptr) {
+      REQUIRE(expected_error->t == cidx::json_out::Value::T::Str);
+      const auto *diagnostics = object_field(response_json, "diagnostics");
+      REQUIRE(diagnostics != nullptr);
+      REQUIRE(diagnostics->t == cidx::json_out::Value::T::Arr);
+      REQUIRE(diagnostics->a.size() == 1);
+      CHECK(string_field(diagnostics->a.front(), "message") ==
+            expected_error->s);
+    }
     if (const auto *forbidden = object_field(golden, "forbidden_diagnostics");
         forbidden != nullptr) {
       REQUIRE(forbidden->t == cidx::json_out::Value::T::Arr);

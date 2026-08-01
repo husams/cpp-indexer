@@ -254,7 +254,11 @@ class AgentToolsTests(unittest.TestCase):
                         )
                         if "cli_error" in case:
                             self.assertNotEqual(cli_process.returncode, 0, case_id)
-                            self.assertIn(case["cli_error"], cli_process.stderr, case_id)
+                            self.assertEqual(
+                                cli_process.stderr,
+                                f"error: {case['cli_error']}\n",
+                                case_id,
+                            )
                         else:
                             self.assertEqual(cli_process.returncode, 0, case_id)
                             cli_result = json.loads(cli_process.stdout)
@@ -300,6 +304,14 @@ class AgentToolsTests(unittest.TestCase):
         assert not set(non_freshness_codes).intersection(
             expected.get("forbidden_diagnostics", [])
         ), case_id
+        if "cli_error" in expected:
+            invalid_diagnostics = [
+                item
+                for item in response["diagnostics"]
+                if item["code"] == "invalid_input"
+            ]
+            assert len(invalid_diagnostics) == 1, case_id
+            assert invalid_diagnostics[0]["message"] == expected["cli_error"], case_id
         if expected["expected_row_file_null"]:
             assert result["rows"][0]["file"] is None, case_id
 
