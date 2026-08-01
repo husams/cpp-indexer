@@ -139,6 +139,8 @@ jobs:
           install -d "$runtime/.backlog"
           cp -R "$GITHUB_WORKSPACE/delivery/.backlog/hooks" \
             "$runtime/.backlog/hooks"
+          cp "$GITHUB_WORKSPACE/delivery/.backlog/workflow.yaml" \
+            "$runtime/.backlog/workflow.yaml"
 
       - name: Apply GitHub event
         shell: bash
@@ -155,6 +157,11 @@ jobs:
           set -euo pipefail
 
           BL="$RUNNER_TEMP/backlog-plugin/skills/backlog/bin/backlog"
+
+          if [[ -z "${BACKLOG_PROJECT:-}" ]]; then
+            echo "BACKLOG_PROJECT must name the project explicitly."
+            exit 1
+          fi
 
           if [[ "$EVENT_NAME" == "workflow_run" ]]; then
             pr_count="$(jq '.workflow_run.pull_requests | length' "$EVENT_FILE")"
