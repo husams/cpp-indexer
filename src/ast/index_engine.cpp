@@ -246,6 +246,14 @@ private:
   // limit.
   static constexpr std::size_t kRoutedGraphEventBudget = 20'000'000;
 
+  // Raise the configured fault at a pipeline phase boundary. Without an
+  // injector this is a null check, so normal behaviour is unchanged.
+  void inject(cidx::storage::FailurePoint point) const {
+    if (state_.failure_injector != nullptr) {
+      state_.failure_injector->inject(point);
+    }
+  }
+
   static auto descriptor(
       std::string id, std::vector<FrontendCapability> capabilities,
       std::vector<std::string> consumed, std::vector<std::string> produced,
@@ -303,6 +311,7 @@ private:
             header.stored = symbols_.stored_count(header.file_id);
             header.symbol_ids = symbols_.symbol_ids(header.file_id);
           }
+          inject(cidx::storage::FailurePoint::symbol_capture_complete);
         });
   }
 
@@ -338,6 +347,7 @@ private:
           }
           main_edge_ids_ = edges_.edge_ids(state_.rec->id);
           main_definition_ids_ = edges_.definition_ids(state_.rec->id);
+          inject(cidx::storage::FailurePoint::declaration_replay);
         });
     registry.register_pass(
         // Replays the graph collector's recorded stream: a logical pass with
@@ -355,6 +365,7 @@ private:
           }
           main_edge_ids_ = edges_.edge_ids(state_.rec->id);
           main_definition_ids_ = edges_.definition_ids(state_.rec->id);
+          inject(cidx::storage::FailurePoint::definition_replay);
         });
     registry.register_pass(
         descriptor("statements.headers",
@@ -384,6 +395,7 @@ private:
           }
           main_edge_ids_ = edges_.edge_ids(state_.rec->id);
           main_definition_ids_ = edges_.definition_ids(state_.rec->id);
+          inject(cidx::storage::FailurePoint::namespace_replay);
         });
     auto header_association = descriptor(
         "headers.associate", {}, {"symbols", "relations", "definitions"},
@@ -417,6 +429,7 @@ private:
             ++state_.out->headers.indexed;
             state_.out->headers.symbols += header.stored;
           }
+          inject(cidx::storage::FailurePoint::header_association);
         });
   }
 
@@ -461,6 +474,7 @@ private:
           }
           main_edge_ids_ = edges_.edge_ids(state_.rec->id);
           main_definition_ids_ = edges_.definition_ids(state_.rec->id);
+          inject(cidx::storage::FailurePoint::statement_body_replay);
         });
     registry.register_pass(
         descriptor("namespaces.main", {FrontendCapability::ast},
@@ -548,6 +562,7 @@ private:
           execution.metrics.note_fact_family("file_associations",
                                              stats.attempted, stats.inserted,
                                              stats.ignored);
+          inject(cidx::storage::FailurePoint::main_association);
         });
     registry.register_pass(
         descriptor("includes.persist", {FrontendCapability::preprocessor},
@@ -1175,6 +1190,20 @@ public:
         return IndexFailurePoint::partial_transform;
       case cidx::storage::FailurePoint::commit:
         return IndexFailurePoint::commit;
+      case cidx::storage::FailurePoint::symbol_capture_complete:
+        return IndexFailurePoint::symbol_capture_complete;
+      case cidx::storage::FailurePoint::declaration_replay:
+        return IndexFailurePoint::declaration_replay;
+      case cidx::storage::FailurePoint::definition_replay:
+        return IndexFailurePoint::definition_replay;
+      case cidx::storage::FailurePoint::statement_body_replay:
+        return IndexFailurePoint::statement_body_replay;
+      case cidx::storage::FailurePoint::namespace_replay:
+        return IndexFailurePoint::namespace_replay;
+      case cidx::storage::FailurePoint::header_association:
+        return IndexFailurePoint::header_association;
+      case cidx::storage::FailurePoint::main_association:
+        return IndexFailurePoint::main_association;
       }
       return IndexFailurePoint::none;
     }();
@@ -1195,6 +1224,20 @@ private:
       return "partial transform";
     case IndexFailurePoint::commit:
       return "unit-of-work commit";
+    case IndexFailurePoint::symbol_capture_complete:
+      return "symbol capture completion";
+    case IndexFailurePoint::declaration_replay:
+      return "declaration replay";
+    case IndexFailurePoint::definition_replay:
+      return "definition replay";
+    case IndexFailurePoint::statement_body_replay:
+      return "statement body replay";
+    case IndexFailurePoint::namespace_replay:
+      return "namespace replay";
+    case IndexFailurePoint::header_association:
+      return "header association";
+    case IndexFailurePoint::main_association:
+      return "main association";
     case IndexFailurePoint::none:
       return "unexpected";
     }

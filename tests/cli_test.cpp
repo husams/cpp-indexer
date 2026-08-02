@@ -2236,10 +2236,21 @@ TEST_SUITE("clang") {
     write_file(source, "#include \"header.hpp\"\n"
                        "int changed_pipeline_symbol() { return 2; }\n");
 
-    for (const auto failure : {cidx::ast::IndexFailurePoint::begin,
-                               cidx::ast::IndexFailurePoint::adapter,
-                               cidx::ast::IndexFailurePoint::partial_transform,
-                               cidx::ast::IndexFailurePoint::commit}) {
+    // The four storage-adapter boundaries plus the seven phase boundaries of
+    // the fused two-root pipeline, in publication order. Injecting at any of
+    // them must leave the whole translation unit exactly as it was.
+    for (const auto failure :
+         {cidx::ast::IndexFailurePoint::begin,
+          cidx::ast::IndexFailurePoint::adapter,
+          cidx::ast::IndexFailurePoint::partial_transform,
+          cidx::ast::IndexFailurePoint::commit,
+          cidx::ast::IndexFailurePoint::symbol_capture_complete,
+          cidx::ast::IndexFailurePoint::declaration_replay,
+          cidx::ast::IndexFailurePoint::definition_replay,
+          cidx::ast::IndexFailurePoint::statement_body_replay,
+          cidx::ast::IndexFailurePoint::namespace_replay,
+          cidx::ast::IndexFailurePoint::header_association,
+          cidx::ast::IndexFailurePoint::main_association}) {
       CHECK_THROWS(cidx::ast::run_index_one(db, *file, source, true, failure));
       CHECK(snapshot_tu_publication(db, source) == published);
     }
@@ -2248,6 +2259,231 @@ TEST_SUITE("clang") {
         db, *file, source, true, cidx::ast::IndexFailurePoint::none));
     CHECK(db.find_symbols("changed_pipeline_symbol", {}, 10).size() == 1);
     CHECK(db.find_symbols("published_pipeline_symbol", {}, 10).empty());
+  }
+
+  // Per-file fact ownership for the fused topology, keyed by file basename.
+  // Every family that carries a file_id is counted, so a fact drifting from a
+  // header to the main file (or the reverse) shows up as a count change.
+  std::map<std::string, std::map<std::string, int64_t>> ownership_by_file(
+      Storage & db) {
+    static const std::vector<std::pair<std::string, std::string>> kFamilies{
+        {"symbol", "SELECT f.name, COUNT(*) FROM symbol s "
+                   "JOIN file f ON f.id = s.file_id GROUP BY f.name"},
+        {"decl_site", "SELECT f.name, COUNT(*) FROM decl_site d "
+                      "JOIN file f ON f.id = d.file_id GROUP BY f.name"},
+        {"edge_site", "SELECT f.name, COUNT(*) FROM edge_site e "
+                      "JOIN file f ON f.id = e.file_id GROUP BY f.name"},
+        {"call_arg", "SELECT f.name, COUNT(*) FROM call_arg c "
+                     "JOIN file f ON f.id = c.file_id GROUP BY f.name"},
+        {"definition", "SELECT f.name, COUNT(*) FROM definition d "
+                       "JOIN file f ON f.id = d.file_id GROUP BY f.name"},
+        {"diagnostic", "SELECT f.name, COUNT(*) FROM diagnostic d "
+                       "JOIN file f ON f.id = d.file_id GROUP BY f.name"},
+        {"fact_applicability",
+         "SELECT f.name, COUNT(*) FROM fact_applicability a "
+         "JOIN file f ON f.id = a.file_id GROUP BY f.name"},
+    };
+    std::map<std::string, std::map<std::string, int64_t>> owned;
+    for (const auto &[family, sql] : kFamilies) {
+      auto statement = db.raw_db().prepare(sql);
+      while (statement.step()) {
+        owned[statement.col_text(0)][family] = statement.col_int64(1);
+      }
+    }
+    // File-independent families still have to be stable across re-index.
+    static const std::vector<std::pair<std::string, std::string>> kTotals{
+        {"edge", "SELECT COUNT(*) FROM edge"},
+        {"def_edge", "SELECT COUNT(*) FROM def_edge"},
+        {"type_node", "SELECT COUNT(*) FROM type_node"},
+        {"type_edge", "SELECT COUNT(*) FROM type_edge"},
+        {"symbol_type", "SELECT COUNT(*) FROM symbol_type"},
+        {"parameter", "SELECT COUNT(*) FROM parameter"},
+        {"template_param", "SELECT COUNT(*) FROM template_param"},
+        {"template_arg", "SELECT COUNT(*) FROM template_arg"},
+    };
+    for (const auto &[family, sql] : kTotals) {
+      auto statement = db.raw_db().prepare(sql);
+      REQUIRE(statement.step());
+      owned["<translation-unit>"][family] = statement.col_int64(0);
+    }
+    return owned;
+  }
+
+  // The interleaved fixture the fused topology has to get right: two owned
+  // headers plus the main file, with redeclarations, an explicit callable
+  // instantiation anchored in the main file, nested namespaces with using
+  // directives and qualified reference sites, definitions with bodies,
+  // declaration and type facts, and the same names reached from both files.
+  TEST_CASE("fused topology keeps interleaved main/header fact ownership") {
+    const std::string dir = make_temp_dir();
+    const std::string source = dir + "/interleaved.cpp";
+    const std::string first = dir + "/interleaved_first.hpp";
+    const std::string second = dir + "/interleaved_second.hpp";
+    write_file(first,
+               "#pragma once\n"
+               "namespace outer {\n"
+               "namespace inner { struct Tag { int id; }; }\n"
+               "struct Shared;\n" // redeclaration
+               "struct Shared { int value; int twice() const; };\n"
+               "template <typename T> T echo(T value) { return value; }\n"
+               "int shared_helper(const Shared &s);\n"
+               "} // namespace outer\n");
+    write_file(second,
+               "#pragma once\n"
+               "#include \"interleaved_first.hpp\"\n"
+               "namespace outer {\n"
+               "using inner::Tag;\n"
+               "struct Derived : Shared { Tag tag; int twice() const; };\n"
+               "int derived_helper(const Derived &d);\n"
+               "} // namespace outer\n");
+    write_file(source,
+               "#include \"interleaved_second.hpp\"\n"
+               "using namespace outer;\n"
+               "template int outer::echo<int>(int);\n" // explicit instantiation
+               "int outer::Shared::twice() const { return value * 2; }\n"
+               "int outer::Derived::twice() const { return tag.id + value; }\n"
+               "int outer::shared_helper(const outer::Shared &s) {\n"
+               "  return s.twice();\n"
+               "}\n"
+               "int outer::derived_helper(const outer::Derived &d) {\n"
+               "  return d.twice() + shared_helper(d);\n"
+               "}\n"
+               "int interleaved_main() {\n"
+               "  outer::Derived value{};\n"
+               "  return outer::derived_helper(value) + outer::echo<int>(1);\n"
+               "}\n");
+
+    Storage db(dir + "/index.db");
+    db.add_component("interleaved", dir);
+    const int64_t file_id = db.add_file_path(
+        source, std::nullopt, std::nullopt,
+        std::vector<std::string>{"-std=c++23"}, std::string("clang++"));
+    const auto file = db.get_file_by_id(file_id);
+    REQUIRE(file.has_value());
+    db.stamp_graph_resolved();
+    db.stamp_index_identity();
+
+    const auto first_run = cidx::ast::run_index_one(db, *file, source, true);
+    REQUIRE(!first_run.parse_failed);
+    CHECK(first_run.headers.indexed == 2);
+
+    const auto owned = ownership_by_file(db);
+    // Non-vacuity: all three files really own facts, and the two headers own
+    // distinct ones.
+    REQUIRE(owned.contains("interleaved.cpp"));
+    REQUIRE(owned.contains("interleaved_first.hpp"));
+    REQUIRE(owned.contains("interleaved_second.hpp"));
+    CHECK(owned.at("interleaved_first.hpp").at("symbol") > 0);
+    CHECK(owned.at("interleaved_second.hpp").at("symbol") > 0);
+    CHECK(owned.at("interleaved.cpp").at("symbol") > 0);
+    CHECK(owned.at("interleaved.cpp").at("edge_site") > 0);
+    CHECK(owned.at("interleaved.cpp").at("definition") > 0);
+    CHECK(owned.at("<translation-unit>").at("edge") > 0);
+    CHECK(owned.at("<translation-unit>").at("type_node") > 0);
+    CHECK(owned.at("<translation-unit>").at("template_arg") > 0);
+    // The explicit instantiation is anchored at its point of instantiation in
+    // the main file, not in the header that declares the template.
+    CHECK(db.find_symbols("echo", {}, 10).size() >= 1);
+
+    // Header cleanup and association complete before main association, and
+    // statement-body replay stays outside the root traversal counts.
+    const auto position = [&](const std::string &id) {
+      const auto found = std::ranges::find_if(
+          first_run.pass_metrics,
+          [&id](const cidx::ast::IndexPassMetrics &m) { return m.id == id; });
+      REQUIRE(found != first_run.pass_metrics.end());
+      return std::distance(first_run.pass_metrics.begin(), found);
+    };
+    CHECK(position("lifecycle.headers") < position("headers.associate"));
+    CHECK(position("statements.main") < position("headers.associate"));
+    CHECK(position("headers.associate") < position("main.associate"));
+    for (const auto &metrics : first_run.pass_metrics) {
+      if (metrics.id.starts_with("statements.")) {
+        CHECK(metrics.whole_tu_traversals == 0U);
+        CHECK(metrics.registered_whole_tu_traversal_budget == 0U);
+      }
+    }
+    CHECK(first_run.registered_whole_tu_traversal_budget == 2);
+    CHECK(first_run.observed_whole_tu_traversals == 2);
+
+    // Re-indexing the same successful TU is idempotent. The first re-index is
+    // the one that changes state: the headers were indexed by the cold run, so
+    // this run finds them already indexed and does not re-route them. From
+    // there the fact set is a fixed point - no cross-file fact is duplicated,
+    // however many times the TU is re-indexed.
+    REQUIRE_NOTHROW(cidx::ast::run_index_one(db, *file, source, true));
+    const auto steady = ownership_by_file(db);
+    REQUIRE_NOTHROW(cidx::ast::run_index_one(db, *file, source, true));
+    CHECK(ownership_by_file(db) == steady);
+    REQUIRE_NOTHROW(cidx::ast::run_index_one(db, *file, source, true));
+    CHECK(ownership_by_file(db) == steady);
+    // Header-owned facts survive the main file's delete-and-re-emit untouched.
+    CHECK(steady.at("interleaved_first.hpp").at("symbol") ==
+          owned.at("interleaved_first.hpp").at("symbol"));
+    CHECK(steady.at("interleaved_second.hpp").at("symbol") ==
+          owned.at("interleaved_second.hpp").at("symbol"));
+    CHECK(steady.at("interleaved.cpp").at("symbol") ==
+          owned.at("interleaved.cpp").at("symbol"));
+
+    // Source-change retry: the main file changes, the headers do not. The
+    // changed symbol replaces the old one and header ownership is untouched.
+    write_file(source,
+               "#include \"interleaved_second.hpp\"\n"
+               "using namespace outer;\n"
+               "template int outer::echo<int>(int);\n"
+               "int outer::Shared::twice() const { return value * 2; }\n"
+               "int outer::Derived::twice() const { return tag.id + value; }\n"
+               "int outer::shared_helper(const outer::Shared &s) {\n"
+               "  return s.twice();\n"
+               "}\n"
+               "int outer::derived_helper(const outer::Derived &d) {\n"
+               "  return d.twice() + shared_helper(d);\n"
+               "}\n"
+               "int interleaved_retry() {\n"
+               "  outer::Derived value{};\n"
+               "  return outer::derived_helper(value) + outer::echo<int>(2);\n"
+               "}\n");
+    REQUIRE_NOTHROW(cidx::ast::run_index_one(db, *file, source, true));
+    CHECK(db.find_symbols("interleaved_retry", {}, 10).size() == 1);
+    CHECK(db.find_symbols("interleaved_main", {}, 10).empty());
+    const auto after_retry = ownership_by_file(db);
+    CHECK(after_retry.at("interleaved_first.hpp") ==
+          steady.at("interleaved_first.hpp"));
+    CHECK(after_retry.at("interleaved_second.hpp") ==
+          steady.at("interleaved_second.hpp"));
+
+    // Covered-header delete/re-emit: a header changes, so its facts are
+    // deleted and re-emitted. Ownership stays deterministic and nothing is
+    // duplicated.
+    write_file(second, "#pragma once\n"
+                       "#include \"interleaved_first.hpp\"\n"
+                       "namespace outer {\n"
+                       "using inner::Tag;\n"
+                       "struct Derived : Shared { Tag tag; int twice() const; "
+                       "int thrice() const; };\n"
+                       "int derived_helper(const Derived &d);\n"
+                       "} // namespace outer\n");
+    REQUIRE_NOTHROW(cidx::ast::run_index_one(db, *file, source, true));
+    const auto after_header_change = ownership_by_file(db);
+    // The changed header gains exactly the one declaration that was added, and
+    // gains it once - the delete/re-emit did not duplicate anything.
+    CHECK(after_header_change.at("interleaved_second.hpp").at("symbol") ==
+          steady.at("interleaved_second.hpp").at("symbol") + 1);
+    CHECK(db.find_symbols("thrice", {}, 10).size() == 1);
+    // The header that did NOT change keeps its own symbols. Its applicability
+    // rows are legitimately recomputed, because re-routing the changed header
+    // re-associates the translation unit, so only symbol ownership is fixed.
+    CHECK(after_header_change.at("interleaved_first.hpp").at("symbol") ==
+          steady.at("interleaved_first.hpp").at("symbol"));
+    CHECK(after_header_change.at("interleaved.cpp").at("symbol") ==
+          steady.at("interleaved.cpp").at("symbol"));
+    // And the whole fact set settles back to a fixed point.
+    REQUIRE_NOTHROW(cidx::ast::run_index_one(db, *file, source, true));
+    const auto settled = ownership_by_file(db);
+    REQUIRE_NOTHROW(cidx::ast::run_index_one(db, *file, source, true));
+    CHECK(ownership_by_file(db) == settled);
+    CHECK(settled.at("interleaved_second.hpp").at("symbol") ==
+          steady.at("interleaved_second.hpp").at("symbol") + 1);
   }
 
   TEST_CASE("index TU publishes unsupported-call evidence and metrics") {

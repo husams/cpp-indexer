@@ -144,6 +144,15 @@ enum class IndexFailurePoint : std::uint8_t {
   adapter,
   partial_transform,
   commit,
+  // The seven phase boundaries of the fused two-root pipeline, in publication
+  // order. See cidx::storage::FailurePoint for what each one brackets.
+  symbol_capture_complete,
+  declaration_replay,
+  definition_replay,
+  statement_body_replay,
+  namespace_replay,
+  header_association,
+  main_association,
 };
 
 IndexOneOutcome

@@ -18,11 +18,25 @@ namespace cidx::storage {
 
 class SqliteReadDb;
 
+// Deterministic fault points a test may ask the pipeline to raise. The first
+// four are storage-adapter boundaries. The remaining seven are the phase
+// boundaries of the fused two-root translation-unit pipeline, in publication
+// order: the routed symbol traversal has to be complete before any relation,
+// definition or namespace fact exists, statement bodies replay outside the root
+// traversals, and header association precedes main association. Injecting at
+// any of them must roll the whole translation unit back.
 enum class FailurePoint : std::uint8_t {
   begin,
   adapter,
   partial_transform,
   commit,
+  symbol_capture_complete,
+  declaration_replay,
+  definition_replay,
+  statement_body_replay,
+  namespace_replay,
+  header_association,
+  main_association,
 };
 
 class FailureInjector {
