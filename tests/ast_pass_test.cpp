@@ -1531,8 +1531,12 @@ TEST_CASE("mutation and aggregation operations touch only keyed buckets") {
     }
     ids.push_back(id.value());
   }
+  emit_test_symbol(
+      recorder,
+      fact_partition("main.cpp", "workspace", "debug", "src/main.cpp"),
+      "usr-50", "usr-50", 8);
   recorder.update_display_name(ids[50], "updated");
-  CHECK(recorder.counters().records_touched.at("update_display_name") == 1);
+  CHECK(recorder.counters().records_touched.at("update_display_name") == 2);
 
   for (int i = 0; i < 10; ++i) {
     EdgeRecord edge;
@@ -1569,6 +1573,10 @@ TEST_CASE("mutation and aggregation operations touch only keyed buckets") {
   replacement.name = "only";
   recorder.replace_parameters(ids[0], {replacement});
   CHECK(recorder.counters().records_touched.at("replace_parameters") == 3);
+  ParameterRecord unrelated;
+  unrelated.position = 0;
+  unrelated.name = "unrelated";
+  recorder.replace_parameters(ids[1], {unrelated});
 
   TypeNodeRecord type_node;
   type_node.type_key = "builtin:int";
@@ -1599,6 +1607,24 @@ TEST_CASE("mutation and aggregation operations touch only keyed buckets") {
         10);
 
   const FactBatch batch = recorder.canonical_batch();
-  REQUIRE(batch.records().parameters.size() == 1);
-  CHECK(batch.records().parameters.front().parameter.name == "only");
+  REQUIRE(batch.records().parameters.size() == 2);
+  const auto target_parameter = std::ranges::find_if(
+      batch.records().parameters, [&](const ParameterFactRecord &parameter) {
+        return parameter.owner_id == ids[0];
+      });
+  REQUIRE(target_parameter != batch.records().parameters.end());
+  CHECK(target_parameter->parameter.name == "only");
+  const auto updated_symbol = std::ranges::find_if(
+      batch.records().symbols,
+      [](const SymbolRecord &symbol) { return symbol.usr == "usr-50"; });
+  REQUIRE(updated_symbol != batch.records().symbols.end());
+  CHECK(updated_symbol->display_name == "updated");
+  REQUIRE(batch.records().relations.size() == 70);
+  const auto aggregated_edge = std::ranges::find_if(
+      batch.records().relations, [&](const EdgeRecord &edge) {
+        return edge.src_id == ids[0] && edge.dst_id == ids[1] && edge.kind == 1;
+      });
+  REQUIRE(aggregated_edge != batch.records().relations.end());
+  CHECK(aggregated_edge->count == 2);
+  CHECK(batch.records().definition_edges.size() == 10);
 }

@@ -12,6 +12,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -121,13 +122,31 @@ struct FactBatchOperationCounters {
 [[nodiscard]] auto stable_symbol_record_key(const SymbolRecord &record)
     -> std::string;
 
-// Complexity contract (T-052): emit/index operations are amortised O(1),
-// exact and source-less symbol lookup are O(1) plus result selection,
-// candidate and qualified-name/kind lookup are O(1)+output, display updates
-// touch only records for one symbol handle, duplicate-edge aggregation is
-// O(1), parameter replacement is O(new owner parameters), and body snapshots
-// touch only the requested source bucket. Whole-batch sort/dedup/materialize is
-// restricted to snapshot/canonical_batch and is O(n log n)+output.
+// Authoritative FactBatchRecorder operation audit (T-052).
+// `k` is the selected keyed bucket, `r` is returned/copied output, and `n` is
+// the whole batch. Hash-table bounds are amortised; ordered maps are O(log n).
+//
+// Operation(s)                                      Bound
+// set_partition, set_current_file_id, identity set  O(log n)
+// emit(SymbolRecord), mint_symbol                   O(log n)
+// emit(all other record/intent overloads)           amortised O(1)
+// lookup_symbol_id                                  O(log k)
+// file_id_for_path, lookup_display_name, counters   O(log n)
+// type_arg_candidates, symbol_ids_by_qual_name_kind O(r)
+// add_edge, ensure_edge                             O(log n)
+// add_edge_site/call_arg/template_param/template_arg amortised O(1)
+// intern_type_node                                  O(log n)
+// add_type_edge, add_symbol_type, add_def_edge      amortised O(1)
+// replace_parameters                               O(log n + input)
+// get_or_create_definition                         O(log n)
+// body_edge_count                                  O(1)
+// copy_body_edges_to_def_edge                      O(k)
+// delete_edges/definitions_for_file                O(log n)
+// update_display_name                              O(log n + k)
+// snapshot, batch, canonical_batch                 O(n log n)
+//
+// No emission scans a fact-family vector. Work above logarithmic is confined
+// to caller input, returned output, one natural-key bucket, or finalization.
 class FactBatchRecorder final : public SymbolFactEmitter,
                                 public StatementFactPorts,
                                 public DeclarationPassPorts,
@@ -289,10 +308,16 @@ private:
       symbol_positions_by_id_;
   std::unordered_map<std::string, std::vector<TypeArgCandidate>>
       candidates_by_name_;
+  std::unordered_map<std::string, std::unordered_set<std::string>>
+      candidate_keys_by_name_;
   std::unordered_map<std::string, std::vector<TypeArgCandidate>>
       candidates_by_qualified_name_;
+  std::unordered_map<std::string, std::unordered_set<std::string>>
+      candidate_keys_by_qualified_name_;
   std::unordered_map<std::string, std::vector<std::int64_t>>
       symbol_ids_by_qualified_name_kind_;
+  std::unordered_map<std::string, std::unordered_set<std::int64_t>>
+      symbol_id_keys_by_qualified_name_kind_;
   std::unordered_map<std::string, std::size_t> edge_positions_by_key_;
   std::unordered_map<std::int64_t, std::vector<std::size_t>>
       body_edge_positions_by_source_;

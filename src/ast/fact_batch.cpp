@@ -229,11 +229,9 @@ auto canonical_symbol_order(
   return result;
 }
 
-template <typename T>
-void append_unique(std::vector<T> &values, const T &value) {
-  if (std::ranges::find(values, value) == values.end()) {
-    values.push_back(value);
-  }
+auto candidate_key(const TypeArgCandidate &candidate) -> std::string {
+  return std::to_string(candidate.id) + ':' + candidate.kind_name + ':' +
+         (candidate.is_instantiation ? "1" : "0");
 }
 
 auto file_identity_from_path(std::string_view value,
@@ -427,12 +425,23 @@ void FactBatchRecorder::emit(const SymbolRecord &symbol) {
   }
   const TypeArgCandidate candidate{
       .id = id, .kind_name = kind, .is_instantiation = symbol.is_instantiation};
-  append_unique(candidates_by_name_[symbol.spelling], candidate);
+  if (candidate_keys_by_name_[symbol.spelling]
+          .insert(candidate_key(candidate))
+          .second) {
+    candidates_by_name_[symbol.spelling].push_back(candidate);
+  }
   if (symbol.qual_name) {
-    append_unique(candidates_by_qualified_name_[*symbol.qual_name], candidate);
-    append_unique(symbol_ids_by_qualified_name_kind_[name_kind_key(
-                      *symbol.qual_name, kind)],
-                  id);
+    if (candidate_keys_by_qualified_name_[*symbol.qual_name]
+            .insert(candidate_key(candidate))
+            .second) {
+      candidates_by_qualified_name_[*symbol.qual_name].push_back(candidate);
+    }
+    const std::string qualified_kind = name_kind_key(*symbol.qual_name, kind);
+    if (symbol_id_keys_by_qualified_name_kind_[qualified_kind]
+            .insert(id)
+            .second) {
+      symbol_ids_by_qualified_name_kind_[qualified_kind].push_back(id);
+    }
   }
 
   const std::uint64_t emission = next_emission_order_++;
