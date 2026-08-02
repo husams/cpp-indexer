@@ -86,7 +86,8 @@ No per-emission operation scans a growing whole-batch vector. The isolated
 `benchmarks/indexing/fact_batch_scaling.py` gate runs at 1,000, 2,000, 4,000,
 and 8,000 symbols with at least five trials, reports emission separately from
 canonicalization, fits a quadratic component, and rejects it above the recorded
-tolerance.
+tolerance. Reports retain per-size medians; the fitted gate uses per-size
+minima so a one-sided scheduling outlier cannot dominate the four-point fit.
 Each trial also compares a canonical-output fingerprint across repeated builds
 of the same mixed-partition workload.
 

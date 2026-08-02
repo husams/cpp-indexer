@@ -82,13 +82,17 @@ def main() -> int:
             )
         emission_median = float(statistics.median(trials))
         canonical_median = float(statistics.median(canonical))
-        samples.append((size, emission_median))
+        emission_minimum = float(min(trials))
+        canonical_minimum = float(min(canonical))
+        samples.append((size, emission_minimum))
         rows.append(
             {
                 "symbols": size,
                 "trials": args.trials,
                 "emission_median_ns": emission_median,
+                "emission_min_ns": emission_minimum,
                 "canonicalization_median_ns": canonical_median,
+                "canonicalization_min_ns": canonical_minimum,
                 "canonical_fingerprint": next(iter(fingerprints)),
             }
         )
@@ -107,6 +111,7 @@ def main() -> int:
             "linear_ns_per_symbol": linear,
             "quadratic_ns_per_symbol2": quadratic,
             "quadratic_fraction_at_max": quadratic_fraction,
+            "timing_statistic": "minimum",
             "tolerance": args.quadratic_tolerance,
         },
         "passed": passed,

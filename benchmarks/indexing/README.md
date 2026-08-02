@@ -26,10 +26,13 @@ database. Keep reports under `/tmp` (or another disposable directory).
 ## FactBatch emitter scaling gate
 
 `fact_batch_scaling.py` isolates S-072 emitter operations from final
-canonicalization, records at least five trials at 1,000, 2,000, 4,000, and
-8,000 symbols, and rejects a fitted quadratic contribution above the declared
-tolerance. It consumes `build/tests/fact_batch_complexity_test` and writes its
-machine-readable report to an explicit path:
+canonicalization and reports both the median and minimum of at least five
+trials at 1,000, 2,000, 4,000, and 8,000 symbols. The quadratic fit uses
+per-size minima, the standard robust statistic for one-sided timing noise, and
+rejects a fitted quadratic contribution above the declared tolerance. Medians
+remain the reader-facing performance measurements. It consumes
+`build/tests/fact_batch_complexity_test` and writes its machine-readable report
+to an explicit path:
 
 ```sh
 python3 benchmarks/indexing/fact_batch_scaling.py \
