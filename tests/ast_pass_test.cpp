@@ -488,16 +488,20 @@ TEST_CASE("fact batch keeps conflicting symbol semantics lossless") {
   CHECK(batch.records().symbol_order[1].apply_order.first_seen == 1);
 
   FactBatchRecorder reversed("declaration-pass");
-  reversed.emit(SymbolRecord{.file = "test.cpp",
-                             .usr = "usr-conflict",
-                             .spelling = "f",
-                             .kind = 2,
-                             .display_name = std::string("f(int)")});
-  reversed.emit(SymbolRecord{.file = "test.cpp",
-                             .usr = "usr-conflict",
-                             .spelling = "f",
-                             .kind = 1,
-                             .display_name = std::string("f()")});
+  SymbolRecord second_conflict;
+  second_conflict.file = "test.cpp";
+  second_conflict.usr = "usr-conflict";
+  second_conflict.spelling = "f";
+  second_conflict.kind = 2;
+  second_conflict.display_name = "f(int)";
+  reversed.emit(second_conflict);
+  SymbolRecord first_conflict;
+  first_conflict.file = "test.cpp";
+  first_conflict.usr = "usr-conflict";
+  first_conflict.spelling = "f";
+  first_conflict.kind = 1;
+  first_conflict.display_name = "f()";
+  reversed.emit(first_conflict);
   const FactBatch reversed_batch = reversed.canonical_batch();
   REQUIRE(reversed_batch.records().symbol_order.size() == 2);
   CHECK(reversed_batch.records().symbol_order[0].record_key.find("f(int)") !=
@@ -557,6 +561,53 @@ TEST_CASE("focused ports are independently usable by a fact recorder") {
   CHECK(recorder.batch().records().evidence.front().construct == "CallExpr");
 }
 
+TEST_CASE("frontend pass providers preserve contracts on batch-backed ports") {
+  clear_frontend_pass_providers();
+  register_frontend_pass_provider([](FrontendSession &session,
+                                     ExtractionPassRegistry &registry,
+                                     IndexingPlan &plan) {
+    if (session.declaration_ports == nullptr) {
+      throw std::logic_error("provider requires declaration ports");
+    }
+    auto descriptor = valid_descriptor("extension.batch");
+    descriptor.required_capabilities.clear();
+    descriptor.consumed_fact_families = {"symbols"};
+    descriptor.produced_fact_families = {"symbols"};
+    descriptor.completeness = FactCompleteness::partial;
+    descriptor.trust = FactTrust::inferred;
+    registry.register_pass(descriptor, [](PassExecutionContext &context) {
+      MintRequest request;
+      request.usr = "provider-usr";
+      request.spelling = "provider";
+      request.kind_name = "function";
+      static_cast<void>(
+          context.session->declaration_ports->mint_symbol(request));
+    });
+    plan.add(descriptor.id);
+  });
+
+  FactBatchRecorder recorder("provider-test");
+  FrontendSession session;
+  session.declaration_ports = &recorder;
+  ExtractionPassRegistry registry;
+  IndexingPlan plan;
+  for (const FrontendPassProvider &provider : frontend_pass_providers()) {
+    provider(session, registry, plan);
+  }
+  const PassExecutionReport report = registry.run(plan, &session);
+  clear_frontend_pass_providers();
+
+  REQUIRE(report.passes.size() == 1);
+  CHECK(report.passes.front().descriptor.produced_fact_families ==
+        std::vector<std::string>{"symbols"});
+  CHECK(report.passes.front().descriptor.completeness ==
+        FactCompleteness::partial);
+  CHECK(report.passes.front().descriptor.trust == FactTrust::inferred);
+  CHECK(report.passes.front().metrics.emitted_facts == 1);
+  CHECK(report.passes.front().metrics.whole_tu_traversals == 0);
+  CHECK(recorder.canonical_batch().records().symbols.size() == 1);
+}
+
 // --- T-109: bounded routed root-event replay contract ------------------------
 //
 // The four routed root passes each run their own whole-TU RecursiveASTVisitor.
@@ -593,16 +644,6 @@ std::string basename_of(const std::string &path) {
   const auto slash = path.find_last_of('/');
   return slash == std::string::npos ? path : path.substr(slash + 1);
 }
-
-class BatchSymbolEmitter final : public SymbolEmitter {
-public:
-  explicit BatchSymbolEmitter(FactBatchRecorder &recorder)
-      : recorder_(recorder) {}
-  void emit(const SymbolRecord &symbol) override { recorder_.emit(symbol); }
-
-private:
-  FactBatchRecorder &recorder_;
-};
 
 // A deterministic, EMISSION-ORDERED rendering of everything the four root
 // passes produced. Canonicalization is deliberately skipped: the point is to
@@ -672,7 +713,7 @@ void run_root_visitors(clang::ASTContext &context, FactBatchRecorder &sink,
                        const RoutedRootEventBuffer *replay) {
   clang::Decl *root = context.getTranslationUnitDecl();
 
-  BatchSymbolEmitter symbol_sink(sink);
+  SymbolEmitterAdapter symbol_sink(sink);
   SymbolVisitor symbols(context, symbol_sink, {}, nullptr,
                         [](const std::string &path) {
                           return route_fixture_file(path).has_value();

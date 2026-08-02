@@ -22,4 +22,17 @@ public:
   ~SymbolEmitter() override = default;
 };
 
+// Focused compatibility adapter for production visitors that still accept the
+// historical SymbolEmitter name while publishing to a bounded fact emitter.
+class SymbolEmitterAdapter final : public SymbolEmitter {
+public:
+  explicit SymbolEmitterAdapter(SymbolFactEmitter &emitter)
+      : emitter_(emitter) {}
+
+  void emit(const SymbolRecord &symbol) override { emitter_.emit(symbol); }
+
+private:
+  SymbolFactEmitter &emitter_;
+};
+
 } // namespace cidx::ast
