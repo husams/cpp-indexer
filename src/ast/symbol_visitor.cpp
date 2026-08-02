@@ -4,6 +4,7 @@
 #include "ast/location.hpp"
 #include "ast/pass_registry.hpp"
 #include "ast/symbol_emitter.hpp"
+#include "profile/index_profile.hpp"
 
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
@@ -66,6 +67,22 @@ SymbolVisitor::SymbolVisitor(clang::ASTContext &context, SymbolEmitter &out,
       extractor_(context), out_(out), target_file_(std::move(target_file)),
       metrics_(metrics), router_(std::move(router)) {}
 
+SymbolVisitor::~SymbolVisitor() {
+  profile::add_timing(profile::kRootSymbolRoutingTiming, routing_seconds_);
+  profile::add_timing(profile::kRootSymbolIdentityTiming, identity_seconds_);
+}
+
+const std::string &SymbolVisitor::normalized_file(clang::SourceLocation loc) {
+  const clang::SourceLocation expansion = source_manager_.getExpansionLoc(loc);
+  const unsigned file = source_manager_.getFileID(expansion).getHashValue();
+  const auto cached = normalized_files_.find(file);
+  if (cached != normalized_files_.end()) {
+    return cached->second;
+  }
+  return normalized_files_.emplace(file, expansion_loc(context_, loc).file)
+      .first->second;
+}
+
 bool SymbolVisitor::VisitDecl(clang::Decl * /*decl*/) {
   if (metrics_ != nullptr) {
     metrics_->note_visited();
@@ -79,20 +96,23 @@ bool SymbolVisitor::should_emit(const clang::NamedDecl *decl) {
   // (_ignore_system_headers). In per-file mode only the target file's decls
   // are emitted (for_file_cursors' pruning); in whole-TU mode records carry
   // their file and the parity merger replays cidx's ordering.
-  const clang::SourceLocation loc =
-      source_manager_.getExpansionLoc(decl->getLocation());
-  if (loc.isInvalid() || source_manager_.isInSystemHeader(loc)) {
-    return false;
-  }
-  if (source_manager_.getFilename(loc).empty()) {
-    return false;
-  }
-  const std::string file = expansion_loc(context_, decl->getLocation()).file;
-  if (!target_file_.empty() && file != target_file_) {
-    return false;
-  }
-  if (router_ && !router_(file)) {
-    return false;
+  {
+    const profile::ScopedAccumulator routing(routing_seconds_);
+    const clang::SourceLocation loc =
+        source_manager_.getExpansionLoc(decl->getLocation());
+    if (loc.isInvalid() || source_manager_.isInSystemHeader(loc)) {
+      return false;
+    }
+    if (source_manager_.getFilename(loc).empty()) {
+      return false;
+    }
+    const std::string &file = normalized_file(decl->getLocation());
+    if (!target_file_.empty() && file != target_file_) {
+      return false;
+    }
+    if (router_ && !router_(file)) {
+      return false;
+    }
   }
 
   if (is_template_pattern(decl)) {
@@ -114,7 +134,12 @@ bool SymbolVisitor::VisitNamedDecl(clang::NamedDecl *decl) {
   if (!should_emit(decl)) {
     return true;
   }
-  if (std::optional<SymbolRecord> sym = extractor_.extract(decl)) {
+  std::optional<SymbolRecord> sym;
+  {
+    const profile::ScopedAccumulator identity(identity_seconds_);
+    sym = extractor_.extract(decl);
+  }
+  if (sym) {
     out_.emit(*sym);
   }
   return true;
@@ -138,22 +163,30 @@ bool SymbolVisitor::VisitNamedDecl(clang::NamedDecl *decl) {
 // the next remaining point. The definition-directive's own location is not
 // recoverable from the AST when an earlier point exists.
 void SymbolVisitor::emit_explicit_instantiation(const clang::FunctionDecl *fd) {
-  const clang::SourceLocation poi = fd->getPointOfInstantiation();
-  if (poi.isInvalid() ||
-      source_manager_.isInSystemHeader(source_manager_.getExpansionLoc(poi))) {
-    return;
+  ExpansionLoc loc;
+  {
+    const profile::ScopedAccumulator routing(routing_seconds_);
+    const clang::SourceLocation poi = fd->getPointOfInstantiation();
+    if (poi.isInvalid() || source_manager_.isInSystemHeader(
+                               source_manager_.getExpansionLoc(poi))) {
+      return;
+    }
+    loc = expansion_loc(context_, poi);
+    if (loc.file.empty()) {
+      return;
+    }
+    if (!target_file_.empty() && loc.file != target_file_) {
+      return;
+    }
+    if (router_ && !router_(loc.file)) {
+      return;
+    }
   }
-  const ExpansionLoc loc = expansion_loc(context_, poi);
-  if (loc.file.empty()) {
-    return;
+  std::optional<SymbolRecord> sym;
+  {
+    const profile::ScopedAccumulator identity(identity_seconds_);
+    sym = extractor_.extract(fd);
   }
-  if (!target_file_.empty() && loc.file != target_file_) {
-    return;
-  }
-  if (router_ && !router_(loc.file)) {
-    return;
-  }
-  std::optional<SymbolRecord> sym = extractor_.extract(fd);
   if (!sym) {
     return;
   }

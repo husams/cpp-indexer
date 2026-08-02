@@ -32,6 +32,12 @@ constexpr auto kTimingNames = std::to_array<std::string_view>({
     "clang_tool_inclusive",
     "clang_front_end",
     "root_symbols",
+    // Disjoint root_symbols subcomponents; walk is the published remainder.
+    "root_symbols.walk",
+    "root_symbols.routing",
+    "root_symbols.identity",
+    "root_symbols.sink",
+    "root_symbols.persistence",
     "root_declarations",
     "root_definitions",
     "root_namespaces",
@@ -236,7 +242,25 @@ void write_translation_unit(std::ostream &output,
          << "    }";
 }
 
+// root_symbols.walk is the part of the routed symbol pass that is neither
+// routing, identity extraction, sink bookkeeping, nor persistence — i.e. the
+// RecursiveASTVisitor descent itself. Deriving it once here, from spans that
+// are disjoint by construction, is what keeps the subcomponents from double
+// counting: no measured span is attributed to two names.
+void derive_root_symbol_walk(Session::Impl &impl) {
+  const auto measured = [&impl](std::string_view name) {
+    const auto timing = impl.timings.find(name);
+    return timing == impl.timings.end() ? 0.0 : timing->second;
+  };
+  const double attributed =
+      measured(kRootSymbolRoutingTiming) + measured(kRootSymbolIdentityTiming) +
+      measured(kRootSymbolSinkTiming) + measured(kRootSymbolPersistenceTiming);
+  impl.timings[std::string(kRootSymbolWalkTiming)] =
+      std::max(0.0, measured("root_symbols") - attributed);
+}
+
 void write_profile(Session::Impl &impl) {
+  derive_root_symbol_walk(impl);
   std::ofstream output(impl.output_path, std::ios::trunc);
   if (!output) {
     throw CidxError("cannot write profiling output " + impl.output_path);
@@ -276,6 +300,11 @@ void write_profile(Session::Impl &impl) {
          << impl.counters["registered_root_traversal_budget"] << ",\n"
          << "      \"observed_root_traversals\": "
          << impl.counters["observed_root_traversals"] << ",\n"
+         << "      \"root_symbols_identity_persisted\": "
+         << impl.counters[std::string(kRootSymbolIdentityPersistCounter)]
+         << ",\n"
+         << "      \"root_symbols_identity_reused\": "
+         << impl.counters[std::string(kRootSymbolIdentityReuseCounter)] << ",\n"
          << "      \"facts_by_family\": ";
   write_fact_family_map(output, impl.fact_families, 6);
   output << ",\n      \"sqlite\": {\n"

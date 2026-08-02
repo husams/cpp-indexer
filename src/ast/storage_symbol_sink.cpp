@@ -6,6 +6,7 @@
 
 #include "ast/kind_map.hpp"
 #include "ast/pass_registry.hpp"
+#include "profile/index_profile.hpp"
 
 #include "storage/ports.hpp"
 
@@ -221,11 +222,46 @@ make_symbol(const SymbolRecord &s, int64_t current_file_id,
 StorageSymbolSink::StorageSymbolSink(cidx::storage::AstStoragePorts &ports)
     : ports_(ports) {}
 
+StorageSymbolSink::~StorageSymbolSink() {
+  // sink_seconds_ brackets the whole of emit(), persistence_seconds_ only the
+  // storage calls inside it. Publishing the difference keeps the two spans
+  // disjoint, so the derived root_symbols.walk remainder stays honest.
+  profile::add_timing(profile::kRootSymbolSinkTiming,
+                      sink_seconds_ - persistence_seconds_);
+  profile::add_timing(profile::kRootSymbolPersistenceTiming,
+                      persistence_seconds_);
+  // The duplicate-suppression view of the same pass: how many records this
+  // sink had to persist, and how many it answered from an identity it had
+  // already written.
+  profile::add_counter(profile::kRootSymbolIdentityPersistCounter,
+                       identity_persists_);
+  profile::add_counter(profile::kRootSymbolIdentityReuseCounter,
+                       identity_reuses_);
+}
+
+int64_t StorageSymbolSink::semantic_universe_for_current_file() {
+  const auto cached = semantic_universe_by_file_.find(current_file_id_);
+  if (cached != semantic_universe_by_file_.end()) {
+    return cached->second;
+  }
+  const profile::ScopedAccumulator persistence(persistence_seconds_);
+  const int64_t universe =
+      ports_.workspace.semantic_universe_for_file_id(current_file_id_);
+  semantic_universe_by_file_.emplace(current_file_id_, universe);
+  return universe;
+}
+
+// Everything the cache asserts is scoped to one file of one pass: the identity
+// key carries the source file, and a reset means the rows it describes may no
+// longer be there.
+void StorageSymbolSink::clear_persisted_identities() {
+  persisted_identity_cache_.clear();
+  persisted_identity_hashes_.clear();
+}
+
 void StorageSymbolSink::set_current_file_id(int64_t file_id) {
   current_file_id_ = file_id;
-  resolved_identity_cache_.clear();
-  resolved_identity_cache_hashes_.clear();
-  resolved_cache_active_ = false;
+  clear_persisted_identities();
 }
 
 void StorageSymbolSink::set_identity_translation_unit_config_id(
@@ -236,9 +272,7 @@ void StorageSymbolSink::set_identity_translation_unit_config_id(
                 config_id, translation_unit_file_id)
           : ports_.workspace.portable_translation_unit_identity_for_config(
                 config_id);
-  resolved_identity_cache_.clear();
-  resolved_identity_cache_hashes_.clear();
-  resolved_cache_active_ = false;
+  clear_persisted_identities();
 }
 
 void StorageSymbolSink::set_identity_translation_unit_file_id(int64_t file_id) {
@@ -248,23 +282,18 @@ void StorageSymbolSink::set_identity_translation_unit_file_id(int64_t file_id) {
                 ports_.workspace.portable_translation_unit_identity_for_file(
                     file_id))
           : std::nullopt;
-  resolved_identity_cache_.clear();
-  resolved_identity_cache_hashes_.clear();
-  resolved_cache_active_ = false;
+  clear_persisted_identities();
 }
 
 void StorageSymbolSink::reset_counters() {
   buckets_.erase(current_file_id_);
-  resolved_identity_cache_.clear();
-  resolved_identity_cache_hashes_.clear();
-  resolved_cache_active_ = false;
+  clear_persisted_identities();
 }
 
 void StorageSymbolSink::reset_all_counters() {
   buckets_.clear();
-  resolved_identity_cache_.clear();
-  resolved_identity_cache_hashes_.clear();
-  resolved_cache_active_ = false;
+  clear_persisted_identities();
+  semantic_universe_by_file_.clear();
 }
 
 void StorageSymbolSink::set_metrics(PassMetrics *metrics) {
@@ -292,6 +321,7 @@ StorageSymbolSink::symbol_ids(int64_t file_id) const {
 }
 
 void StorageSymbolSink::emit(const SymbolRecord &s) {
+  const profile::ScopedAccumulator emission(sink_seconds_);
   const char *kind_name = cidx_kind_name_from_int(s.kind);
   if (kind_name == nullptr) {
     return;
@@ -299,50 +329,80 @@ void StorageSymbolSink::emit(const SymbolRecord &s) {
   FileBucket &bucket = buckets_[current_file_id_];
   note_symbol_attempt(metrics_, s);
 
-  const cidx::Symbol sym = make_symbol(
-      s, current_file_id_,
-      ports_.workspace.semantic_universe_for_file_id(current_file_id_),
-      identity_translation_unit_);
+  const cidx::Symbol sym =
+      make_symbol(s, current_file_id_, semantic_universe_for_current_file(),
+                  identity_translation_unit_);
   std::string identity_key;
-  const bool resolved_identity =
-      resolved_cache_active_ &&
-      resolved_identity_cache_hashes_.contains(identity_cache_hash(sym)) &&
-      [&] {
+  const bool reuses_persisted_identity =
+      persisted_identity_hashes_.contains(identity_cache_hash(sym)) && [&] {
         identity_key = identity_cache_key(sym);
-        const auto cached = resolved_identity_cache_.find(identity_key);
-        if (cached == resolved_identity_cache_.end()) {
+        const auto cached = persisted_identity_cache_.find(identity_key);
+        if (cached == persisted_identity_cache_.end()) {
           return false;
         }
         return cached_symbol_is_semantic_noop(cached->second.persisted, sym);
       }();
-  if (resolved_identity) {
-    auto &cached = resolved_identity_cache_.at(identity_key);
-    const int64_t symbol_id = cached.symbol_id;
-    ports_.symbols_write.add_decl_site(symbol_id, sym);
-    apply_decl_site_to_cache(cached.persisted, sym);
-    record_symbol_id(bucket.symbol_ids, bucket.symbol_id_set, symbol_id);
-    note_symbol_persisted(metrics_, s);
-    return;
-  }
-  const std::optional<cidx::Symbol> existing =
-      lookup_existing_symbol(ports_, sym, resolved_identity);
-  const int64_t symbol_id = ports_.symbols_write.add_symbol(sym);
-  record_symbol_id(bucket.symbol_ids, bucket.symbol_id_set, symbol_id);
-  if (!(resolved_identity || (existing && existing->resolved))) {
-    ++bucket.stored; // AstIndexer::store: true = counted as "stored"
-  }
-  if (existing && existing->resolved && existing->is_definition) {
-    resolved_cache_active_ = true;
-    identity_key = identity_cache_key(sym);
-    cidx::Symbol persisted = merged_symbol_state(*existing, sym);
-    persisted.id = symbol_id;
-    resolved_identity_cache_.insert_or_assign(
-        std::move(identity_key),
-        CachedResolvedIdentity{.symbol_id = symbol_id,
-                               .persisted = std::move(persisted)});
-    resolved_identity_cache_hashes_.insert(identity_cache_hash(sym));
+  if (reuses_persisted_identity) {
+    record_cached_decl_site(sym, identity_key, bucket);
+  } else {
+    persist_symbol(sym, std::move(identity_key), bucket);
   }
   note_symbol_persisted(metrics_, s);
+}
+
+// This identity was already persisted by this pass and the incoming record
+// would upsert nothing but its declaration site, so the lookup and the symbol
+// upsert are provably redundant: only the declaration site is recorded.
+//
+// The pass is the only writer of these rows while it runs, so the cached state
+// is what a fresh lookup would return; `stored` is therefore accounted from the
+// cached `resolved` flag exactly as the persisting path accounts for it from
+// the looked-up row.
+void StorageSymbolSink::record_cached_decl_site(const cidx::Symbol &sym,
+                                                const std::string &identity_key,
+                                                FileBucket &bucket) {
+  auto &cached = persisted_identity_cache_.at(identity_key);
+  const int64_t symbol_id = cached.symbol_id;
+  {
+    const profile::ScopedAccumulator persistence(persistence_seconds_);
+    ports_.symbols_write.add_decl_site(symbol_id, sym);
+  }
+  apply_decl_site_to_cache(cached.persisted, sym);
+  record_symbol_id(bucket.symbol_ids, bucket.symbol_id_set, symbol_id);
+  if (!cached.persisted.resolved) {
+    ++bucket.stored; // AstIndexer::store: true = counted as "stored"
+  }
+  ++identity_reuses_;
+}
+
+void StorageSymbolSink::persist_symbol(const cidx::Symbol &sym,
+                                       std::string identity_key,
+                                       FileBucket &bucket) {
+  std::optional<cidx::Symbol> existing;
+  int64_t symbol_id = 0;
+  {
+    const profile::ScopedAccumulator persistence(persistence_seconds_);
+    existing = lookup_existing_symbol(ports_, sym, /*resolved_identity=*/false);
+    symbol_id = ports_.symbols_write.add_symbol(sym);
+  }
+  ++identity_persists_;
+  record_symbol_id(bucket.symbol_ids, bucket.symbol_id_set, symbol_id);
+  if (!(existing && existing->resolved)) {
+    ++bucket.stored; // AstIndexer::store: true = counted as "stored"
+  }
+  // Remember what is now in the row so a later record with the same identity
+  // can be answered without asking storage again. `existing` is the row this
+  // upsert merged into; without one the row is exactly `sym`.
+  if (identity_key.empty()) {
+    identity_key = identity_cache_key(sym);
+  }
+  cidx::Symbol persisted = existing ? merged_symbol_state(*existing, sym) : sym;
+  persisted.id = symbol_id;
+  persisted_identity_cache_.insert_or_assign(
+      std::move(identity_key),
+      CachedResolvedIdentity{.symbol_id = symbol_id,
+                             .persisted = std::move(persisted)});
+  persisted_identity_hashes_.insert(identity_cache_hash(sym));
 }
 
 } // namespace cidx::ast

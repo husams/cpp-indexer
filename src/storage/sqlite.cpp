@@ -89,21 +89,40 @@ SqliteStmt::SqliteStmt(sqlite3 *db, std::string_view sql) : db_(db) {
   }
 }
 
-SqliteStmt::~SqliteStmt() { sqlite3_finalize(stmt_); }
+SqliteStmt::SqliteStmt(SqliteDb &owner, std::string sql,
+                       sqlite3_stmt *compiled) noexcept
+    : db_(owner.db_), stmt_(compiled), owner_(&owner), sql_(std::move(sql)) {}
+
+SqliteStmt::~SqliteStmt() {
+  if (owner_ != nullptr && stmt_ != nullptr) {
+    owner_->release_statement(sql_, stmt_);
+    return;
+  }
+  sqlite3_finalize(stmt_);
+}
 
 SqliteStmt::SqliteStmt(SqliteStmt &&other) noexcept
-    : db_(other.db_), stmt_(other.stmt_) {
+    : db_(other.db_), stmt_(other.stmt_), owner_(other.owner_),
+      sql_(std::move(other.sql_)) {
   other.db_ = nullptr;
   other.stmt_ = nullptr;
+  other.owner_ = nullptr;
 }
 
 SqliteStmt &SqliteStmt::operator=(SqliteStmt &&other) noexcept {
   if (this != &other) {
-    sqlite3_finalize(stmt_);
+    if (owner_ != nullptr && stmt_ != nullptr) {
+      owner_->release_statement(sql_, stmt_);
+    } else {
+      sqlite3_finalize(stmt_);
+    }
     db_ = other.db_;
     stmt_ = other.stmt_;
+    owner_ = other.owner_;
+    sql_ = std::move(other.sql_);
     other.db_ = nullptr;
     other.stmt_ = nullptr;
+    other.owner_ = nullptr;
   }
   return *this;
 }
@@ -267,9 +286,82 @@ SqliteDb::SqliteDb(const std::string &path, bool read_only,
   }
 }
 
-SqliteDb::~SqliteDb() { sqlite3_close(db_); }
+SqliteDb::~SqliteDb() {
+  finalize_cached_statements();
+  sqlite3_close(db_);
+}
 
-SqliteStmt SqliteDb::prepare(std::string_view sql) { return {db_, sql}; }
+// A pooled statement is reset and unbound before it is handed out again, so a
+// reused statement starts in exactly the state a freshly compiled one would.
+sqlite3_stmt *SqliteDb::take_cached_statement(std::string_view sql) {
+  const auto pooled = statement_cache_.find(sql);
+  if (pooled == statement_cache_.end() || pooled->second.empty()) {
+    return nullptr;
+  }
+  sqlite3_stmt *stmt = pooled->second.back();
+  pooled->second.pop_back();
+  sqlite3_reset(stmt);
+  sqlite3_clear_bindings(stmt);
+  return stmt;
+}
+
+void SqliteDb::release_statement(const std::string &sql,
+                                 sqlite3_stmt *stmt) noexcept {
+  // sqlite3_reset reports the last step's error, which the caller has already
+  // seen; the reset itself still releases the statement's locks and rows.
+  sqlite3_reset(stmt);
+  sqlite3_clear_bindings(stmt);
+  // Pooling is an optimization: if the pool is full, or growing it would
+  // allocate and cannot, finalize the statement and carry on.
+  bool pooled_for_reuse = false;
+  try {
+    const auto pooled = statement_cache_.find(sql);
+    if (pooled != statement_cache_.end()) {
+      if (pooled->second.size() < kMaxCachedStatementsPerText) {
+        pooled->second.push_back(stmt);
+        pooled_for_reuse = true;
+      }
+    } else if (statement_cache_.size() < kMaxCachedStatementTexts) {
+      statement_cache_.emplace(sql, std::vector<sqlite3_stmt *>{stmt});
+      pooled_for_reuse = true;
+    }
+  } catch (...) {
+    pooled_for_reuse = false;
+  }
+  if (!pooled_for_reuse) {
+    sqlite3_finalize(stmt);
+  }
+}
+
+void SqliteDb::finalize_cached_statements() noexcept {
+  for (auto &[sql, pooled] : statement_cache_) {
+    for (sqlite3_stmt *stmt : pooled) {
+      sqlite3_finalize(stmt);
+    }
+  }
+  statement_cache_.clear();
+}
+
+SqliteStmt SqliteDb::prepare(std::string_view sql) {
+  const bool profiling = profile::active();
+  const auto started = profiling ? std::chrono::steady_clock::now()
+                                 : std::chrono::steady_clock::time_point{};
+  sqlite3_stmt *stmt = take_cached_statement(sql);
+  if (stmt == nullptr) {
+    const int rc = sqlite3_prepare_v2(
+        db_, sql.data(), static_cast<int>(sql.size()), &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+      throw_db_error(db_, "prepare failed for \"" + std::string(sql) + "\"");
+    }
+  }
+  if (profiling) {
+    profile::note_sqlite_prepare(std::chrono::duration<double>(
+                                     std::chrono::steady_clock::now() - started)
+                                     .count(),
+                                 sql.size());
+  }
+  return {*this, std::string(sql), stmt};
+}
 
 void SqliteDb::exec(std::string_view sql_script) {
   char *err = nullptr;

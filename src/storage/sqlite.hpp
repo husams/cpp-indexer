@@ -1,8 +1,16 @@
 // Thin RAII wrappers over the SQLite3 C API (design D3).
-// Smallest possible layer under storage/storage.hpp: no ORM, no statement
-// cache. The C API autocommits each statement unless an explicit BEGIN is
-// open, which is exactly the Python `_commit()`-unless-in-txn pattern once
-// Transaction (storage.hpp) issues BEGIN/COMMIT/ROLLBACK.
+// Smallest possible layer under storage/storage.hpp: no ORM, and no rewriting
+// or generation of SQL — every statement is still the caller's own text. The C
+// API autocommits each statement unless an explicit BEGIN is open, which is
+// exactly the Python `_commit()`-unless-in-txn pattern once Transaction
+// (storage.hpp) issues BEGIN/COMMIT/ROLLBACK.
+//
+// prepare() keeps a bounded per-connection pool of compiled statements keyed by
+// the SQL text, because the indexing write path re-issues the same handful of
+// long statements once per row and sqlite3_prepare_v2 recompiles the text every
+// time. Reuse is transparent: a pooled statement is reset and unbound before it
+// is handed out, it is removed from the pool while in use, and the pool is
+// finalized before the connection closes.
 //
 // SQLite floor: >= 3.35 (RETURNING). Probed on the gcc-index-test box
 // (192.168.1.115, Ubuntu 24.04: libsqlite3 3.45.1) — design §4.2: the
@@ -12,9 +20,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <variant>
+#include <vector>
 
 struct sqlite3;
 struct sqlite3_stmt;
@@ -50,11 +61,19 @@ struct SqliteProfileSettings {
 [[nodiscard]] auto sqlite_profile_name(SqliteProfile profile)
     -> std::string_view;
 
+class SqliteDb;
+
 // Owns a sqlite3_stmt*. Movable, non-copyable. Bind indexes are 1-based,
 // column indexes 0-based (SQLite convention).
+//
+// When it was handed out by SqliteDb::prepare it returns the compiled
+// statement to that connection's bounded reuse pool instead of finalizing it,
+// so a hot loop compiles its SQL once instead of once per row. The SQL text
+// itself is never rewritten.
 class SqliteStmt {
 public:
   SqliteStmt(sqlite3 *db, std::string_view sql); // throws StorageError
+  SqliteStmt(SqliteDb &owner, std::string sql, sqlite3_stmt *compiled) noexcept;
   ~SqliteStmt();
   SqliteStmt(SqliteStmt &&other) noexcept;
   SqliteStmt &operator=(SqliteStmt &&other) noexcept;
@@ -84,6 +103,8 @@ public:
 private:
   sqlite3 *db_ = nullptr;
   sqlite3_stmt *stmt_ = nullptr;
+  SqliteDb *owner_ = nullptr; // non-null: return to the pool, do not finalize
+  std::string sql_;
 };
 
 // Owns a sqlite3*. Non-copyable, non-movable (Storage holds it by value).
@@ -122,8 +143,33 @@ public:
   sqlite3 *raw() { return db_; }
 
 private:
+  friend class SqliteStmt;
+
+  // Bounded reuse pool. A statement is removed from it while in use, so two
+  // live SqliteStmt objects for the same SQL never share one sqlite3_stmt.
+  // Both bounds are per connection: at most kMaxCachedStatementTexts distinct
+  // SQL texts, each holding at most kMaxCachedStatementsPerText statements.
+  static constexpr std::size_t kMaxCachedStatementTexts = 256;
+  static constexpr std::size_t kMaxCachedStatementsPerText = 4;
+
+  auto take_cached_statement(std::string_view sql) -> sqlite3_stmt *;
+  void release_statement(const std::string &sql, sqlite3_stmt *stmt) noexcept;
+  void finalize_cached_statements() noexcept;
+
+  // Transparent so a std::string_view SQL text is looked up without first
+  // materialising a std::string key on every prepare().
+  struct SqlTextHash {
+    using is_transparent = void;
+    auto operator()(std::string_view sql) const noexcept -> std::size_t {
+      return std::hash<std::string_view>{}(sql);
+    }
+  };
+
   sqlite3 *db_ = nullptr;
   SqliteProfile profile_ = SqliteProfile::indexing;
+  std::unordered_map<std::string, std::vector<sqlite3_stmt *>, SqlTextHash,
+                     std::equal_to<>>
+      statement_cache_;
 };
 
 } // namespace cidx

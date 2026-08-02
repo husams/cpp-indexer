@@ -711,16 +711,30 @@ private:
     visitor.TraverseDecl(tu_);
   }
 
+  // Header planning is the routed symbol pass's file-routing work: it decides
+  // which files this translation unit owns and normalizes their paths and
+  // content hashes. Its storage calls are attributed to the persistence span
+  // instead, so the two root_symbols subcomponents stay disjoint.
   void prepare_routed_files() {
-    pending_headers_ = plan_owned_headers();
-    routed_file_ids_.clear();
-    routed_file_ids_.emplace(state_.path, state_.rec->id);
-    for (const PendingHeader &header : pending_headers_) {
-      routed_file_ids_.emplace(header.path, header.file_id);
-      if (header.covered_by_current_config) {
-        db_.delete_symbols_for_file(header.file_id);
+    double routing_seconds = 0.0;
+    double persistence_seconds = 0.0;
+    {
+      const profile::ScopedAccumulator routing(routing_seconds);
+      pending_headers_ = plan_owned_headers(persistence_seconds);
+      routed_file_ids_.clear();
+      routed_file_ids_.emplace(state_.path, state_.rec->id);
+      for (const PendingHeader &header : pending_headers_) {
+        routed_file_ids_.emplace(header.path, header.file_id);
+        if (header.covered_by_current_config) {
+          const profile::ScopedAccumulator persistence(persistence_seconds);
+          db_.delete_symbols_for_file(header.file_id);
+        }
       }
     }
+    profile::add_timing(profile::kRootSymbolRoutingTiming,
+                        routing_seconds - persistence_seconds);
+    profile::add_timing(profile::kRootSymbolPersistenceTiming,
+                        persistence_seconds);
   }
 
   bool route_symbol_file(const std::string &path) {
@@ -860,7 +874,27 @@ private:
 
   // Classify every recorded inclusion (system / unowned / already indexed)
   // and mint file rows for the headers this TU must index.
-  std::vector<PendingHeader> plan_owned_headers() {
+  auto read_header_file_row(const std::string &abs, double &persistence_seconds)
+      -> std::optional<cidx::File> {
+    const profile::ScopedAccumulator persistence(persistence_seconds);
+    return db_.get_file(abs);
+  }
+
+  // The already-indexed test, answered from the row this loop already read.
+  // Storage::is_file_indexed(path, nullopt, md5) is exactly this predicate over
+  // a fresh get_file(path); nothing writes that row between the two reads, so
+  // repeating the query per header per translation unit is pure cost.
+  static bool
+  header_is_already_indexed(const std::optional<cidx::File> &existing,
+                            const std::optional<std::string> &current_md5,
+                            bool covered_by_current_config) {
+    if (!covered_by_current_config || !existing || !existing->indexed) {
+      return false;
+    }
+    return !current_md5 || existing->md5 == current_md5;
+  }
+
+  std::vector<PendingHeader> plan_owned_headers(double &persistence_seconds) {
     std::vector<PendingHeader> plan;
     std::unordered_set<std::string> seen;
     cidx::HeaderStats &counts = state_.out->headers;
@@ -884,19 +918,21 @@ private:
       }
       ++state_.session_metrics->file_hash_reads;
       const std::optional<std::string> current_md5 = cidx::md5_of(abs);
-      const auto existing = db_.get_file(abs);
+      const std::optional<cidx::File> existing =
+          read_header_file_row(abs, persistence_seconds);
       const bool covered_by_current_config =
           header_covered_by_current_config(existing);
       const std::optional<std::string> parsed_md5 =
           parsed_file_md5(context_.getSourceManager(), abs);
       if (current_md5 && parsed_md5 && current_md5 == parsed_md5 &&
-          db_.is_file_indexed(abs, std::nullopt, current_md5) &&
-          covered_by_current_config) {
+          header_is_already_indexed(existing, current_md5,
+                                    covered_by_current_config)) {
         ++counts.already;
         continue;
       }
       ++state_.session_metrics->file_stat_reads;
       const std::optional<double> mtime = file_mtime(abs);
+      const profile::ScopedAccumulator persistence(persistence_seconds);
       const int64_t hid =
           db_.add_file_path(abs, mtime, parsed_md5, state_.rec->compile_options,
                             state_.rec->driver);
@@ -1655,8 +1691,7 @@ bool prepare_front_end_reuse(const TranslationUnitConfig &resolved,
     out.error = *diagnostic;
     out.failed_flags = args;
     if (profiling) {
-      profile::add_counter("front_end_reuse.build_declared_pch_diagnostics",
-                           1);
+      profile::add_counter("front_end_reuse.build_declared_pch_diagnostics", 1);
     }
     return false;
   }
