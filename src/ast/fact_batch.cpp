@@ -27,6 +27,16 @@ auto optional_text(const std::optional<T> &value) -> std::string {
 
 auto bool_text(bool value) -> std::string { return value ? "1" : "0"; }
 
+auto portable_file_key(const PortableFileIdentity &file) -> std::string {
+  return file.component_path + '\x1f' + file.directory_path + '\x1f' +
+         file.file_name;
+}
+
+auto optional_file_key(const std::optional<PortableFileIdentity> &file)
+    -> std::string {
+  return file ? portable_file_key(*file) : "-";
+}
+
 template <typename Routed, typename T, typename Key, typename Memberships>
 void append_records(const std::vector<Routed> &source,
                     std::vector<T> &destination, FactFamily family, Key key,
@@ -756,9 +766,7 @@ void FactBatchRecorder::set_current_file_id(std::int64_t file_id) {
 }
 
 void FactBatchRecorder::set_identity_translation_unit_config_id(
-    std::int64_t config_id, std::int64_t translation_unit_file_id) {
-  current_partition_.configuration.normalized_configuration =
-      "transient-config:" + std::to_string(config_id);
+    std::int64_t /*config_id*/, std::int64_t translation_unit_file_id) {
   if (translation_unit_file_id >= 0) {
     current_partition_.configuration.translation_unit =
         partition_for_file_handle(translation_unit_file_id)
@@ -880,17 +888,26 @@ void FactBatchRecorder::append_auxiliary_records(FactBatch::Data &data,
       includes_, data.records.includes, FactFamily::includes,
       [](const IncludeDirectiveRecord &record) {
         return record.partition.stable_string() + ':' +
+               portable_file_key(record.source) + ':' +
+               optional_file_key(record.destination) + ':' +
                record.destination_path + ':' + record.spelling + ':' +
+               std::to_string(std::to_underlying(record.directive)) + ':' +
                std::to_string(record.line) + ':' + std::to_string(record.col) +
                ':' + std::to_string(record.begin_offset) + ':' +
-               std::to_string(record.end_offset);
+               std::to_string(record.end_offset) + ':' +
+               record.conditional_fingerprint + ':' +
+               bool_text(record.is_angled) + bool_text(record.resolved) +
+               bool_text(record.is_system) + bool_text(record.guarded);
       },
       memberships, canonical);
   append_records(
       macros_, data.records.macros, FactFamily::macros,
       [](const MacroUseRecord &record) {
-        return record.partition.stable_string() + ':' + record.definition_path +
-               ':' + record.name + ':' + std::to_string(record.count);
+        return record.partition.stable_string() + ':' +
+               portable_file_key(record.source) + ':' +
+               optional_file_key(record.definition) + ':' +
+               record.definition_path + ':' + record.name + ':' +
+               std::to_string(record.count);
       },
       memberships, canonical);
   append_records(
@@ -898,7 +915,8 @@ void FactBatchRecorder::append_auxiliary_records(FactBatch::Data &data,
       [](const DiagnosticFactRecord &record) {
         return record.partition.stable_string() + ':' +
                std::to_string(static_cast<unsigned>(record.severity)) + ':' +
-               record.spelling + ':' + optional_text(record.line) + ':' +
+               record.spelling + ':' + optional_file_key(record.location_file) +
+               ':' + optional_text(record.line) + ':' +
                optional_text(record.col);
       },
       memberships, canonical);
@@ -921,7 +939,8 @@ void FactBatchRecorder::append_auxiliary_records(FactBatch::Data &data,
       [](const LifecycleCleanupIntent &record) {
         return record.partition.stable_string() + ':' +
                std::to_string(static_cast<unsigned>(record.kind)) + ':' +
-               record.target.portable_path() + ':' + record.prior_generation;
+               record.target.portable_path() + ':' +
+               record.prior_generation.token;
       },
       memberships, canonical);
   append_records(
@@ -931,7 +950,7 @@ void FactBatchRecorder::append_auxiliary_records(FactBatch::Data &data,
                record.file.portable_path() + ':' +
                std::to_string(static_cast<unsigned>(record.role)) + ':' +
                std::to_string(static_cast<unsigned>(record.state)) + ':' +
-               optional_text(record.reason) + ':' + record.generation;
+               optional_text(record.reason) + ':' + record.generation.token;
       },
       memberships, canonical);
 }

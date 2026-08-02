@@ -1181,8 +1181,13 @@ TEST_CASE("finalized batches expose every fact family through const records") {
   static_assert(
       std::is_same_v<decltype(std::declval<const FactBatch &>().records()),
                      const FactRecords &>);
-  const FactPartitionKey partition =
+  FactPartitionKey partition =
       fact_partition("main.cpp", "workspace", "debug", "src/main.cpp");
+  partition.configuration.content.driver = "/usr/bin/clang++";
+  partition.configuration.content.working_dir = "/repo";
+  partition.configuration.content.arguments = {"-std=c++23", "-Iinclude"};
+  partition.configuration.content.lang_mode = "c++";
+  partition.configuration.content.resource_dir = "/opt/llvm/resource";
   SymbolNaturalKey symbol;
   symbol.partition = partition;
   symbol.usr = "usr-main";
@@ -1194,21 +1199,43 @@ TEST_CASE("finalized batches expose every fact family through const records") {
   declaration.partition = partition;
   declaration.line = 1;
   declaration.col = 1;
+  declaration.end_line = 1;
+  declaration.end_col = 9;
+  declaration.is_definition = true;
   recorder.emit(declaration);
   IncludeDirectiveRecord include;
   include.partition = partition;
   include.source = partition.file;
+  include.destination = PortableFileIdentity{.component_path = "/repo",
+                                             .directory_path = "include",
+                                             .file_name = "a.hpp"};
   include.destination_path = "include/a.hpp";
-  include.spelling = "a.hpp";
+  include.spelling = "<a.hpp>";
+  include.directive = IncludeDirectiveKind::include_next;
   include.line = 1;
   include.col = 1;
+  include.begin_offset = 4;
+  include.end_offset = 19;
+  include.conditional_fingerprint = "defined(FEATURE)";
+  include.is_angled = true;
+  include.resolved = true;
+  include.is_system = false;
+  include.guarded = true;
   recorder.emit(include);
   MacroUseRecord macro;
   macro.partition = partition;
   macro.source = partition.file;
+  macro.definition = include.destination;
   macro.definition_path = "include/a.hpp";
   macro.name = "A";
+  macro.count = 3;
   recorder.emit(macro);
+  MacroUseRecord foreign_macro = macro;
+  foreign_macro.definition.reset();
+  foreign_macro.definition_path = "/usr/include/foreign.h";
+  foreign_macro.name = "FOREIGN";
+  foreign_macro.count = 1;
+  recorder.emit(foreign_macro);
   DiagnosticFactRecord diagnostic;
   diagnostic.partition = partition;
   diagnostic.severity = DiagnosticSeverity::warning;
@@ -1221,25 +1248,135 @@ TEST_CASE("finalized batches expose every fact family through const records") {
   cleanup.partition = partition;
   cleanup.kind = LifecycleCleanupKind::relations;
   cleanup.target = partition.file;
-  cleanup.prior_generation = "previous";
+  cleanup.prior_generation.token = "previous-content-digest";
   recorder.emit(cleanup);
   ApplicabilityOwnershipRecord applicability;
   applicability.partition = partition;
   applicability.file = partition.file;
   applicability.role = ApplicabilityRole::translation_unit;
   applicability.state = ApplicabilityState::registered;
-  applicability.generation = "current";
+  applicability.reason = "owned translation unit";
+  applicability.generation.token = "current-content-digest";
   recorder.emit(applicability);
 
   const FactBatch batch = recorder.canonical_batch();
   const FactRecords &records = batch.records();
   CHECK(records.symbols.size() == 1);
-  CHECK(records.declaration_sites.size() == 1);
-  CHECK(records.includes.size() == 1);
-  CHECK(records.macros.size() == 1);
-  CHECK(records.diagnostics.size() == 1);
-  CHECK(records.lifecycle_cleanup.size() == 1);
-  CHECK(records.applicability.size() == 1);
+  REQUIRE(records.declaration_sites.size() == 1);
+  const DeclarationSiteRecord &published_declaration =
+      records.declaration_sites.front();
+  CHECK(published_declaration.symbol == declaration.symbol);
+  CHECK(published_declaration.partition == partition);
+  CHECK(published_declaration.line == 1);
+  CHECK(published_declaration.col == 1);
+  CHECK(published_declaration.end_line == 1);
+  CHECK(published_declaration.end_col == 9);
+  CHECK(published_declaration.is_definition);
+
+  REQUIRE(records.includes.size() == 1);
+  const IncludeDirectiveRecord &published_include = records.includes.front();
+  CHECK(published_include.partition == partition);
+  CHECK(published_include.source == partition.file);
+  CHECK(published_include.destination == include.destination);
+  CHECK(published_include.destination_path == "include/a.hpp");
+  CHECK(published_include.spelling == "<a.hpp>");
+  CHECK(published_include.directive == IncludeDirectiveKind::include_next);
+  CHECK(published_include.line == 1);
+  CHECK(published_include.col == 1);
+  CHECK(published_include.begin_offset == 4);
+  CHECK(published_include.end_offset == 19);
+  CHECK(published_include.conditional_fingerprint == "defined(FEATURE)");
+  CHECK(published_include.is_angled);
+  CHECK(published_include.resolved);
+  CHECK(!published_include.is_system);
+  CHECK(published_include.guarded);
+
+  REQUIRE(records.macros.size() == 2);
+  const auto published_macro =
+      std::ranges::find_if(records.macros, [](const MacroUseRecord &record) {
+        return record.name == "A";
+      });
+  const auto published_foreign_macro =
+      std::ranges::find_if(records.macros, [](const MacroUseRecord &record) {
+        return record.name == "FOREIGN";
+      });
+  REQUIRE(published_macro != records.macros.end());
+  REQUIRE(published_foreign_macro != records.macros.end());
+  CHECK(published_macro->partition == partition);
+  CHECK(published_macro->source == partition.file);
+  CHECK(published_macro->definition == include.destination);
+  CHECK(published_macro->definition_path == "include/a.hpp");
+  CHECK(published_macro->count == 3);
+  CHECK(!published_foreign_macro->definition);
+  CHECK(published_foreign_macro->definition_path == "/usr/include/foreign.h");
+  CHECK(published_foreign_macro->count == 1);
+
+  REQUIRE(records.diagnostics.size() == 1);
+  const DiagnosticFactRecord &published_diagnostic =
+      records.diagnostics.front();
+  CHECK(published_diagnostic.partition == partition);
+  CHECK(published_diagnostic.severity == DiagnosticSeverity::warning);
+  CHECK(published_diagnostic.spelling == "warning");
+  CHECK(published_diagnostic.location_file == partition.file);
+  CHECK(published_diagnostic.line == 2);
+  CHECK(published_diagnostic.col == 3);
+
+  REQUIRE(records.lifecycle_cleanup.size() == 1);
+  const LifecycleCleanupIntent &published_cleanup =
+      records.lifecycle_cleanup.front();
+  CHECK(published_cleanup.partition == partition);
+  CHECK(published_cleanup.kind == LifecycleCleanupKind::relations);
+  CHECK(published_cleanup.target == partition.file);
+  CHECK(published_cleanup.prior_generation.token == "previous-content-digest");
+
+  REQUIRE(records.applicability.size() == 1);
+  const ApplicabilityOwnershipRecord &published_applicability =
+      records.applicability.front();
+  CHECK(published_applicability.partition == partition);
+  CHECK(published_applicability.file == partition.file);
+  CHECK(published_applicability.role == ApplicabilityRole::translation_unit);
+  CHECK(published_applicability.state == ApplicabilityState::registered);
+  CHECK(published_applicability.reason == "owned translation unit");
+  CHECK(published_applicability.generation.token == "current-content-digest");
+
+  CHECK(std::to_underlying(IncludeDirectiveKind::include) == 1);
+  CHECK(std::to_underlying(IncludeDirectiveKind::include_next) == 2);
+  CHECK(std::to_underlying(IncludeDirectiveKind::import) == 3);
+  CHECK(std::to_underlying(IncludeDirectiveKind::include_macros) == 4);
+  CHECK(std::to_underlying(IncludeDirectiveKind::unknown) == 5);
+}
+
+TEST_CASE("portable configuration identity ignores database row ids") {
+  FactPartitionKey partition =
+      fact_partition("main.cpp", "workspace", "config-digest", "src/main.cpp");
+  partition.configuration.content.driver = "/usr/bin/clang++";
+  partition.configuration.content.working_dir = "/repo";
+  partition.configuration.content.arguments = {"-std=c++23", "-Iinclude"};
+  partition.configuration.content.lang_mode = "c++";
+  partition.configuration.content.resource_dir = "/opt/llvm/resource";
+
+  FactBatchRecorder first("configuration-id-first");
+  first.set_partition(partition, 41);
+  first.set_identity_translation_unit_config_id(7, 41);
+  emit_test_symbol(first, partition, "portable-config-usr", "first", 8);
+
+  FactBatchRecorder second("configuration-id-second");
+  second.set_partition(partition, 41);
+  second.set_identity_translation_unit_config_id(9001, 41);
+  emit_test_symbol(second, partition, "portable-config-usr", "first", 8);
+
+  const FactBatch first_batch = first.canonical_batch();
+  const FactBatch second_batch = second.canonical_batch();
+  REQUIRE(first_batch.partitions().size() == 1);
+  REQUIRE(second_batch.partitions().size() == 1);
+  CHECK(first_batch.partitions().front().key ==
+        second_batch.partitions().front().key);
+  CHECK(first_batch.partitions().front().key.configuration.content ==
+        partition.configuration.content);
+
+  FactPartitionKey changed = partition;
+  changed.configuration.content.driver = "/opt/other/clang++";
+  CHECK(changed.stable_string() != partition.stable_string());
 }
 
 TEST_CASE("symbol lookup indexes honor source name qualification and kind") {

@@ -15,8 +15,15 @@ Every fact belongs to one `FactPartitionKey`:
 ```text
 portable file = (component.path, directory.path, file.name)
 configuration = (semantic universe, translation unit,
-                 normalized configuration, identity source)
+                 normalized configuration digest, identity source,
+                 reconstructable IncludeConfig content)
 ```
+
+Configuration content carries the optional driver, working directory,
+ordered arguments, language mode, and resource directory. The normalized
+configuration is a portable digest of that content. Database configuration row
+IDs are deliberately ignored by the batch recorder and never enter a partition
+key.
 
 `SymbolNaturalKey` follows storage linkage semantics: externally linked
 symbols coalesce by semantic universe and USR, while internal and no-linkage
@@ -59,6 +66,13 @@ The immutable record set explicitly covers:
 - presentation intents;
 - declarative lifecycle-cleanup intents; and
 - applicability ownership.
+
+Macro uses retain both a typed portable definition-file identity when the
+definition is component-owned and the original raw definition path for
+diagnostics and foreign definitions. Include directive enum values intentionally
+match the persisted `1..5` representation. Lifecycle and applicability
+generation keys are opaque content-derived tokens owned by S-099; they are not
+storage-local generation counters.
 
 Lifecycle and applicability entries are declarations only. Extraction cannot
 execute cleanup or mutate authoritative storage.

@@ -58,6 +58,14 @@ auto FactPartitionKey::stable_string() const -> std::string {
   append_field(result, configuration.translation_unit);
   append_field(result, configuration.normalized_configuration);
   append_field(result, configuration.identity_source);
+  append_optional(result, configuration.content.driver);
+  append_optional(result, configuration.content.working_dir);
+  result += std::to_string(configuration.content.arguments.size()) + ';';
+  for (const std::string &argument : configuration.content.arguments) {
+    append_field(result, argument);
+  }
+  append_optional(result, configuration.content.lang_mode);
+  append_optional(result, configuration.content.resource_dir);
   return result;
 }
 

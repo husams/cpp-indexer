@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 namespace cidx::ast {
 
@@ -21,11 +22,24 @@ struct PortableFileIdentity {
   auto operator<=>(const PortableFileIdentity &) const = default;
 };
 
+struct PortableConfigurationContent {
+  std::optional<std::string> driver;
+  std::optional<std::string> working_dir;
+  std::vector<std::string> arguments;
+  std::optional<std::string> lang_mode;
+  std::optional<std::string> resource_dir;
+
+  auto operator<=>(const PortableConfigurationContent &) const = default;
+};
+
 struct ConfigurationIdentity {
   std::string semantic_universe;
   std::string translation_unit;
   std::string normalized_configuration;
   std::string identity_source;
+  // Reconstructable IncludeConfig inputs. normalized_configuration is their
+  // portable digest; neither field may contain a database configuration id.
+  PortableConfigurationContent content{};
 
   auto operator<=>(const ConfigurationIdentity &) const = default;
 };

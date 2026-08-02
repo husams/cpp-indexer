@@ -59,11 +59,11 @@ struct DeclarationSiteRecord {
 };
 
 enum class IncludeDirectiveKind : std::uint8_t {
-  include,
-  include_next,
-  import,
-  include_macros,
-  unknown,
+  include = 1,
+  include_next = 2,
+  import = 3,
+  include_macros = 4,
+  unknown = 5,
 };
 
 struct IncludeDirectiveRecord {
@@ -87,6 +87,7 @@ struct IncludeDirectiveRecord {
 struct MacroUseRecord {
   FactPartitionKey partition;
   PortableFileIdentity source;
+  std::optional<PortableFileIdentity> definition;
   std::string definition_path;
   std::string name;
   std::int64_t count = 1;
@@ -116,11 +117,19 @@ enum class LifecycleCleanupKind : std::uint8_t {
   applicability,
 };
 
+struct FactGenerationKey {
+  // Opaque, content-derived generation identity. S-099 owns its production;
+  // storage-local applicability generation counters are not valid tokens.
+  std::string token;
+
+  auto operator<=>(const FactGenerationKey &) const = default;
+};
+
 struct LifecycleCleanupIntent {
   FactPartitionKey partition;
   LifecycleCleanupKind kind = LifecycleCleanupKind::relations;
   PortableFileIdentity target;
-  std::string prior_generation;
+  FactGenerationKey prior_generation;
 };
 
 enum class ApplicabilityRole : std::uint8_t {
@@ -142,7 +151,7 @@ struct ApplicabilityOwnershipRecord {
   ApplicabilityRole role = ApplicabilityRole::header;
   ApplicabilityState state = ApplicabilityState::registered;
   std::optional<std::string> reason;
-  std::string generation;
+  FactGenerationKey generation;
 };
 
 struct TypeEdgeRecord {
