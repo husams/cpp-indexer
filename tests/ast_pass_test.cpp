@@ -1442,16 +1442,27 @@ TEST_CASE("symbol lookup indexes honor source name qualification and kind") {
   recorder.set_partition(partition);
   emit_test_symbol(recorder, partition, "usr-function", "item", 8, "ns::item");
   emit_test_symbol(recorder, partition, "usr-class", "item", 4, "ns::item");
+  emit_test_symbol(recorder, partition, "usr-function", "item", 8, "ns::item");
+  for (int index = 0; index < 128; ++index) {
+    emit_test_symbol(recorder, partition, "noise-usr-" + std::to_string(index),
+                     "noise-" + std::to_string(index), 8,
+                     "ns::noise_" + std::to_string(index));
+  }
 
   const auto by_source =
       recorder.lookup_symbol_id("usr-function", "src/main.cpp");
   const auto source_less = recorder.lookup_symbol_id("usr-function");
   REQUIRE(by_source);
   CHECK(source_less == by_source);
-  const auto candidates = recorder.type_arg_candidates("ns::item", true);
-  REQUIRE(candidates.size() == 2);
-  CHECK(candidates[0].kind_name == "function");
-  CHECK(candidates[1].kind_name == "class");
+  const auto qualified_candidates =
+      recorder.type_arg_candidates("ns::item", true);
+  const auto unqualified_candidates =
+      recorder.type_arg_candidates("item", false);
+  REQUIRE(qualified_candidates.size() == 2);
+  REQUIRE(unqualified_candidates.size() == 2);
+  CHECK(qualified_candidates[0].kind_name == "function");
+  CHECK(qualified_candidates[1].kind_name == "class");
+  CHECK(unqualified_candidates == qualified_candidates);
   const auto functions =
       recorder.symbol_ids_by_qual_name_kind("ns::item", "function");
   const auto classes =
@@ -1459,8 +1470,48 @@ TEST_CASE("symbol lookup indexes honor source name qualification and kind") {
   REQUIRE(functions.size() == 1);
   REQUIRE(classes.size() == 1);
   CHECK(functions.front() != classes.front());
+  CHECK(recorder.counters().records_touched.at("lookup_symbol_exact") == 1);
   CHECK(recorder.counters().records_touched.at("lookup_symbol_sourceless") ==
         1);
+  CHECK(recorder.counters().records_touched.at("type_arg_candidates") == 4);
+  CHECK(recorder.counters().records_touched.at(
+            "symbol_ids_by_qual_name_kind") == 2);
+}
+
+TEST_CASE("symbol lookup indexes isolate universes and repeated declarations") {
+  FactBatchRecorder recorder("lookup-scope-test");
+  const FactPartitionKey workspace =
+      fact_partition("main.cpp", "workspace", "debug", "src/main.cpp");
+  const FactPartitionKey dependency = fact_partition(
+      "main.cpp", "dependency", "debug", "dependency/src/main.cpp");
+
+  recorder.set_partition(workspace);
+  emit_test_symbol(recorder, workspace, "shared-usr", "shared", 8,
+                   "ns::shared");
+  const auto workspace_exact =
+      recorder.lookup_symbol_id("shared-usr", "src/main.cpp");
+  const auto workspace_sourceless = recorder.lookup_symbol_id("shared-usr");
+  REQUIRE(workspace_exact);
+  CHECK(workspace_sourceless == workspace_exact);
+
+  emit_test_symbol(recorder, workspace, "shared-usr", "shared", 8,
+                   "ns::shared");
+  CHECK(recorder.lookup_symbol_id("shared-usr", "src/main.cpp") ==
+        workspace_exact);
+  CHECK(recorder.type_arg_candidates("ns::shared", true).size() == 1);
+
+  recorder.set_partition(dependency);
+  emit_test_symbol(recorder, dependency, "shared-usr", "shared", 8,
+                   "ns::shared");
+  const auto dependency_exact =
+      recorder.lookup_symbol_id("shared-usr", "dependency/src/main.cpp");
+  const auto dependency_sourceless = recorder.lookup_symbol_id("shared-usr");
+  REQUIRE(dependency_exact);
+  CHECK(dependency_sourceless == dependency_exact);
+  CHECK(dependency_exact != workspace_exact);
+
+  recorder.set_partition(workspace);
+  CHECK(recorder.lookup_symbol_id("shared-usr") == workspace_exact);
 }
 
 TEST_CASE("mutation and aggregation operations touch only keyed buckets") {
