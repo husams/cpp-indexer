@@ -223,6 +223,12 @@ auto canonical_symbol_order(
   result.reserve(emissions.size());
   for (auto &group : ordered_groups) {
     auto &entries = group.second;
+    for (std::size_t index = 0; index < entries.size(); ++index) {
+      entries[index].first_seen = index;
+      entries[index].last_seen = index;
+      entries[index].apply_order.first_seen = index;
+      entries[index].apply_order.conflict_ordinal = index;
+    }
     result.insert(result.end(), std::make_move_iterator(entries.begin()),
                   std::make_move_iterator(entries.end()));
   }

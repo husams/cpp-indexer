@@ -444,6 +444,22 @@ TEST_CASE("fact batch IDs and references are traversal-order independent") {
         reverse.records().relations[0].src_id);
   CHECK(forward.records().relations[0].dst_id ==
         reverse.records().relations[0].dst_id);
+  CHECK(forward.symbol_keys() == reverse.symbol_keys());
+  CHECK(forward.relation_keys() == reverse.relation_keys());
+  REQUIRE(forward.records().symbol_order.size() == 2);
+  REQUIRE(forward.records().symbol_order.size() ==
+          reverse.records().symbol_order.size());
+  for (std::size_t index = 0; index < forward.records().symbol_order.size();
+       ++index) {
+    const SymbolEmissionMetadata &left = forward.records().symbol_order[index];
+    const SymbolEmissionMetadata &right = reverse.records().symbol_order[index];
+    CHECK(left.symbol == right.symbol);
+    CHECK(left.apply_order == right.apply_order);
+    CHECK(left.record_key == right.record_key);
+    CHECK(left.first_seen == right.first_seen);
+    CHECK(left.last_seen == right.last_seen);
+    CHECK(left.first_seen == 0);
+  }
 }
 
 TEST_CASE("fact batch keeps conflicting symbol semantics lossless") {
@@ -463,6 +479,33 @@ TEST_CASE("fact batch keeps conflicting symbol semantics lossless") {
   CHECK(batch.records().symbols[0].kind != batch.records().symbols[1].kind);
   CHECK(batch.records().symbols[0].display_name !=
         batch.records().symbols[1].display_name);
+  REQUIRE(batch.records().symbol_order.size() == 2);
+  CHECK(batch.records().symbol_order[0].record_key.find("f()") !=
+        std::string::npos);
+  CHECK(batch.records().symbol_order[1].record_key.find("f(int)") !=
+        std::string::npos);
+  CHECK(batch.records().symbol_order[0].apply_order.first_seen == 0);
+  CHECK(batch.records().symbol_order[1].apply_order.first_seen == 1);
+
+  FactBatchRecorder reversed("declaration-pass");
+  reversed.emit(SymbolRecord{.file = "test.cpp",
+                             .usr = "usr-conflict",
+                             .spelling = "f",
+                             .kind = 2,
+                             .display_name = std::string("f(int)")});
+  reversed.emit(SymbolRecord{.file = "test.cpp",
+                             .usr = "usr-conflict",
+                             .spelling = "f",
+                             .kind = 1,
+                             .display_name = std::string("f()")});
+  const FactBatch reversed_batch = reversed.canonical_batch();
+  REQUIRE(reversed_batch.records().symbol_order.size() == 2);
+  CHECK(reversed_batch.records().symbol_order[0].record_key.find("f(int)") !=
+        std::string::npos);
+  CHECK(reversed_batch.records().symbol_order[1].record_key.find("f()") !=
+        std::string::npos);
+  CHECK(reversed_batch.records().symbol_order[0].apply_order.first_seen == 0);
+  CHECK(reversed_batch.records().symbol_order[1].apply_order.first_seen == 1);
 }
 
 TEST_CASE("statement pass records calls from a parsed AST") {
