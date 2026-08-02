@@ -84,6 +84,77 @@ the generated 1,000-TU corpora and contaminate later trials.
 Copy only a completed summary into
 `benchmarks/indexing/PRODUCTION_REPORT_TEMPLATE.md`.
 
+## S-098 routed root-fusion decision harness
+
+S-098 changes traversal topology, so the decision it is judged by is frozen
+first. `production.py` carries the pure summary and threshold logic; nothing in
+it measures, indexes, or writes.
+
+The frozen S-071 evidence lives in two places:
+
+- the authoritative full report, attached to backlog task S-098 as
+  `s071-authoritative-r3.json`. It is resolved **through the backlog artifact
+  registry** (`backlog artifact list S-098` plus the store's own artifact root
+  from `backlog where`) — never from an assumed repository `.backlog` path and
+  never from a disposable `/tmp` copy. `load_baseline_artifact()` verifies the
+  recorded size and SHA-256 and re-derives the summary before trusting it,
+  refusing with `baseline-artifact-missing` or `baseline-artifact-mismatch`
+  instead of synthesizing evidence;
+- `fixtures/s071-header-heavy-baseline.json`, a compact checked-in excerpt with
+  the same field shape, so the unit tests run offline with no store, binary,
+  corpus, or database.
+
+Treat that evidence as immutable control: `header-heavy:8:forward`, three
+trials, median cold wall 0.255732833 s, fixed routed-root sum 0.040611 s
+(`root_symbols` 0.031091 s plus 0.009520 s across `root_declarations`,
+`root_definitions`, and `root_namespaces`), and 32 registered / 32 observed
+whole-TU visits in every trial.
+
+`fusion_decision(report)` derives the per-trial and median fixed routed-root
+time from those four timings and returns `ship_eligible` only when **all** of
+S-098 AC #1720/#1721 hold:
+
+- at least three trials, each authoritative and measured on a quiescent host;
+- no parity failure at report, aggregate, or stage level;
+- observed whole-TU traversals never above the registered budget in any trial;
+- median fixed routed-root time **strictly** below 0.025 s. Exactly 0.025 s is
+  a rejection.
+
+Anything else is refused with a named reason, reported in this fixed order:
+`baseline-artifact-missing`, `baseline-artifact-mismatch`, `malformed-report`,
+`identity-mismatch`, `host-not-quiescent`, `insufficient-trials`,
+`semantic-parity-failure`, `traversal-budget-exceeded`,
+`fixed-root-budget-not-met`. `identity-mismatch` pins the reference-host
+method — corpus case and stage, host platform/machine/CPU count, schema and
+catalog identity, Clang resource directory, SQLite version. The executable
+digest and checkout commit are deliberately excluded, because a candidate run
+must differ there.
+
+The T-139 symbol budget (`root_symbols` median strictly below 0.015480 s) is
+recorded in the decision as `symbol_root_budget_met` and is advisory here:
+T-139 owns that gate, and S-098 eligibility is governed by the 0.025 s total.
+
+A full `production.py` run appends the same decision to its report as
+`s098_root_fusion`, computed for `header-heavy:<representative-files>:forward`.
+Only `--representative-files 8` matches the pinned baseline; any other size is
+recorded with `identity-mismatch` rather than silently compared. The decision
+never changes the process exit code, which still tracks `parity_failures`.
+
+Decide over an existing candidate report:
+
+```sh
+python3 -c 'import json, sys; from benchmarks.indexing.production import fusion_decision; \
+  print(json.dumps(fusion_decision(json.load(open(sys.argv[1]))), indent=2))' \
+  /tmp/s098-candidate.json
+```
+
+Verify the harness itself — deterministic, offline, no build required:
+
+```sh
+python3 -m unittest benchmarks.indexing.production_test
+python3 -m py_compile benchmarks/indexing/production.py
+```
+
 ## Reproduce a comparison
 
 Build the current binary in `build/cidx`. Build a baseline binary from the
