@@ -2,8 +2,10 @@
 #pragma once
 
 #include "ast/edge_records.hpp"
+#include "ast/fact_identity.hpp"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -36,6 +38,111 @@ struct EvidenceRecord {
 struct PresentationIntent {
   std::int64_t symbol_id = 0;
   std::vector<std::string> display_args;
+};
+
+struct SymbolEmissionMetadata {
+  SymbolNaturalKey symbol;
+  LegacyApplyOrderKey apply_order;
+  std::uint64_t first_seen = 0;
+  std::uint64_t last_seen = 0;
+};
+
+struct DeclarationSiteRecord {
+  SymbolNaturalKey symbol;
+  FactPartitionKey partition;
+  std::int64_t line = 0;
+  std::int64_t col = 0;
+  std::int64_t end_line = 0;
+  std::int64_t end_col = 0;
+  bool is_definition = false;
+  LegacyApplyOrderKey apply_order;
+};
+
+enum class IncludeDirectiveKind : std::uint8_t {
+  include,
+  include_next,
+  import,
+  include_macros,
+  unknown,
+};
+
+struct IncludeDirectiveRecord {
+  FactPartitionKey partition;
+  PortableFileIdentity source;
+  std::optional<PortableFileIdentity> destination;
+  std::string destination_path;
+  std::string spelling;
+  IncludeDirectiveKind directive = IncludeDirectiveKind::include;
+  std::int64_t line = 0;
+  std::int64_t col = 0;
+  std::int64_t begin_offset = 0;
+  std::int64_t end_offset = 0;
+  std::string conditional_fingerprint;
+  bool is_angled = false;
+  bool resolved = true;
+  bool is_system = false;
+  bool guarded = false;
+};
+
+struct MacroUseRecord {
+  FactPartitionKey partition;
+  PortableFileIdentity source;
+  std::string definition_path;
+  std::string name;
+  std::int64_t count = 1;
+};
+
+enum class DiagnosticSeverity : std::uint8_t {
+  remark,
+  warning,
+  error,
+  fatal,
+};
+
+struct DiagnosticFactRecord {
+  FactPartitionKey partition;
+  DiagnosticSeverity severity = DiagnosticSeverity::warning;
+  std::string spelling;
+  std::optional<PortableFileIdentity> location_file;
+  std::optional<std::int64_t> line;
+  std::optional<std::int64_t> col;
+};
+
+enum class LifecycleCleanupKind : std::uint8_t {
+  relations,
+  definitions,
+  diagnostics,
+  includes,
+  applicability,
+};
+
+struct LifecycleCleanupIntent {
+  FactPartitionKey partition;
+  LifecycleCleanupKind kind = LifecycleCleanupKind::relations;
+  PortableFileIdentity target;
+  std::string prior_generation;
+};
+
+enum class ApplicabilityRole : std::uint8_t {
+  translation_unit,
+  header,
+};
+
+enum class ApplicabilityState : std::uint8_t {
+  registered,
+  unregistered,
+  ambiguous,
+  stale,
+  unavailable,
+};
+
+struct ApplicabilityOwnershipRecord {
+  FactPartitionKey partition;
+  PortableFileIdentity file;
+  ApplicabilityRole role = ApplicabilityRole::header;
+  ApplicabilityState state = ApplicabilityState::registered;
+  std::optional<std::string> reason;
+  std::string generation;
 };
 
 struct TypeEdgeRecord {

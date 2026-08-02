@@ -23,6 +23,21 @@ Generated sources, caches, logs, and JSON reports belong outside the checkout.
 The runner uses a temporary `INDEXER_CACHE`; it never opens the checkout's
 database. Keep reports under `/tmp` (or another disposable directory).
 
+## FactBatch emitter scaling gate
+
+`fact_batch_scaling.py` isolates S-072 emitter operations from final
+canonicalization, records at least five trials at 1,000, 2,000, 4,000, and
+8,000 symbols, and rejects a fitted quadratic contribution above the declared
+tolerance. It consumes `build/tests/fact_batch_complexity_test` and writes its
+machine-readable report to an explicit path:
+
+```sh
+python3 benchmarks/indexing/fact_batch_scaling.py \
+  --benchmark build/tests/fact_batch_complexity_test \
+  --sizes 1000,2000,4000,8000 --trials 7 \
+  --output /tmp/s072-fact-batch-scaling.json
+```
+
 ## Production measurement gate (HSE-103)
 
 `production.py` is the supported end-to-end command for the PERF-002

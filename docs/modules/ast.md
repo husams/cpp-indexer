@@ -23,7 +23,8 @@ IndexFrontendAction
 
 Visitors -> typed Clang AST accessors
          -> encoders/classifiers (TemplateArgumentEncoder, value provenance)
-         -> SymbolEmitter / EdgeSink -> Storage
+         -> bounded typed emitters -> immutable FactBatch
+         -> application replay port -> Storage
 ```
 
 Entry point: `run_index_one` (`index_engine.cpp`) — flag assembly
@@ -80,6 +81,11 @@ and `scripts/dump_layer0.sh` resolve surrogate keys to USR/kind/basename and
 `ORDER BY` them. Duplicate facts are collapsed by the storage layer's
 `ON CONFLICT` upserts on semantic keys.
 
+The storage-free extraction boundary and its exact legacy replay metadata are
+defined by the [immutable FactBatch contract](../fact-batch.md). Direct storage
+emission remains a conformance oracle while S-099 and S-073 integrate controlled
+planning and set-based publication.
+
 ## Template arguments
 
 Every extraction path — class-spec edges, free-function and method call sites,
@@ -119,5 +125,5 @@ requires a written justification beside it.
 | body pass | `function_definition_visitor.*`, `statement_edge_visitor.*`, `edge_emission_context.*`, `call_edge_emitter.*`, `call_template_args.*`, `instantiation_edges.*` |
 | namespace uses | `namespace_use_visitor.*` |
 | encoding/classification | `template_argument_encoder.*`, `value_provenance.*`, `receiver_provenance.*`, `display_name_rewrite.*`, `names.*` |
-| records/sinks | `edge_records.hpp`, `edge_sink.hpp`, `storage_edge_sink.*` |
+| records/sinks | `fact_identity.*`, `fact_records.hpp`, `fact_batch.*`, `fact_extraction.*`, `edge_records.hpp`, `fact_emitters.hpp`, `storage_edge_sink.*` |
 | shared helpers | `usr.*`, `location.*`, `header_stats.hpp`, `clang_compat.hpp`, `clang_version.*` |

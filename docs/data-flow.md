@@ -80,6 +80,12 @@ The ordering in steps 6–10 is **load-bearing**, not incidental:
 The [`ast`](modules/ast.md) page describes how the engine implements this
 sequence.
 
+The replacement boundary is specified in [Immutable FactBatch](fact-batch.md):
+serial extraction publishes one partitioned, canonical batch without storage
+access, then application-owned replay applies it transactionally in
+`(component.path, directory.path, file.name)` order. The current direct path is
+retained as the conformance oracle until controlled planning/publication land.
+
 ## The resolve pass
 
 `cidx resolve` → `Storage::resolve_pass()` (`storage.cpp:4069`) runs pure SQL

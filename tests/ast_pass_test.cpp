@@ -31,6 +31,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -267,10 +268,10 @@ TEST_CASE("fact batches canonicalize traversal order and remove duplicates") {
   recorder.add_edge({.src_id = *b_id, .dst_id = *a_id, .kind = 1});
 
   const FactBatch batch = recorder.canonical_batch();
-  REQUIRE(batch.symbols.size() == 2);
-  CHECK(batch.symbols[0].usr == "usr-a");
-  REQUIRE(batch.relations.size() == 1);
-  CHECK(batch.relations[0].count == 2);
+  REQUIRE(batch.records().symbols.size() == 2);
+  CHECK(batch.records().symbols[0].usr == "usr-a");
+  REQUIRE(batch.records().relations.size() == 1);
+  CHECK(batch.records().relations[0].count == 2);
 }
 
 TEST_CASE("pass descriptors require metadata and bind every budget") {
@@ -434,12 +435,15 @@ TEST_CASE("fact batch IDs and references are traversal-order independent") {
 
   const FactBatch forward = record(false);
   const FactBatch reverse = record(true);
-  REQUIRE(forward.symbols.size() == reverse.symbols.size());
-  REQUIRE(forward.relations.size() == reverse.relations.size());
-  CHECK(forward.symbols[0].usr == reverse.symbols[0].usr);
-  CHECK(forward.symbols[1].usr == reverse.symbols[1].usr);
-  CHECK(forward.relations[0].src_id == reverse.relations[0].src_id);
-  CHECK(forward.relations[0].dst_id == reverse.relations[0].dst_id);
+  REQUIRE(forward.records().symbols.size() == reverse.records().symbols.size());
+  REQUIRE(forward.records().relations.size() ==
+          reverse.records().relations.size());
+  CHECK(forward.records().symbols[0].usr == reverse.records().symbols[0].usr);
+  CHECK(forward.records().symbols[1].usr == reverse.records().symbols[1].usr);
+  CHECK(forward.records().relations[0].src_id ==
+        reverse.records().relations[0].src_id);
+  CHECK(forward.records().relations[0].dst_id ==
+        reverse.records().relations[0].dst_id);
 }
 
 TEST_CASE("fact batch keeps conflicting symbol semantics lossless") {
@@ -455,9 +459,10 @@ TEST_CASE("fact batch keeps conflicting symbol semantics lossless") {
                              .kind = 2,
                              .display_name = std::string("f(int)")});
   const FactBatch batch = recorder.canonical_batch();
-  REQUIRE(batch.symbols.size() == 2);
-  CHECK(batch.symbols[0].kind != batch.symbols[1].kind);
-  CHECK(batch.symbols[0].display_name != batch.symbols[1].display_name);
+  REQUIRE(batch.records().symbols.size() == 2);
+  CHECK(batch.records().symbols[0].kind != batch.records().symbols[1].kind);
+  CHECK(batch.records().symbols[0].display_name !=
+        batch.records().symbols[1].display_name);
 }
 
 TEST_CASE("statement pass records calls from a parsed AST") {
@@ -470,17 +475,17 @@ TEST_CASE("statement pass records calls from a parsed AST") {
 
   REQUIRE(ran);
   REQUIRE(result.found);
-  CHECK(std::ranges::any_of(result.batch.relations, [](const EdgeRecord &edge) {
-    return edge.kind == 1;
-  }));
   CHECK(std::ranges::any_of(
-      result.batch.edge_sites,
+      result.batch.records().relations,
+      [](const EdgeRecord &edge) { return edge.kind == 1; }));
+  CHECK(std::ranges::any_of(
+      result.batch.records().edge_sites,
       [](const EdgeSiteRecord &site) { return site.line == 2; }));
   CHECK(result.emitted == 6);
-  CHECK(result.batch.symbols.size() == 2);
-  CHECK(result.batch.parameters.size() == 1);
-  CHECK(result.batch.type_nodes.size() == 1);
-  CHECK(result.batch.symbol_types.size() == 1);
+  CHECK(result.batch.records().symbols.size() == 2);
+  CHECK(result.batch.records().parameters.size() == 1);
+  CHECK(result.batch.records().type_nodes.size() == 1);
+  CHECK(result.batch.records().symbol_types.size() == 1);
   CHECK(result.relation_metrics.attempted == 2);
   CHECK(result.relation_metrics.persisted == 2);
   CHECK(result.symbol_metrics.attempted == 1);
@@ -505,8 +510,8 @@ TEST_CASE("focused ports are independently usable by a fact recorder") {
                                .col = 2});
 
   CHECK(edge_id > 0);
-  CHECK(recorder.batch().evidence.size() == 1);
-  CHECK(recorder.batch().evidence.front().construct == "CallExpr");
+  CHECK(recorder.batch().records().evidence.size() == 1);
+  CHECK(recorder.batch().records().evidence.front().construct == "CallExpr");
 }
 
 // --- T-109: bounded routed root-event replay contract ------------------------
@@ -561,55 +566,56 @@ private:
 // compare the ordered handler outcome, not a sorted set.
 std::string render_batch(const FactBatch &batch) {
   std::ostringstream out;
-  for (const SymbolRecord &symbol : batch.symbols) {
+  for (const SymbolRecord &symbol : batch.records().symbols) {
     out << "symbol\t" << basename_of(symbol.file) << '\t' << symbol.usr << '\t'
         << symbol.kind << '\t' << symbol.line << '\t' << symbol.col << '\t'
         << symbol.end_line << '\t' << symbol.end_col << '\t'
         << symbol.decl_line.value_or(-1) << '\t' << symbol.decl_col.value_or(-1)
         << '\t' << symbol.is_definition << symbol.is_instantiation << '\n';
   }
-  for (const EdgeRecord &edge : batch.relations) {
+  for (const EdgeRecord &edge : batch.records().relations) {
     out << "edge\t" << edge.src_id << '\t' << edge.dst_id << '\t' << edge.kind
         << '\t' << edge.count << '\n';
   }
-  for (const EdgeSiteRecord &site : batch.edge_sites) {
+  for (const EdgeSiteRecord &site : batch.records().edge_sites) {
     out << "edge_site\t" << site.edge_id << '\t' << site.file_id << '\t'
         << site.line << '\t' << site.col << '\n';
   }
-  for (const DefinitionFactRecord &definition : batch.definitions) {
+  for (const DefinitionFactRecord &definition : batch.records().definitions) {
     out << "definition\t" << definition.symbol_id << '\t' << definition.file_id
         << '\t' << definition.line << '\t' << definition.col << '\t'
         << definition.end_line << '\t' << definition.end_col << '\n';
   }
-  for (const DefinitionEdgeRecord &edge : batch.definition_edges) {
+  for (const DefinitionEdgeRecord &edge : batch.records().definition_edges) {
     out << "def_edge\t" << edge.definition_id << '\t' << edge.destination_id
         << '\t' << edge.kind << '\n';
   }
-  for (const TemplateParamRecord &param : batch.template_params) {
+  for (const TemplateParamRecord &param : batch.records().template_params) {
     out << "template_param\t" << param.owner_id << '\t' << param.position
         << '\t' << param.param_kind << '\t' << param.name.value_or("") << '\n';
   }
-  for (const TemplateArgRecord &arg : batch.template_args) {
+  for (const TemplateArgRecord &arg : batch.records().template_args) {
     out << "template_arg\t" << arg.owner_id << '\t' << arg.position << '\t'
         << arg.arg_kind << '\t' << arg.literal.value_or("") << '\n';
   }
-  for (const ParameterFactRecord &parameter : batch.parameters) {
+  for (const ParameterFactRecord &parameter : batch.records().parameters) {
     out << "parameter\t" << parameter.owner_id << '\t'
         << parameter.parameter.position << '\t'
         << parameter.parameter.name.value_or("") << '\n';
   }
-  for (const TypeNodeRecord &node : batch.type_nodes) {
+  for (const TypeNodeRecord &node : batch.records().type_nodes) {
     out << "type_node\t" << node.type_key << '\t' << node.kind << '\n';
   }
-  for (const TypeEdgeRecord &edge : batch.type_edges) {
+  for (const TypeEdgeRecord &edge : batch.records().type_edges) {
     out << "type_edge\t" << edge.src_id << '\t' << edge.kind << '\t'
         << edge.position << '\t' << edge.dst_id << '\n';
   }
-  for (const SymbolTypeRecord &symbol_type : batch.symbol_types) {
+  for (const SymbolTypeRecord &symbol_type : batch.records().symbol_types) {
     out << "symbol_type\t" << symbol_type.symbol_id << '\t' << symbol_type.kind
         << '\t' << symbol_type.type_id << '\n';
   }
-  for (const PresentationIntent &intent : batch.presentation_intents) {
+  for (const PresentationIntent &intent :
+       batch.records().presentation_intents) {
     out << "presentation\t" << intent.symbol_id << '\t'
         << intent.display_args.size() << '\n';
   }
@@ -704,11 +710,11 @@ public:
 
     probe_.standalone = render_batch(standalone.batch());
     probe_.replayed = render_batch(replayed.batch());
-    probe_.symbols = standalone.batch().symbols.size();
-    probe_.relations = standalone.batch().relations.size();
-    probe_.definitions = standalone.batch().definitions.size();
+    probe_.symbols = standalone.batch().records().symbols.size();
+    probe_.relations = standalone.batch().records().relations.size();
+    probe_.definitions = standalone.batch().records().definitions.size();
     probe_.namespace_use_edges = static_cast<std::size_t>(std::ranges::count_if(
-        standalone.batch().relations,
+        standalone.batch().records().relations,
         [](const EdgeRecord &edge) { return edge.kind == 7; }));
     probe_size_budgets(context);
     probe_contract_validation(context);
@@ -1000,4 +1006,238 @@ TEST_CASE("routed root event buffers refuse an unusable contract") {
   CHECK(probe.rejected_empty_router);
   CHECK(probe.rejected_zero_event_bound);
   CHECK(probe.rejected_empty_pass_id);
+}
+
+namespace {
+
+FactPartitionKey fact_partition(std::string file, std::string universe,
+                                std::string configuration, std::string source) {
+  return {
+      .file = {.component_path = "/repo",
+               .directory_path = "src",
+               .file_name = std::move(file)},
+      .configuration = {.semantic_universe = std::move(universe),
+                        .translation_unit = "src/main.cpp",
+                        .normalized_configuration = std::move(configuration),
+                        .identity_source = std::move(source)}};
+}
+
+void emit_test_symbol(FactBatchRecorder &recorder,
+                      const FactPartitionKey &partition, std::string usr,
+                      std::string spelling, int kind,
+                      std::optional<std::string> qualified = std::nullopt) {
+  SymbolRecord symbol;
+  symbol.file = partition.file.portable_path();
+  symbol.usr = std::move(usr);
+  symbol.spelling = std::move(spelling);
+  symbol.kind = kind;
+  symbol.qual_name = std::move(qualified);
+  symbol.identity_source = partition.configuration.identity_source;
+  recorder.emit(symbol);
+}
+
+} // namespace
+
+TEST_CASE("natural fact handles remain distinct under adversarial collisions") {
+  CollisionSafeHandleIndex index(
+      [](std::string_view) -> std::uint64_t { return 7; });
+  const std::int64_t first = index.find_or_insert("symbol:first");
+  const std::int64_t second = index.find_or_insert("symbol:second");
+
+  CHECK(first != second);
+  CHECK(index.find("symbol:first") == first);
+  CHECK(index.find("symbol:second") == second);
+  CHECK(index.key_for(first) == "symbol:first");
+  CHECK(index.key_for(second) == "symbol:second");
+}
+
+TEST_CASE("partition identity prevents file and configuration aliasing") {
+  const FactPartitionKey first =
+      fact_partition("one.cpp", "workspace", "debug", "src/one.cpp");
+  const FactPartitionKey second =
+      fact_partition("two.cpp", "workspace", "release", "src/two.cpp");
+  FactBatchRecorder recorder("partition-test");
+  recorder.set_partition(first, 11);
+  emit_test_symbol(recorder, first, "same-usr", "one", 8);
+  const auto first_id = recorder.lookup_symbol_id("same-usr", "src/one.cpp");
+  if (!first_id) {
+    FAIL("first partition symbol was not indexed");
+    return;
+  }
+  const FactBatch published = recorder.canonical_batch();
+
+  recorder.set_partition(second, 22);
+  emit_test_symbol(recorder, second, "same-usr", "two", 8);
+  const auto second_id = recorder.lookup_symbol_id("same-usr", "src/two.cpp");
+  if (!second_id) {
+    FAIL("second partition symbol was not indexed");
+    return;
+  }
+  const std::int64_t first_handle = first_id.value();
+  const std::int64_t second_handle = second_id.value();
+  REQUIRE(first_handle != second_handle);
+
+  CHECK(published.records().symbols.size() == 1);
+  const FactBatch complete = recorder.canonical_batch();
+  REQUIRE(complete.partitions().size() == 2);
+  CHECK(complete.records().symbols.size() == 2);
+  CHECK(complete.symbol_keys().contains(first_handle));
+  CHECK(complete.symbol_keys().contains(second_handle));
+  for (const FileFactPartition &partition : complete.partitions()) {
+    REQUIRE(partition.members.contains(FactFamily::symbols));
+    CHECK(partition.members.at(FactFamily::symbols).size() == 1);
+  }
+}
+
+TEST_CASE("finalized batches expose every fact family through const records") {
+  static_assert(
+      std::is_same_v<decltype(std::declval<const FactBatch &>().records()),
+                     const FactRecords &>);
+  const FactPartitionKey partition =
+      fact_partition("main.cpp", "workspace", "debug", "src/main.cpp");
+  SymbolNaturalKey symbol;
+  symbol.partition = partition;
+  symbol.usr = "usr-main";
+  FactBatchRecorder recorder("coverage-test");
+  recorder.set_partition(partition, 41);
+  emit_test_symbol(recorder, partition, symbol.usr, "main", 8);
+  DeclarationSiteRecord declaration;
+  declaration.symbol = symbol;
+  declaration.partition = partition;
+  declaration.line = 1;
+  declaration.col = 1;
+  recorder.emit(declaration);
+  IncludeDirectiveRecord include;
+  include.partition = partition;
+  include.source = partition.file;
+  include.destination_path = "include/a.hpp";
+  include.spelling = "a.hpp";
+  include.line = 1;
+  include.col = 1;
+  recorder.emit(include);
+  MacroUseRecord macro;
+  macro.partition = partition;
+  macro.source = partition.file;
+  macro.definition_path = "include/a.hpp";
+  macro.name = "A";
+  recorder.emit(macro);
+  DiagnosticFactRecord diagnostic;
+  diagnostic.partition = partition;
+  diagnostic.severity = DiagnosticSeverity::warning;
+  diagnostic.spelling = "warning";
+  diagnostic.location_file = partition.file;
+  diagnostic.line = 2;
+  diagnostic.col = 3;
+  recorder.emit(diagnostic);
+  LifecycleCleanupIntent cleanup;
+  cleanup.partition = partition;
+  cleanup.kind = LifecycleCleanupKind::relations;
+  cleanup.target = partition.file;
+  cleanup.prior_generation = "previous";
+  recorder.emit(cleanup);
+  ApplicabilityOwnershipRecord applicability;
+  applicability.partition = partition;
+  applicability.file = partition.file;
+  applicability.role = ApplicabilityRole::translation_unit;
+  applicability.state = ApplicabilityState::registered;
+  applicability.generation = "current";
+  recorder.emit(applicability);
+
+  const FactBatch batch = recorder.canonical_batch();
+  const FactRecords &records = batch.records();
+  CHECK(records.symbols.size() == 1);
+  CHECK(records.declaration_sites.size() == 1);
+  CHECK(records.includes.size() == 1);
+  CHECK(records.macros.size() == 1);
+  CHECK(records.diagnostics.size() == 1);
+  CHECK(records.lifecycle_cleanup.size() == 1);
+  CHECK(records.applicability.size() == 1);
+}
+
+TEST_CASE("symbol lookup indexes honor source name qualification and kind") {
+  FactBatchRecorder recorder("lookup-test");
+  const FactPartitionKey partition =
+      fact_partition("main.cpp", "workspace", "debug", "src/main.cpp");
+  recorder.set_partition(partition);
+  emit_test_symbol(recorder, partition, "usr-function", "item", 8, "ns::item");
+  emit_test_symbol(recorder, partition, "usr-class", "item", 4, "ns::item");
+
+  const auto by_source =
+      recorder.lookup_symbol_id("usr-function", "src/main.cpp");
+  const auto source_less = recorder.lookup_symbol_id("usr-function");
+  REQUIRE(by_source);
+  CHECK(source_less == by_source);
+  const auto candidates = recorder.type_arg_candidates("ns::item", true);
+  REQUIRE(candidates.size() == 2);
+  CHECK(candidates[0].kind_name == "function");
+  CHECK(candidates[1].kind_name == "class");
+  const auto functions =
+      recorder.symbol_ids_by_qual_name_kind("ns::item", "function");
+  const auto classes =
+      recorder.symbol_ids_by_qual_name_kind("ns::item", "class");
+  REQUIRE(functions.size() == 1);
+  REQUIRE(classes.size() == 1);
+  CHECK(functions.front() != classes.front());
+  CHECK(recorder.counters().records_touched.at("lookup_symbol_sourceless") ==
+        0);
+}
+
+TEST_CASE("mutation and aggregation operations touch only keyed buckets") {
+  FactBatchRecorder recorder("complexity-test");
+  recorder.set_partition(
+      fact_partition("main.cpp", "workspace", "debug", "src/main.cpp"));
+  std::vector<std::int64_t> ids;
+  for (int i = 0; i < 100; ++i) {
+    const std::string usr = "usr-" + std::to_string(i);
+    const FactPartitionKey partition =
+        fact_partition("main.cpp", "workspace", "debug", "src/main.cpp");
+    emit_test_symbol(recorder, partition, usr, usr, 8);
+    const auto id = recorder.lookup_symbol_id(usr);
+    if (!id) {
+      FAIL("complexity fixture symbol was not indexed");
+      return;
+    }
+    ids.push_back(id.value());
+  }
+  recorder.update_display_name(ids[50], "updated");
+  CHECK(recorder.counters().records_touched.at("update_display_name") == 1);
+
+  for (int i = 0; i < 10; ++i) {
+    EdgeRecord edge;
+    edge.src_id = ids[0];
+    edge.dst_id = ids[i + 1];
+    edge.kind = 1;
+    recorder.add_edge(edge);
+  }
+  for (int i = 20; i < 80; ++i) {
+    EdgeRecord edge;
+    edge.src_id = ids[i];
+    edge.dst_id = ids[i + 1];
+    edge.kind = 9;
+    recorder.add_edge(edge);
+  }
+  CHECK(recorder.body_edge_count(ids[0]) == 10);
+  CHECK(recorder.counters().records_touched.at("body_edge_count") == 10);
+
+  EdgeRecord duplicate;
+  duplicate.src_id = ids[0];
+  duplicate.dst_id = ids[1];
+  duplicate.kind = 1;
+  recorder.add_edge(duplicate);
+  CHECK(recorder.counters().records_touched.at("add_edge") == 1);
+  ParameterRecord first_parameter;
+  first_parameter.position = 0;
+  first_parameter.name = "first";
+  ParameterRecord second_parameter;
+  second_parameter.position = 1;
+  second_parameter.name = "second";
+  recorder.replace_parameters(ids[0], {first_parameter, second_parameter});
+  ParameterRecord replacement;
+  replacement.position = 0;
+  replacement.name = "only";
+  recorder.replace_parameters(ids[0], {replacement});
+  CHECK(recorder.counters().records_touched.at("replace_parameters") == 3);
+  const FactBatch batch = recorder.canonical_batch();
+  REQUIRE(batch.records().parameters.size() == 1);
+  CHECK(batch.records().parameters.front().parameter.name == "only");
 }

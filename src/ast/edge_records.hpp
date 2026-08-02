@@ -103,6 +103,8 @@ struct TypeArgCandidate {
   int64_t id = 0;
   std::string kind_name;
   bool is_instantiation = false;
+
+  bool operator==(const TypeArgCandidate &) const = default;
 };
 
 // ---- body-pass records ------------------------------------------------------

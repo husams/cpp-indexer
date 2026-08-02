@@ -36,6 +36,16 @@ struct SymbolRecord {
   std::optional<std::string> const_value; // v33: evaluated constant initializer
                                           // (variable) or enumerator value
   bool resolved = false;                  // definition resolves the symbol
+  // Portable identity dimensions. Empty values select the recorder's current
+  // partition defaults and never imply a database row id.
+  std::string semantic_universe;
+  std::string normalized_configuration;
+  std::optional<std::string> identity_source;
+  std::optional<std::string> identity_translation_unit;
+  std::optional<std::string> local_anchor;
+  // Storage kind name is carried explicitly for database-free candidate
+  // indexes. Visitors may leave it empty when kind has a standard mapping.
+  std::string kind_name;
 };
 
 } // namespace cidx::ast
