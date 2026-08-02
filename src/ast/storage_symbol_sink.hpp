@@ -25,6 +25,12 @@ struct PassMetrics;
 class StorageSymbolSink : public SymbolEmitter {
 public:
   explicit StorageSymbolSink(cidx::storage::AstStoragePorts &ports);
+  // Publishes the sink and persistence spans this sink accumulated.
+  ~StorageSymbolSink() override;
+  StorageSymbolSink(const StorageSymbolSink &) = delete;
+  StorageSymbolSink &operator=(const StorageSymbolSink &) = delete;
+  StorageSymbolSink(StorageSymbolSink &&) = delete;
+  StorageSymbolSink &operator=(StorageSymbolSink &&) = delete;
 
   void set_current_file_id(int64_t file_id);
   void set_identity_translation_unit_config_id(
@@ -54,15 +60,34 @@ private:
     std::unordered_set<int64_t> symbol_id_set;
   };
 
+  // The semantic universe of a file is fixed by import; resolving it costs two
+  // prepared statements, and every symbol of a file asks the same question.
+  [[nodiscard]] int64_t semantic_universe_for_current_file();
+  void clear_persisted_identities();
+  void record_cached_decl_site(const cidx::Symbol &sym,
+                               const std::string &identity_key,
+                               FileBucket &bucket);
+  void persist_symbol(const cidx::Symbol &sym, std::string identity_key,
+                      FileBucket &bucket);
+
   cidx::storage::AstStoragePorts &ports_;
   int64_t current_file_id_ = -1;
   std::optional<std::string> identity_translation_unit_;
   std::unordered_map<int64_t, FileBucket> buckets_;
   PassMetrics *metrics_ = nullptr;
+  // What this pass has already persisted, keyed by symbol identity. Bounded by
+  // the symbols of the file being walked and cleared on every file switch and
+  // counter reset.
   std::unordered_map<std::string, CachedResolvedIdentity>
-      resolved_identity_cache_;
-  std::unordered_set<std::size_t> resolved_identity_cache_hashes_;
-  bool resolved_cache_active_ = false;
+      persisted_identity_cache_;
+  std::unordered_set<std::size_t> persisted_identity_hashes_;
+  std::uint64_t identity_reuses_ = 0;
+  std::uint64_t identity_persists_ = 0;
+  // Bounded by the routed files of one translation unit and cleared with the
+  // rest of the per-translation-unit state by reset_all_counters().
+  std::unordered_map<int64_t, int64_t> semantic_universe_by_file_;
+  double sink_seconds_ = 0.0;
+  double persistence_seconds_ = 0.0;
 };
 
 } // namespace cidx::ast

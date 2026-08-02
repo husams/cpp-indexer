@@ -42,11 +42,19 @@ public:
                       PassMetrics *metrics, FileRouter router = {});
 
   // Scope tracking: the nearest enclosing INDEXED symbol is the edge source.
+  // TraverseDecl is the RAV adapter; begin_decl/end_decl are the same
+  // non-recursive scope handler, so a recorded event stream can drive it.
   bool TraverseDecl(clang::Decl *decl);
   bool VisitDecl(clang::Decl *decl);
 
+  std::optional<int64_t> begin_decl(clang::Decl *decl);
+  void end_decl(std::optional<int64_t> scope_id);
+
   std::optional<int64_t> scope_symbol_id(const clang::Decl *decl);
 
+  // The qualifier handler without the RAV descent, so replaying a recorded
+  // qualifier does not re-traverse a subtree that was already recorded.
+  void visit_nested_name_specifier(clang::NestedNameSpecifierLoc nns);
   bool TraverseNestedNameSpecifierLoc(clang::NestedNameSpecifierLoc nns);
   bool VisitUsingDirectiveDecl(clang::UsingDirectiveDecl *decl);
   // LLVM 22 folds elaboration: tag/typedef TypeLocs embed their qualifier, so

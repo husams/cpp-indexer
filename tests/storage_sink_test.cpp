@@ -136,6 +136,14 @@ struct SinkFixture {
 
 } // namespace
 
+// The sink's storage-lookup contract: exactly ONE lookup per identity per cache
+// generation, plus one more whenever an incoming record is not a semantic no-op
+// against the cached state. A generation ends at set_current_file_id,
+// set_identity_translation_unit_*, reset_counters or reset_all_counters, since
+// each of those means the rows the cache describes may no longer be there.
+// The `stored` accounting must be identical either way: it is derived from the
+// cached persisted state exactly as the persisting path derives it from the
+// looked-up row.
 TEST_CASE("symbol sink caches resolved identities and invalidates state") {
   SinkFixture fixture;
   cidx::ast::StorageSymbolSink sink(fixture.ports);
@@ -146,18 +154,19 @@ TEST_CASE("symbol sink caches resolved identities and invalidates state") {
   sink.emit(resolved);
   sink.emit(resolved);
   sink.emit(resolved);
-  CIDX_CHECK_BOOL(fixture.symbol_read.lookup_calls == 2);
+  // One generation, one identity, three records: one lookup.
+  CIDX_CHECK_BOOL(fixture.symbol_read.lookup_calls == 1);
   CIDX_CHECK_BOOL(sink.stored_count() == 1);
   CIDX_REQUIRE_BOOL(sink.symbol_ids().size() == 1);
 
   sink.set_current_file_id(fixture.first_file);
   sink.emit(resolved);
-  CIDX_CHECK_BOOL(fixture.symbol_read.lookup_calls == 3);
+  CIDX_CHECK_BOOL(fixture.symbol_read.lookup_calls == 2);
   CIDX_CHECK_BOOL(sink.stored_count() == 1);
 
   sink.reset_counters();
   sink.emit(resolved);
-  CIDX_CHECK_BOOL(fixture.symbol_read.lookup_calls == 4);
+  CIDX_CHECK_BOOL(fixture.symbol_read.lookup_calls == 3);
   CIDX_CHECK_BOOL(sink.stored_count() == 0);
 
   cidx::TranslationUnitConfig first_config;
@@ -174,17 +183,20 @@ TEST_CASE("symbol sink caches resolved identities and invalidates state") {
                                                fixture.first_file);
   sink.emit(resolved);
   sink.emit(resolved);
-  CIDX_CHECK_BOOL(fixture.symbol_read.lookup_calls == 5);
+  CIDX_CHECK_BOOL(fixture.symbol_read.lookup_calls == 4);
   sink.set_identity_translation_unit_config_id(second_config_id,
                                                fixture.first_file);
   sink.emit(resolved);
-  CIDX_CHECK_BOOL(fixture.symbol_read.lookup_calls == 6);
+  CIDX_CHECK_BOOL(fixture.symbol_read.lookup_calls == 5);
 
+  // A second, UNRESOLVED identity in the same generation: one lookup for it,
+  // and the repeat is answered from the cache like any other identity. The
+  // stored count is what the persisting path would have produced.
   const auto unresolved =
       fixture.symbol("sink:@F@unresolved", false, fixture.first_file);
   sink.emit(unresolved);
   sink.emit(unresolved);
-  CIDX_CHECK_BOOL(fixture.symbol_read.lookup_calls == 8);
+  CIDX_CHECK_BOOL(fixture.symbol_read.lookup_calls == 6);
   CIDX_CHECK_BOOL(sink.stored_count() == 2);
 }
 
@@ -296,7 +308,11 @@ TEST_CASE("symbol sink checks every merge-sensitive definition field") {
     mutation.apply(changed);
     sink.emit(changed);
 
-    CHECK(fixture.symbol_read.lookup_calls == 3);
+    // One lookup seeds the identity; the repeated seed is a no-op answered
+    // from the cache; the mutated record is NOT a no-op and must go back to
+    // storage. A cache that wrongly suppressed it would leave this at 1 and
+    // fail mutation.verify below.
+    CHECK(fixture.symbol_read.lookup_calls == 2);
     const bool creates_new_identity =
         std::string_view(mutation.name) == "linkage";
     REQUIRE(sink.symbol_ids().size() == (creates_new_identity ? 2 : 1));
@@ -406,7 +422,9 @@ TEST_CASE("symbol sink checks merge-sensitive declaration fields and parents") {
     mutation.apply(declaration);
     sink.emit(declaration);
 
-    CHECK(fixture.symbol_read.lookup_calls == 3);
+    // As above: the mutated declaration is not a semantic no-op, so it costs
+    // the second lookup.
+    CHECK(fixture.symbol_read.lookup_calls == 2);
     const bool creates_new_identity =
         std::string_view(mutation.name) == "linkage";
     REQUIRE(sink.symbol_ids().size() == (creates_new_identity ? 2 : 1));
@@ -438,7 +456,7 @@ TEST_CASE("symbol sink direct declaration path reconciles parents") {
   const int64_t parent_id = fixture.db.add_symbol(parent);
 
   sink.emit(child); // Must remain on the fast path and reconcile parent_id.
-  CHECK(fixture.symbol_read.lookup_calls == 2);
+  CHECK(fixture.symbol_read.lookup_calls == 1);
   REQUIRE(sink.symbol_ids().size() == 1);
   auto parent_lookup =
       fixture.db.raw_db().prepare("SELECT parent_id FROM symbol WHERE id = ?");

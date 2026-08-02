@@ -84,6 +84,127 @@ the generated 1,000-TU corpora and contaminate later trials.
 Copy only a completed summary into
 `benchmarks/indexing/PRODUCTION_REPORT_TEMPLATE.md`.
 
+## S-098 routed root-fusion decision harness
+
+S-098 changes traversal topology, so the decision it is judged by is frozen
+first. `production.py` carries the pure summary and threshold logic; nothing in
+it measures, indexes, or writes.
+
+The frozen S-071 evidence lives in two places:
+
+- the authoritative full report, attached to backlog task S-098 as
+  `s071-authoritative-r3.json`. It is resolved **through the backlog artifact
+  registry** (`backlog artifact list S-098` plus the store's own artifact root
+  from `backlog where`) — never from an assumed repository `.backlog` path and
+  never from a disposable `/tmp` copy. `verify_baseline_artifact()` checks the
+  recorded size and SHA-256 and re-derives the summary before trusting it,
+  refusing with `baseline-artifact-missing` or `baseline-artifact-mismatch`
+  instead of synthesizing evidence;
+- `fixtures/s071-header-heavy-baseline.json`, a compact checked-in excerpt with
+  the same field shape, so the unit tests run offline with no store, binary,
+  corpus, or database.
+
+`qualify()` is the supported entry point for a ship decision: it verifies the
+authoritative artifact **first** and judges the candidate against it, so a
+passing candidate cannot ship on unverified baseline evidence. `fusion_decision()`
+remains available for offline work against the fixture alone and reports
+`baseline_artifact_verified: false`.
+
+Treat that evidence as immutable control: `header-heavy:8:forward`, three
+trials, median cold wall 0.255732833 s, fixed routed-root sum 0.040611 s
+(`root_symbols` 0.031091 s plus 0.009520 s across `root_declarations`,
+`root_definitions`, and `root_namespaces`), and 32 registered / 32 observed
+whole-TU visits in every trial.
+
+`fusion_decision(report)` derives the per-trial and median fixed routed-root
+time from those four timings and returns `ship_eligible` only when **all** of
+S-098 AC #1720/#1721 hold:
+
+- at least three trials, each authoritative and measured on a quiescent host;
+- no parity failure at report, aggregate, or stage level;
+- observed whole-TU traversals never above the registered budget in any trial;
+- median fixed routed-root time **strictly** below 0.025 s. Exactly 0.025 s is
+  a rejection.
+
+Anything else is refused with a named reason, reported in this fixed order:
+`baseline-artifact-missing`, `baseline-artifact-mismatch`, `malformed-report`,
+`identity-mismatch`, `host-not-quiescent`, `insufficient-trials`,
+`semantic-parity-failure`, `traversal-budget-exceeded`,
+`fixed-root-budget-not-met`. `identity-mismatch` pins the reference-host
+method:
+
+- corpus case and stage, plus the corpus each trial was actually generated
+  from — `shape`, `files`, `order`, `baseline_distinct_owned_headers`, and
+  `target_distinct_owned_headers` (18 for the pinned baseline). The case key
+  alone carries only shape, file count, and order, so without the last field a
+  candidate measured on a lighter header-heavy corpus would compare as
+  identity-matched. Trials of one case must agree on their corpus, or the
+  report is `malformed-report`;
+- the `corpus_contract` fields the measured shape actually depends on:
+  `baseline_distinct_owned_headers`, `shapes`, and `orders` for every shape,
+  plus `many_header_target` for `many-headers` only. `generate_corpus` writes a
+  fixed 16 heavy headers for `header-heavy` and never reads
+  `many_header_target` there, so binding it would refuse a re-run that
+  regenerated exactly the baseline's corpus with the shipped default;
+- the front-end reuse **mechanism in force**, never the presence of the
+  section. S-071 predates the S-075 contract and records no section; every
+  report this harness emits records `qualification_contract`, which declares
+  the same shipped no-reuse control. Both mean the front end reused nothing, so
+  both normalise to `mechanism: none` with no artifact construction and no
+  artifact injection, and compare equal — `--no-front-end-reuse` included. Any
+  other mechanism, or any artifact construction or injection, still does not
+  compare. A section that exists but names no mechanism is `malformed-report`;
+- host platform/machine/CPU count, schema and catalog identity, Clang resource
+  directory, and SQLite version.
+
+The executable digest and checkout commit are deliberately excluded, because a
+candidate run must differ there.
+
+The T-139 symbol budget (`root_symbols` median strictly below 0.015480 s) is
+recorded in the decision as `symbol_root_budget_met` and is advisory here:
+T-139 owns that gate, and S-098 eligibility is governed by the 0.025 s total.
+
+### Recorded outcome
+
+S-098 measured and selected the **two-root** topology and shipped it. At source
+commit `b695bb1`, Release build, on the pinned `header-heavy:8:forward` cold
+corpus and the reference host recorded in the report, three authoritative
+quiescent trials gave a fixed routed-root median of **0.022121 s** against the
+strict 0.025 s threshold (per trial 0.021943 / 0.022121 / 0.024860), with
+`root_symbols` median 0.014931 s meeting the T-139 budget, 16 registered and 16
+observed traversals in every trial, empty `parity_failures`, one canonical
+semantic digest across all three trials, and normalized Layer-0 output
+byte-identical to the S-071 control. The full breakdown, identities, residual
+risk, and the S-070 / S-072 / S-100 / S-099 / S-078 ownership boundaries are in
+[REPORT.md](REPORT.md); the final JSON is attached to backlog task S-098.
+
+A full `production.py` run appends the same decision to its report as
+`s098_root_fusion`, computed for `header-heavy:<representative-files>:forward`.
+`--representative-files 8` is the only run flag that has to match the pinned
+baseline; any other size is recorded with `identity-mismatch` rather than
+silently compared. Everything else the run records by default — the
+`front_end_reuse` contract, and `--many-header-target` at any value — already
+compares equal to the baseline, so a run at the sub-25 ms target reaches
+`ship_eligible` without special arguments. The decision never changes the
+process exit code, which still tracks `parity_failures`.
+
+Decide over an existing candidate report. This resolves and verifies the
+authoritative artifact through the registry, so it needs a reachable backlog
+store:
+
+```sh
+python3 -c 'import json, sys; from benchmarks.indexing.production import qualify; \
+  print(json.dumps(qualify(json.load(open(sys.argv[1]))), indent=2))' \
+  /tmp/s098-candidate.json
+```
+
+Verify the harness itself — deterministic, offline, no build required:
+
+```sh
+python3 -m unittest benchmarks.indexing.production_test
+python3 -m py_compile benchmarks/indexing/production.py
+```
+
 ## Reproduce a comparison
 
 Build the current binary in `build/cidx`. Build a baseline binary from the

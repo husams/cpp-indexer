@@ -27,6 +27,8 @@
 #include "clang/AST/RecursiveASTVisitor.h"
 
 #include <functional>
+#include <string>
+#include <unordered_map>
 
 namespace clang {
 class ASTContext;
@@ -53,6 +55,13 @@ public:
   SymbolVisitor(clang::ASTContext &context, SymbolEmitter &out,
                 std::string target_file = std::string(),
                 PassMetrics *metrics = nullptr, FileRouter router = {});
+  // Publishes the routing and identity spans this walk accumulated. The
+  // visitor is constructed per pass, so the flush happens once per pass.
+  ~SymbolVisitor();
+  SymbolVisitor(const SymbolVisitor &) = delete;
+  SymbolVisitor &operator=(const SymbolVisitor &) = delete;
+  SymbolVisitor(SymbolVisitor &&) = delete;
+  SymbolVisitor &operator=(SymbolVisitor &&) = delete;
 
   bool VisitDecl(clang::Decl *decl);
   bool VisitNamedDecl(clang::NamedDecl *decl);
@@ -62,6 +71,10 @@ public:
 private:
   bool should_emit(const clang::NamedDecl *decl);
   void emit_explicit_instantiation(const clang::FunctionDecl *fd);
+  // The normalized expansion path of a location, resolved once per FileID.
+  // The answer depends only on the file, never on the position inside it, so
+  // a TU that reaches one header through a thousand decls normalizes it once.
+  auto normalized_file(clang::SourceLocation loc) -> const std::string &;
 
   clang::ASTContext &context_;
   clang::SourceManager &source_manager_;
@@ -70,6 +83,11 @@ private:
   std::string target_file_;
   PassMetrics *metrics_ = nullptr;
   FileRouter router_;
+  // Bounded by the number of distinct files this translation unit reaches,
+  // and destroyed with the visitor at the end of the pass.
+  std::unordered_map<unsigned, std::string> normalized_files_;
+  double routing_seconds_ = 0.0;
+  double identity_seconds_ = 0.0;
 };
 
 } // namespace cidx::ast

@@ -3,6 +3,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -56,6 +57,54 @@ private:
 [[nodiscard]] inline auto active() noexcept -> bool {
   return detail::active_flag.load(std::memory_order_relaxed);
 }
+
+// Adds one wall-clock span to a caller-owned accumulator, and only while
+// profiling is active: on the disabled path the constructor is one relaxed
+// atomic load and no clock is read. Accumulating locally keeps hot inner
+// scopes off add_timing(), which takes the session lock and allocates a name.
+//
+// The accumulators these fill are the disjoint root_symbols subcomponents
+// (see kRootSymbol*Timing below); every span belongs to exactly one of them.
+class ScopedAccumulator {
+public:
+  using Clock = std::chrono::steady_clock;
+
+  explicit ScopedAccumulator(double &sink) noexcept
+      : sink_(active() ? &sink : nullptr),
+        start_(sink_ != nullptr ? Clock::now() : Clock::time_point{}) {}
+  ~ScopedAccumulator() {
+    if (sink_ != nullptr) {
+      *sink_ += std::chrono::duration<double>(Clock::now() - start_).count();
+    }
+  }
+  ScopedAccumulator(const ScopedAccumulator &) = delete;
+  ScopedAccumulator &operator=(const ScopedAccumulator &) = delete;
+  ScopedAccumulator(ScopedAccumulator &&) = delete;
+  ScopedAccumulator &operator=(ScopedAccumulator &&) = delete;
+
+private:
+  double *sink_;
+  Clock::time_point start_;
+};
+
+// The routed symbol root pass (root_symbols) decomposed into disjoint spans.
+// Their sum is at most root_symbols; the remainder is published as
+// root_symbols.walk when the profile is written, so nothing is counted twice.
+inline constexpr std::string_view kRootSymbolWalkTiming = "root_symbols.walk";
+inline constexpr std::string_view kRootSymbolRoutingTiming =
+    "root_symbols.routing";
+inline constexpr std::string_view kRootSymbolIdentityTiming =
+    "root_symbols.identity";
+inline constexpr std::string_view kRootSymbolSinkTiming = "root_symbols.sink";
+inline constexpr std::string_view kRootSymbolPersistenceTiming =
+    "root_symbols.persistence";
+
+// Duplicate suppression inside that pass: records persisted through storage
+// versus records answered from an identity the pass had already written.
+inline constexpr std::string_view kRootSymbolIdentityPersistCounter =
+    "root_symbols_identity_persisted";
+inline constexpr std::string_view kRootSymbolIdentityReuseCounter =
+    "root_symbols_identity_reused";
 [[nodiscard]] auto next_translation_unit_position() noexcept -> std::uint64_t;
 void record_translation_unit(TranslationUnitRecord record) noexcept;
 void add_timing(std::string_view name, double seconds) noexcept;

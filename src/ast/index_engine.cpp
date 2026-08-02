@@ -8,6 +8,7 @@
 #include "ast/location.hpp"
 #include "ast/namespace_use_visitor.hpp"
 #include "ast/pass_registry.hpp"
+#include "ast/routed_root_events.hpp"
 #include "ast/storage_edge_sink.hpp"
 #include "ast/storage_symbol_sink.hpp"
 #include "ast/symbol_visitor.hpp"
@@ -239,6 +240,20 @@ public:
   }
 
 private:
+  // The rooted graph collector's event bound, matching the emitted-fact budget
+  // every extraction pass declares. Overflow raises the named
+  // PassBudgetExceeded diagnostic instead of letting the buffer grow without
+  // limit.
+  static constexpr std::size_t kRoutedGraphEventBudget = 20'000'000;
+
+  // Raise the configured fault at a pipeline phase boundary. Without an
+  // injector this is a null check, so normal behaviour is unchanged.
+  void inject(cidx::storage::FailurePoint point) const {
+    if (state_.failure_injector != nullptr) {
+      state_.failure_injector->inject(point);
+    }
+  }
+
   static auto descriptor(
       std::string id, std::vector<FrontendCapability> capabilities,
       std::vector<std::string> consumed, std::vector<std::string> produced,
@@ -296,6 +311,7 @@ private:
             header.stored = symbols_.stored_count(header.file_id);
             header.symbol_ids = symbols_.symbol_ids(header.file_id);
           }
+          inject(cidx::storage::FailurePoint::symbol_capture_complete);
         });
   }
 
@@ -323,6 +339,7 @@ private:
             PassScope::owned_header, TraversalMode::declaration,
             FactCompleteness::complete, FactTrust::trusted, 1),
         [this](PassExecutionContext &execution) -> void {
+          collect_routed_graph_events(execution);
           run_routed_declaration_stage(execution);
           for (PendingHeader &header : pending_headers_) {
             header.edge_ids = edges_.edge_ids(header.file_id);
@@ -330,12 +347,16 @@ private:
           }
           main_edge_ids_ = edges_.edge_ids(state_.rec->id);
           main_definition_ids_ = edges_.definition_ids(state_.rec->id);
+          inject(cidx::storage::FailurePoint::declaration_replay);
         });
     registry.register_pass(
+        // Replays the graph collector's recorded stream: a logical pass with
+        // its own provider id, diagnostics and fact families, but no rooted
+        // traversal of its own.
         descriptor("definitions.headers", {FrontendCapability::ast},
                    {"symbols"}, {"definitions"}, {"declarations.headers"},
                    PassScope::owned_header, TraversalMode::declaration,
-                   FactCompleteness::complete, FactTrust::trusted, 1),
+                   FactCompleteness::complete, FactTrust::trusted, 0),
         [this](PassExecutionContext &execution) -> void {
           routed_definition_visitor_ = collect_routed_definitions(execution);
           for (PendingHeader &header : pending_headers_) {
@@ -344,6 +365,7 @@ private:
           }
           main_edge_ids_ = edges_.edge_ids(state_.rec->id);
           main_definition_ids_ = edges_.definition_ids(state_.rec->id);
+          inject(cidx::storage::FailurePoint::definition_replay);
         });
     registry.register_pass(
         descriptor("statements.headers",
@@ -358,11 +380,13 @@ private:
 
   void register_header_association(ExtractionPassRegistry &registry) {
     registry.register_pass(
+        // Also a replay of the graph collector's stream, and the last consumer
+        // of it: no rooted traversal of its own.
         descriptor("namespaces.headers", {FrontendCapability::ast},
                    {"symbols", "relations"}, {"relations"},
                    {"statements.headers"}, PassScope::owned_header,
                    TraversalMode::declaration, FactCompleteness::complete,
-                   FactTrust::trusted, 1),
+                   FactTrust::trusted, 0),
         [this](PassExecutionContext &execution) -> void {
           run_routed_namespace_stage(execution);
           for (PendingHeader &header : pending_headers_) {
@@ -371,6 +395,7 @@ private:
           }
           main_edge_ids_ = edges_.edge_ids(state_.rec->id);
           main_definition_ids_ = edges_.definition_ids(state_.rec->id);
+          inject(cidx::storage::FailurePoint::namespace_replay);
         });
     auto header_association = descriptor(
         "headers.associate", {}, {"symbols", "relations", "definitions"},
@@ -404,6 +429,7 @@ private:
             ++state_.out->headers.indexed;
             state_.out->headers.symbols += header.stored;
           }
+          inject(cidx::storage::FailurePoint::header_association);
         });
   }
 
@@ -448,6 +474,7 @@ private:
           }
           main_edge_ids_ = edges_.edge_ids(state_.rec->id);
           main_definition_ids_ = edges_.definition_ids(state_.rec->id);
+          inject(cidx::storage::FailurePoint::statement_body_replay);
         });
     registry.register_pass(
         descriptor("namespaces.main", {FrontendCapability::ast},
@@ -535,6 +562,7 @@ private:
           execution.metrics.note_fact_family("file_associations",
                                              stats.attempted, stats.inserted,
                                              stats.ignored);
+          inject(cidx::storage::FailurePoint::main_association);
         });
     registry.register_pass(
         descriptor("includes.persist", {FrontendCapability::preprocessor},
@@ -711,16 +739,30 @@ private:
     visitor.TraverseDecl(tu_);
   }
 
+  // Header planning is the routed symbol pass's file-routing work: it decides
+  // which files this translation unit owns and normalizes their paths and
+  // content hashes. Its storage calls are attributed to the persistence span
+  // instead, so the two root_symbols subcomponents stay disjoint.
   void prepare_routed_files() {
-    pending_headers_ = plan_owned_headers();
-    routed_file_ids_.clear();
-    routed_file_ids_.emplace(state_.path, state_.rec->id);
-    for (const PendingHeader &header : pending_headers_) {
-      routed_file_ids_.emplace(header.path, header.file_id);
-      if (header.covered_by_current_config) {
-        db_.delete_symbols_for_file(header.file_id);
+    double routing_seconds = 0.0;
+    double persistence_seconds = 0.0;
+    {
+      const profile::ScopedAccumulator routing(routing_seconds);
+      pending_headers_ = plan_owned_headers(persistence_seconds);
+      routed_file_ids_.clear();
+      routed_file_ids_.emplace(state_.path, state_.rec->id);
+      for (const PendingHeader &header : pending_headers_) {
+        routed_file_ids_.emplace(header.path, header.file_id);
+        if (header.covered_by_current_config) {
+          const profile::ScopedAccumulator persistence(persistence_seconds);
+          db_.delete_symbols_for_file(header.file_id);
+        }
       }
     }
+    profile::add_timing(profile::kRootSymbolRoutingTiming,
+                        routing_seconds - persistence_seconds);
+    profile::add_timing(profile::kRootSymbolPersistenceTiming,
+                        persistence_seconds);
   }
 
   bool route_symbol_file(const std::string &path) {
@@ -747,6 +789,17 @@ private:
     return file->second;
   }
 
+  // The same routing answer without route_fact_file's side effect of switching
+  // the fact sink's current file. Recording events is not emitting facts, so
+  // the collector must not move the sink; replay does that through the
+  // visitors' own routers, in emission order.
+  [[nodiscard]] auto route_fact_file_id(const std::string &path) const
+      -> std::optional<int64_t> {
+    const auto file = routed_file_ids_.find(path);
+    return file == routed_file_ids_.end() ? std::nullopt
+                                          : std::optional{file->second};
+  }
+
   void configure_fact_file(int64_t file_id, bool reset) {
     edges_.set_current_file_id(file_id);
     edges_.set_identity_translation_unit_config_id(state_.normalized_config_id,
@@ -767,8 +820,31 @@ private:
     }
   }
 
-  void run_routed_declaration_stage(PassExecutionContext &execution) {
+  // The single rooted graph traversal. It records declaration,
+  // definition-candidate and namespace-scope/use events and emits nothing; the
+  // declaration, definition and namespace stages then replay it in logical
+  // order. Statement bodies are neither traversed nor emitted here - they stay
+  // in the separate statements.main phase, which owns no root budget.
+  void collect_routed_graph_events(PassExecutionContext &execution) {
+    graph_events_.reset();
     if (!state_.graph_enabled) {
+      return;
+    }
+    // Bounded by the declared emitted-fact budget of the owning pass and
+    // reported against its id. Metrics are deliberately not wired into the
+    // recorder: every recorded declaration is counted once, by the visitor
+    // that replays it, exactly as the separate root walks counted it.
+    graph_events_ = std::make_unique<RoutedRootEventBuffer>(
+        context_,
+        [this](const std::string &path) { return route_fact_file_id(path); },
+        kRoutedGraphEventBudget, "declarations.headers");
+    execution.metrics.note_whole_tu_traversal();
+    profile::add_counter("root_traverse_decl_calls");
+    graph_events_->collect(tu_);
+  }
+
+  void run_routed_declaration_stage(PassExecutionContext &execution) {
+    if (!state_.graph_enabled || graph_events_ == nullptr) {
       return;
     }
     edges_.reset_all_fact_ids();
@@ -783,14 +859,12 @@ private:
         context_, ports, {}, -1, &definitions, &execution.metrics,
         &presentation_intents,
         [this](const std::string &path) { return route_fact_file(path); });
-    execution.metrics.note_whole_tu_traversal();
-    profile::add_counter("root_traverse_decl_calls");
-    decls.TraverseDecl(tu_);
+    graph_events_->replay_declarations(decls);
   }
 
   auto collect_routed_definitions(PassExecutionContext &execution)
       -> std::unique_ptr<FunctionDefinitionVisitor> {
-    if (!state_.graph_enabled) {
+    if (!state_.graph_enabled || graph_events_ == nullptr) {
       return nullptr;
     }
     edges_.reset_fact_ids();
@@ -800,9 +874,7 @@ private:
         static_cast<DefinitionScopeEmitter &>(edges_), std::string{}, -1,
         &execution.metrics,
         [this](const std::string &path) { return route_fact_file(path); });
-    execution.metrics.note_whole_tu_traversal();
-    profile::add_counter("root_traverse_decl_calls");
-    visitor->TraverseDecl(tu_);
+    graph_events_->replay_definitions(*visitor);
     return visitor;
   }
 
@@ -830,18 +902,20 @@ private:
   }
 
   void run_routed_namespace_stage(PassExecutionContext &execution) {
-    if (!state_.graph_enabled) {
+    if (!state_.graph_enabled || graph_events_ == nullptr) {
       return;
     }
     edges_.reset_fact_ids();
+    routed_fact_file_id_ = -1;
     BudgetedNamespacePassPorts ports(static_cast<NamespacePassPorts &>(edges_),
                                      execution.metrics);
     NamespaceUseVisitor ns(
         context_, ports, {}, -1, &execution.metrics,
         [this](const std::string &path) { return route_fact_file(path); });
-    execution.metrics.note_whole_tu_traversal();
-    profile::add_counter("root_traverse_decl_calls");
-    ns.TraverseDecl(tu_);
+    graph_events_->replay_namespaces(ns);
+    // The recorded stream is valid only while this ASTContext lives, and the
+    // last consumer has just run.
+    graph_events_.reset();
   }
 
   [[nodiscard]] bool header_covered_by_current_config(
@@ -860,7 +934,27 @@ private:
 
   // Classify every recorded inclusion (system / unowned / already indexed)
   // and mint file rows for the headers this TU must index.
-  std::vector<PendingHeader> plan_owned_headers() {
+  auto read_header_file_row(const std::string &abs, double &persistence_seconds)
+      -> std::optional<cidx::File> {
+    const profile::ScopedAccumulator persistence(persistence_seconds);
+    return db_.get_file(abs);
+  }
+
+  // The already-indexed test, answered from the row this loop already read.
+  // Storage::is_file_indexed(path, nullopt, md5) is exactly this predicate over
+  // a fresh get_file(path); nothing writes that row between the two reads, so
+  // repeating the query per header per translation unit is pure cost.
+  static bool
+  header_is_already_indexed(const std::optional<cidx::File> &existing,
+                            const std::optional<std::string> &current_md5,
+                            bool covered_by_current_config) {
+    if (!covered_by_current_config || !existing || !existing->indexed) {
+      return false;
+    }
+    return !current_md5 || existing->md5 == current_md5;
+  }
+
+  std::vector<PendingHeader> plan_owned_headers(double &persistence_seconds) {
     std::vector<PendingHeader> plan;
     std::unordered_set<std::string> seen;
     cidx::HeaderStats &counts = state_.out->headers;
@@ -884,19 +978,21 @@ private:
       }
       ++state_.session_metrics->file_hash_reads;
       const std::optional<std::string> current_md5 = cidx::md5_of(abs);
-      const auto existing = db_.get_file(abs);
+      const std::optional<cidx::File> existing =
+          read_header_file_row(abs, persistence_seconds);
       const bool covered_by_current_config =
           header_covered_by_current_config(existing);
       const std::optional<std::string> parsed_md5 =
           parsed_file_md5(context_.getSourceManager(), abs);
       if (current_md5 && parsed_md5 && current_md5 == parsed_md5 &&
-          db_.is_file_indexed(abs, std::nullopt, current_md5) &&
-          covered_by_current_config) {
+          header_is_already_indexed(existing, current_md5,
+                                    covered_by_current_config)) {
         ++counts.already;
         continue;
       }
       ++state_.session_metrics->file_stat_reads;
       const std::optional<double> mtime = file_mtime(abs);
+      const profile::ScopedAccumulator persistence(persistence_seconds);
       const int64_t hid =
           db_.add_file_path(abs, mtime, parsed_md5, state_.rec->compile_options,
                             state_.rec->driver);
@@ -940,6 +1036,9 @@ private:
   std::vector<int64_t> main_edge_ids_;
   std::vector<int64_t> main_definition_ids_;
   std::unique_ptr<FunctionDefinitionVisitor> routed_definition_visitor_;
+  // The one rooted graph traversal's recorded event stream, alive only between
+  // its collection and the last replay of the same translation unit.
+  std::unique_ptr<RoutedRootEventBuffer> graph_events_;
 };
 
 class IndexASTConsumer : public clang::ASTConsumer {
@@ -1091,6 +1190,20 @@ public:
         return IndexFailurePoint::partial_transform;
       case cidx::storage::FailurePoint::commit:
         return IndexFailurePoint::commit;
+      case cidx::storage::FailurePoint::symbol_capture_complete:
+        return IndexFailurePoint::symbol_capture_complete;
+      case cidx::storage::FailurePoint::declaration_replay:
+        return IndexFailurePoint::declaration_replay;
+      case cidx::storage::FailurePoint::definition_replay:
+        return IndexFailurePoint::definition_replay;
+      case cidx::storage::FailurePoint::statement_body_replay:
+        return IndexFailurePoint::statement_body_replay;
+      case cidx::storage::FailurePoint::namespace_replay:
+        return IndexFailurePoint::namespace_replay;
+      case cidx::storage::FailurePoint::header_association:
+        return IndexFailurePoint::header_association;
+      case cidx::storage::FailurePoint::main_association:
+        return IndexFailurePoint::main_association;
       }
       return IndexFailurePoint::none;
     }();
@@ -1111,6 +1224,20 @@ private:
       return "partial transform";
     case IndexFailurePoint::commit:
       return "unit-of-work commit";
+    case IndexFailurePoint::symbol_capture_complete:
+      return "symbol capture completion";
+    case IndexFailurePoint::declaration_replay:
+      return "declaration replay";
+    case IndexFailurePoint::definition_replay:
+      return "definition replay";
+    case IndexFailurePoint::statement_body_replay:
+      return "statement body replay";
+    case IndexFailurePoint::namespace_replay:
+      return "namespace replay";
+    case IndexFailurePoint::header_association:
+      return "header association";
+    case IndexFailurePoint::main_association:
+      return "main association";
     case IndexFailurePoint::none:
       return "unexpected";
     }
@@ -1655,8 +1782,7 @@ bool prepare_front_end_reuse(const TranslationUnitConfig &resolved,
     out.error = *diagnostic;
     out.failed_flags = args;
     if (profiling) {
-      profile::add_counter("front_end_reuse.build_declared_pch_diagnostics",
-                           1);
+      profile::add_counter("front_end_reuse.build_declared_pch_diagnostics", 1);
     }
     return false;
   }

@@ -10,14 +10,14 @@ import importlib.util
 import json
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import platform
 import shutil
 import sqlite3
 import statistics
 import subprocess
 import time
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 try:
     from benchmarks.indexing.frontend_reuse import qualification_contract
@@ -155,6 +155,123 @@ REQUIRED_TRANSLATION_UNIT_FIELDS = frozenset(
         "peak_rss_bytes",
     }
 )
+
+# ---------------------------------------------------------------------------
+# S-098 routed root-fusion decision harness
+#
+# The S-071 baseline is frozen evidence, not something this harness recomputes.
+# Every value below is read from the authoritative report attached to backlog
+# task S-098; the checked-in fixture is a compact excerpt of that report with
+# the same field shape, so one summary reads either one.
+# ---------------------------------------------------------------------------
+S098_CONTRACT_VERSION = "s098-root-fusion/v1"
+S098_BASELINE_CASE = "header-heavy:8:forward"
+S098_BASELINE_STAGE = "cold"
+S098_SYMBOL_ROOT_TIMING = "root_symbols"
+S098_OTHER_ROOT_TIMINGS = (
+    "root_declarations",
+    "root_definitions",
+    "root_namespaces",
+)
+S098_FIXED_ROOT_TIMINGS = (S098_SYMBOL_ROOT_TIMING, *S098_OTHER_ROOT_TIMINGS)
+S098_REGISTERED_BUDGET_COUNTER = "registered_root_traversal_budget"
+S098_OBSERVED_TRAVERSAL_COUNTER = "observed_root_traversals"
+# S-098 AC #1720: strictly below 25 ms, from the recorded 40.611 ms baseline.
+S098_FIXED_ROOT_BUDGET_SECONDS = 0.025
+# T-139 AC #2635 owns the symbol-root floor inside that total. It is recorded
+# here and reported, but S-098 ship eligibility is governed by the total.
+S098_SYMBOL_ROOT_BUDGET_SECONDS = 0.015480
+S098_SYMBOL_ROOT_BUDGET_OWNER = "T-139"
+S098_BASELINE_FIXTURE_NAME = "fixtures/s071-header-heavy-baseline.json"
+S098_BASELINE_ARTIFACT_TASK = "S-098"
+S098_BASELINE_ARTIFACT_NAME = "s071-authoritative-r3.json"
+S098_BACKLOG_PROJECT = "cpp-indexer"
+S098_REQUIRED_REPORT_KEYS = frozenset(
+    {
+        "method",
+        "identity",
+        "authoritative_timing",
+        "host_quiescence",
+        "parity_failures",
+        "aggregates",
+        "corpus_contract",
+        "individual_trials",
+    }
+)
+# Per-trial corpus descriptors that must be identical across a case's trials
+# and identical to the baseline's. `target_distinct_owned_headers` is the field
+# that catches a candidate measured on a lighter corpus: the case key alone
+# only pins shape, file count, and order.
+S098_CORPUS_FIELDS = (
+    "kind",
+    "shape",
+    "order",
+    "files",
+    "baseline_distinct_owned_headers",
+    "target_distinct_owned_headers",
+)
+# Contract fields every measured shape depends on: the owned-header floor each
+# shape builds on, and the shape/order vocabulary the case key is written in.
+S098_CORPUS_CONTRACT_FIELDS = (
+    "baseline_distinct_owned_headers",
+    "shapes",
+    "orders",
+)
+# Contract fields only some shapes depend on. `generate_corpus` writes a fixed
+# 16 heavy headers for `header-heavy` and ignores `many_header_target` there, so
+# binding it for that shape would refuse a re-run that regenerated exactly the
+# baseline's corpus with a different flag value.
+S098_SHAPE_CONTRACT_FIELDS: dict[str, tuple[str, ...]] = {
+    "many-headers": ("many_header_target",),
+}
+# Front-end reuse changes front-end cost, so a candidate that enables a reuse
+# mechanism is not comparable to the no-reuse baseline. What is bound is the
+# mechanism *in force*, never the presence of the section: S-071 predates the
+# S-075 contract and records no section, while every run of this harness records
+# `qualification_contract`, which is that same shipped no-reuse control. Both
+# describe a front end that reused nothing, so both normalise to this control.
+# Its keys are the bound field set - `front_end_reuse_identity` builds exactly
+# them on both paths - so this dict is the only place that set is written down.
+# `identity_version` and `explicitly_disabled` are deliberately out: they say
+# which contract emitted the control and how it was selected, not what the front
+# end did.
+S098_NO_REUSE_MECHANISM = "none"
+S098_NO_REUSE_CONTROL: dict[str, Any] = {
+    "mechanism": S098_NO_REUSE_MECHANISM,
+    "artifact_construction": False,
+    "artifact_injection": False,
+}
+
+# Named rejection reasons, in the deterministic order they are reported.
+S098_REASON_ARTIFACT_MISSING = "baseline-artifact-missing"
+S098_REASON_ARTIFACT_MISMATCH = "baseline-artifact-mismatch"
+S098_REASON_MALFORMED = "malformed-report"
+S098_REASON_IDENTITY = "identity-mismatch"
+S098_REASON_CONTENDED = "host-not-quiescent"
+S098_REASON_TRIALS = "insufficient-trials"
+S098_REASON_PARITY = "semantic-parity-failure"
+S098_REASON_TRAVERSAL_BUDGET = "traversal-budget-exceeded"
+S098_REASON_FIXED_ROOT_BUDGET = "fixed-root-budget-not-met"
+S098_REJECTION_REASONS = (
+    S098_REASON_ARTIFACT_MISSING,
+    S098_REASON_ARTIFACT_MISMATCH,
+    S098_REASON_MALFORMED,
+    S098_REASON_IDENTITY,
+    S098_REASON_CONTENDED,
+    S098_REASON_TRIALS,
+    S098_REASON_PARITY,
+    S098_REASON_TRAVERSAL_BUDGET,
+    S098_REASON_FIXED_ROOT_BUDGET,
+)
+
+
+class BaselineError(RuntimeError):
+    """A named, deterministic refusal to qualify S-098 evidence."""
+
+    def __init__(self, reason: str, detail: str) -> None:
+        super().__init__(f"{reason}: {detail}")
+        self.reason = reason
+        self.detail = detail
 
 
 def _load_hse95() -> Any:
@@ -1154,6 +1271,592 @@ def recovery_probe(
     }
 
 
+def baseline_fixture_path() -> Path:
+    return Path(__file__).parent.joinpath(*S098_BASELINE_FIXTURE_NAME.split("/"))
+
+
+def load_baseline_fixture(path: Path | None = None) -> dict[str, Any]:
+    """Read the compact, checked-in excerpt of the S-071 authoritative run."""
+    source = baseline_fixture_path() if path is None else path
+    try:
+        text = source.read_text(encoding="utf-8")
+    except OSError as error:
+        raise BaselineError(
+            S098_REASON_ARTIFACT_MISSING, f"baseline fixture is unreadable: {error}"
+        ) from error
+    try:
+        fixture = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise BaselineError(
+            S098_REASON_MALFORMED, f"baseline fixture is not JSON: {error}"
+        ) from error
+    if not isinstance(fixture, dict) or "source_artifact" not in fixture:
+        raise BaselineError(
+            S098_REASON_MALFORMED, "baseline fixture does not record its source artifact"
+        )
+    return fixture
+
+
+def _numeric(value: Any, where: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise BaselineError(S098_REASON_MALFORMED, f"{where} is not a number")
+    return value  # int counters stay integral; timings stay float
+
+
+def _mapping(value: Any, where: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise BaselineError(S098_REASON_MALFORMED, f"{where} is not an object")
+    return value
+
+
+def _flag(value: Any, where: str) -> bool:
+    if not isinstance(value, bool):
+        raise BaselineError(S098_REASON_MALFORMED, f"{where} is not a boolean")
+    return value
+
+
+def _trial_series(section: Any, name: str, where: str) -> list[float]:
+    entry = _mapping(_mapping(section, where).get(name), f"{where}.{name}")
+    trials = entry.get("trials")
+    if not isinstance(trials, list) or not trials:
+        raise BaselineError(
+            S098_REASON_MALFORMED, f"{where}.{name} has no trial series"
+        )
+    return [
+        _numeric(value, f"{where}.{name}.trials[{index}]")
+        for index, value in enumerate(trials)
+    ]
+
+
+def corpus_identity(report: Mapping[str, Any], *, case: str) -> dict[str, Any]:
+    """Bind the corpus a case was actually measured on.
+
+    The case key only carries shape, file count, and order. The number of
+    distinct owned headers the shape generates - the parameter that decides how
+    much routed-root work exists - lives per trial, so it is read from there and
+    required to agree across every trial of the case.
+    """
+    trials = _mapping(report.get("individual_trials"), "individual_trials")
+    prefix = f"{case}:trial-"
+    descriptors: dict[str, dict[str, Any]] = {}
+    for key in sorted(trials):
+        if not key.startswith(prefix):
+            continue
+        trial = _mapping(trials[key], f"individual_trials.{key}")
+        missing = [field for field in S098_CORPUS_FIELDS if field not in trial]
+        if missing:
+            raise BaselineError(
+                S098_REASON_MALFORMED,
+                f"individual_trials.{key} does not declare its corpus: {missing}",
+            )
+        descriptors[key] = {field: trial[field] for field in S098_CORPUS_FIELDS}
+    if not descriptors:
+        raise BaselineError(
+            S098_REASON_MALFORMED, f"report records no per-trial corpus for {case!r}"
+        )
+    distinct = {json.dumps(value, sort_keys=True) for value in descriptors.values()}
+    if len(distinct) != 1:
+        raise BaselineError(
+            S098_REASON_MALFORMED,
+            f"{case!r} trials were measured on different corpora: {sorted(distinct)}",
+        )
+    descriptor = next(iter(descriptors.values()))
+    if not isinstance(descriptor["shape"], str):
+        raise BaselineError(
+            S098_REASON_MALFORMED, f"{case!r} does not name the shape it was generated from"
+        )
+    return descriptor
+
+
+def corpus_contract_identity(
+    report: Mapping[str, Any], *, shape: str
+) -> dict[str, Any]:
+    """Bind the declared contract fields the measured shape depends on.
+
+    A field the shape's corpus does not read cannot invalidate a comparison, so
+    binding it would refuse a re-run that regenerated exactly the baseline's
+    corpus. `many_header_target` is the case in point: it only sizes the
+    `many-headers` shape.
+    """
+    contract = _mapping(report.get("corpus_contract"), "corpus_contract")
+    fields = (
+        *S098_CORPUS_CONTRACT_FIELDS,
+        *S098_SHAPE_CONTRACT_FIELDS.get(shape, ()),
+    )
+    return {field: contract.get(field) for field in sorted(fields)}
+
+
+def front_end_reuse_identity(report: Mapping[str, Any]) -> dict[str, Any]:
+    """Bind the front-end reuse mechanism in force, normalising the control.
+
+    S-071's report predates the S-075 contract and carries no `front_end_reuse`
+    section; every report this harness emits carries `qualification_contract`,
+    which declares the same shipped no-reuse control. Both mean the front end
+    reused nothing, so both normalise to `S098_NO_REUSE_CONTROL` and compare
+    equal. Any other mechanism, or any artifact construction or injection,
+    still differs and still mismatches. A section that exists but does not say
+    which mechanism was in force cannot be compared and is malformed.
+    """
+    section = report.get("front_end_reuse")
+    if section is None:
+        return dict(S098_NO_REUSE_CONTROL)
+    section = _mapping(section, "front_end_reuse")
+    if "mechanism" not in section:
+        raise BaselineError(
+            S098_REASON_MALFORMED, "front_end_reuse does not declare its mechanism"
+        )
+    if not isinstance(section["mechanism"], str):
+        raise BaselineError(
+            S098_REASON_MALFORMED, "front_end_reuse.mechanism is not a string"
+        )
+    return {
+        "mechanism": section["mechanism"],
+        "artifact_construction": _flag(
+            section.get("artifact_construction", False),
+            "front_end_reuse.artifact_construction",
+        ),
+        "artifact_injection": _flag(
+            section.get("artifact_injection", False),
+            "front_end_reuse.artifact_injection",
+        ),
+    }
+
+
+def identity_fingerprint(
+    report: Mapping[str, Any], *, case: str, stage: str
+) -> dict[str, Any]:
+    """Pin the reference-host measurement method, not the binary under test.
+
+    The executable digest and checkout commit deliberately stay out: a
+    candidate run must differ there. Everything that would silently invalidate
+    a comparison against the frozen baseline stays in - the corpus the case was
+    generated from, the contract fields that corpus depends on, and the
+    front-end reuse mechanism in force. Nothing else: a field the measured
+    corpus never reads would refuse an otherwise identical re-run.
+    """
+    identity = _mapping(report.get("identity"), "identity")
+    host = _mapping(identity.get("host"), "identity.host")
+    schema = _mapping(identity.get("schema"), "identity.schema")
+    clang = _mapping(identity.get("clang"), "identity.clang")
+    sqlite = _mapping(identity.get("sqlite"), "identity.sqlite")
+    corpus = corpus_identity(report, case=case)
+    return {
+        "method": report.get("method"),
+        "case": case,
+        "stage": stage,
+        "host_platform": host.get("platform"),
+        "host_machine": host.get("machine"),
+        "host_cpu_count": host.get("cpu_count"),
+        "schema_version": schema.get("version"),
+        "catalog_version": schema.get("catalog_version"),
+        "catalog_hash": schema.get("catalog_hash"),
+        "clang_resource_dir": clang.get("resource_dir"),
+        "sqlite_version": sqlite.get("version"),
+        "corpus": corpus,
+        "corpus_contract": corpus_contract_identity(report, shape=corpus["shape"]),
+        "front_end_reuse": front_end_reuse_identity(report),
+    }
+
+
+def root_observation(
+    report: Mapping[str, Any],
+    *,
+    case: str = S098_BASELINE_CASE,
+    stage: str = S098_BASELINE_STAGE,
+) -> dict[str, Any]:
+    """Derive the S-098 fixed routed-root series from an HSE-103 report.
+
+    Accepts either the full authoritative report or the compact fixture: both
+    carry the same `aggregates[case].stages[stage].profile_summary` shape.
+    """
+    report = _mapping(report, "report")
+    missing = sorted(S098_REQUIRED_REPORT_KEYS.difference(report))
+    if missing:
+        raise BaselineError(S098_REASON_MALFORMED, f"report is missing {missing}")
+    aggregates = _mapping(report.get("aggregates"), "aggregates")
+    if case not in aggregates:
+        raise BaselineError(S098_REASON_MALFORMED, f"report has no {case!r} aggregate")
+    aggregate = _mapping(aggregates[case], f"aggregates.{case}")
+    stages = _mapping(aggregate.get("stages"), f"aggregates.{case}.stages")
+    if stage not in stages:
+        raise BaselineError(
+            S098_REASON_MALFORMED, f"{case!r} has no {stage!r} stage"
+        )
+    where = f"aggregates.{case}.stages.{stage}"
+    summary = _mapping(stages[stage], where)
+    profile = _mapping(summary.get("profile_summary"), f"{where}.profile_summary")
+    timings = profile.get("timings")
+    counters = profile.get("counters")
+
+    series = {
+        name: _trial_series(timings, name, f"{where}.profile_summary.timings")
+        for name in S098_FIXED_ROOT_TIMINGS
+    }
+    registered = _trial_series(
+        counters, S098_REGISTERED_BUDGET_COUNTER, f"{where}.profile_summary.counters"
+    )
+    observed = _trial_series(
+        counters, S098_OBSERVED_TRAVERSAL_COUNTER, f"{where}.profile_summary.counters"
+    )
+    wall_trials = summary.get("wall_seconds_trials")
+    if not isinstance(wall_trials, list) or not wall_trials:
+        raise BaselineError(S098_REASON_MALFORMED, f"{where} has no wall trial series")
+    wall = [
+        _numeric(value, f"{where}.wall_seconds_trials[{index}]")
+        for index, value in enumerate(wall_trials)
+    ]
+
+    lengths = {len(values) for values in series.values()}
+    lengths.update({len(registered), len(observed), len(wall)})
+    if len(lengths) != 1:
+        raise BaselineError(
+            S098_REASON_MALFORMED, f"{where} trial series have different lengths"
+        )
+    trials = lengths.pop()
+    declared = aggregate.get("trial_count")
+    if not isinstance(declared, int) or isinstance(declared, bool):
+        raise BaselineError(
+            S098_REASON_MALFORMED, f"aggregates.{case}.trial_count is not an integer"
+        )
+    if declared != trials:
+        raise BaselineError(
+            S098_REASON_MALFORMED,
+            f"aggregates.{case}.trial_count {declared} != {trials} measured trials",
+        )
+
+    fixed = [sum(series[name][index] for name in S098_FIXED_ROOT_TIMINGS) for index in range(trials)]
+    other = [sum(series[name][index] for name in S098_OTHER_ROOT_TIMINGS) for index in range(trials)]
+    parity_failures = [
+        str(failure) for failure in report.get("parity_failures") or []
+    ] + [f"{case}: {failure}" for failure in aggregate.get("parity_failures") or []]
+    quiescence = _mapping(report.get("host_quiescence"), "host_quiescence")
+    over_budget = [
+        index + 1
+        for index, (seen, allowed) in enumerate(zip(observed, registered))
+        if seen > allowed
+    ]
+    return {
+        "case": case,
+        "stage": stage,
+        "method": report.get("method"),
+        "identity": identity_fingerprint(report, case=case, stage=stage),
+        "authoritative_timing": bool(report.get("authoritative_timing")),
+        "quiescent": bool(quiescence.get("quiescent")),
+        "competing_cidx_indexers": list(
+            quiescence.get("competing_cidx_indexers") or []
+        ),
+        "trial_count": trials,
+        "parity_failures": parity_failures,
+        "semantic_parity": bool(summary.get("semantic_parity")),
+        "canonical_sha256_trials": list(summary.get("canonical_sha256_trials") or []),
+        "wall_seconds_trials": wall,
+        "wall_seconds_median": statistics.median(wall),
+        "root_timing_trials": series,
+        "symbol_root_trials": series[S098_SYMBOL_ROOT_TIMING],
+        "symbol_root_median": statistics.median(series[S098_SYMBOL_ROOT_TIMING]),
+        "other_root_trials": other,
+        "other_root_median": statistics.median(other),
+        "fixed_root_trials": fixed,
+        "fixed_root_median": statistics.median(fixed),
+        "registered_root_traversal_budget_trials": registered,
+        "observed_root_traversal_trials": observed,
+        "registered_root_traversal_budget": max(registered),
+        "observed_root_traversals": max(observed),
+        "traversal_budget_exceeded_trials": over_budget,
+    }
+
+
+def backlog_artifact_registry(
+    *, task: str, project: str, backlog: str | None = None
+) -> tuple[list[Any], str | None]:
+    """Read one task's artifact records and the store's artifact root.
+
+    The store location is whatever `backlog where` reports; this never assumes
+    a repository `.backlog` directory or a disposable temporary path.
+    """
+    executable = backlog or os.environ.get("BACKLOG_CLI") or shutil.which("backlog")
+    if not executable:
+        raise BaselineError(
+            S098_REASON_ARTIFACT_MISSING,
+            "no backlog CLI on PATH and BACKLOG_CLI is unset",
+        )
+
+    def query(arguments: list[str]) -> Any:
+        completed = subprocess.run(
+            [executable, *arguments, "--project", project, "--json"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise BaselineError(
+                S098_REASON_ARTIFACT_MISSING,
+                f"backlog {' '.join(arguments)} failed: {completed.stderr.strip()}",
+            )
+        try:
+            return json.loads(completed.stdout)
+        except json.JSONDecodeError as error:
+            raise BaselineError(
+                S098_REASON_ARTIFACT_MISSING,
+                f"backlog {' '.join(arguments)} returned no JSON: {error}",
+            ) from error
+
+    records = query(["artifact", "list", task])
+    location = query(["where"])
+    if not isinstance(records, list):
+        raise BaselineError(
+            S098_REASON_ARTIFACT_MISSING, f"{task} artifact listing is not a list"
+        )
+    return records, _mapping(location, "backlog where").get("artifacts_dir")
+
+
+def resolve_baseline_artifact(
+    *,
+    task: str = S098_BASELINE_ARTIFACT_TASK,
+    name: str = S098_BASELINE_ARTIFACT_NAME,
+    project: str = S098_BACKLOG_PROJECT,
+    registry: Any = backlog_artifact_registry,
+) -> Path:
+    """Locate the authoritative report through the backlog artifact registry."""
+    records, artifacts_dir = registry(task=task, project=project)
+    if not artifacts_dir:
+        raise BaselineError(
+            S098_REASON_ARTIFACT_MISSING, "backlog store reports no artifact directory"
+        )
+    matches = [
+        record
+        for record in records
+        if isinstance(record, Mapping)
+        and PurePosixPath(str(record.get("rel_path", ""))).name == name
+    ]
+    if not matches:
+        raise BaselineError(
+            S098_REASON_ARTIFACT_MISSING,
+            f"{task} registers no artifact named {name!r}",
+        )
+    if len(matches) > 1:
+        raise BaselineError(
+            S098_REASON_ARTIFACT_MISMATCH,
+            f"{task} registers {len(matches)} artifacts named {name!r}",
+        )
+    relative = PurePosixPath(str(matches[0]["rel_path"]))
+    if relative.is_absolute() or ".." in relative.parts:
+        raise BaselineError(
+            S098_REASON_ARTIFACT_MISMATCH,
+            f"registered artifact path escapes the store: {relative}",
+        )
+    root = Path(artifacts_dir)
+    # Records are relative to the store root and repeat the directory segment
+    # that `artifacts_dir` already names.
+    if relative.parts and relative.parts[0] == root.name:
+        relative = PurePosixPath(*relative.parts[1:])
+    path = root.joinpath(*relative.parts)
+    if not path.is_file():
+        raise BaselineError(
+            S098_REASON_ARTIFACT_MISSING,
+            f"registered artifact is not present on disk: {path}",
+        )
+    return path
+
+
+def verify_baseline_artifact(
+    *,
+    fixture: Mapping[str, Any] | None = None,
+    project: str = S098_BACKLOG_PROJECT,
+    registry: Any = backlog_artifact_registry,
+) -> dict[str, Any]:
+    """Resolve, digest-verify, and shape-verify the authoritative S-071 report.
+
+    The size and digest checked are the ones the checked-in fixture recorded,
+    measured against the bytes the registry actually resolved to. Returns the
+    evidence of that verification alongside the parsed report so a caller can
+    report what it verified rather than assert it.
+    """
+    fixture = load_baseline_fixture() if fixture is None else fixture
+    expected = _mapping(fixture.get("source_artifact"), "fixture.source_artifact")
+    task = str(expected.get("backlog_task", S098_BASELINE_ARTIFACT_TASK))
+    name = str(expected.get("name", S098_BASELINE_ARTIFACT_NAME))
+    path = resolve_baseline_artifact(
+        task=task, name=name, project=project, registry=registry
+    )
+    size = path.stat().st_size
+    if size != expected.get("bytes"):
+        raise BaselineError(
+            S098_REASON_ARTIFACT_MISMATCH,
+            f"{path} is {size} bytes, expected {expected.get('bytes')}",
+        )
+    digest = _sha256(path)
+    if digest != expected.get("sha256"):
+        raise BaselineError(
+            S098_REASON_ARTIFACT_MISMATCH,
+            f"{path} digest {digest} != recorded {expected.get('sha256')}",
+        )
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise BaselineError(
+            S098_REASON_MALFORMED, f"{path} is not JSON: {error}"
+        ) from error
+    if root_observation(report) != root_observation(fixture):
+        raise BaselineError(
+            S098_REASON_ARTIFACT_MISMATCH,
+            f"{path} does not match the checked-in baseline fixture",
+        )
+    return {
+        "backlog_task": task,
+        "name": name,
+        "resolved_path": str(path),
+        "sha256": digest,
+        "bytes": size,
+        "verified": True,
+        "report": report,
+    }
+
+
+def load_baseline_artifact(
+    *,
+    fixture: Mapping[str, Any] | None = None,
+    project: str = S098_BACKLOG_PROJECT,
+    registry: Any = backlog_artifact_registry,
+) -> dict[str, Any]:
+    """The authoritative S-071 report, verified. See `verify_baseline_artifact`."""
+    return verify_baseline_artifact(
+        fixture=fixture, project=project, registry=registry
+    )["report"]
+
+
+def _decision_shell(case: str, stage: str) -> dict[str, Any]:
+    return {
+        "contract": S098_CONTRACT_VERSION,
+        "case": case,
+        "stage": stage,
+        "minimum_trials": MINIMUM_TRIALS,
+        "fixed_root_budget_seconds": S098_FIXED_ROOT_BUDGET_SECONDS,
+        "fixed_root_budget_is_strict": True,
+        "symbol_root_budget_seconds": S098_SYMBOL_ROOT_BUDGET_SECONDS,
+        "symbol_root_budget_owner": S098_SYMBOL_ROOT_BUDGET_OWNER,
+        "symbol_root_budget_is_advisory_here": True,
+        "baseline_artifact": None,
+        "baseline_artifact_verified": False,
+        "ship_eligible": False,
+        "reason": None,
+        "reasons": [],
+        "baseline": None,
+        "candidate": None,
+    }
+
+
+def qualify(
+    report: Mapping[str, Any],
+    *,
+    fixture: Mapping[str, Any] | None = None,
+    project: str = S098_BACKLOG_PROJECT,
+    registry: Any = backlog_artifact_registry,
+    case: str = S098_BASELINE_CASE,
+    stage: str = S098_BASELINE_STAGE,
+) -> dict[str, Any]:
+    """Qualify a candidate against the verified authoritative baseline.
+
+    This is the supported entry point for a ship decision: the authoritative
+    report is resolved through the backlog artifact registry and its recorded
+    size, digest, and derived shape are verified *before* anything is compared.
+    A failure there is a named rejection, never a silent fall back to the
+    checked-in fixture. `fusion_decision` remains available for offline work on
+    the fixture alone, and reports `baseline_artifact_verified: False`.
+    """
+    frozen = load_baseline_fixture() if fixture is None else fixture
+    try:
+        evidence = verify_baseline_artifact(
+            fixture=frozen, project=project, registry=registry
+        )
+    except BaselineError as error:
+        decision = _decision_shell(case, stage)
+        decision["baseline_artifact"] = frozen.get("source_artifact")
+        decision["reason"] = error.reason
+        decision["reasons"] = [error.reason]
+        decision["detail"] = f"authoritative artifact: {error.detail}"
+        return decision
+    report_only = {
+        key: value for key, value in evidence.items() if key != "report"
+    }
+    decision = fusion_decision(
+        report, baseline=evidence["report"], case=case, stage=stage
+    )
+    decision["baseline_artifact"] = report_only
+    decision["baseline_artifact_verified"] = True
+    return decision
+
+
+def fusion_decision(
+    report: Mapping[str, Any],
+    *,
+    baseline: Mapping[str, Any] | None = None,
+    case: str = S098_BASELINE_CASE,
+    stage: str = S098_BASELINE_STAGE,
+) -> dict[str, Any]:
+    """Decide S-098 ship eligibility for one candidate report.
+
+    Ship eligibility requires all of S-098 AC #1720/#1721: at least three
+    authoritative quiescent trials, no parity failure, observed traversals
+    within the registered budget, and a median fixed routed-root time strictly
+    below `S098_FIXED_ROOT_BUDGET_SECONDS`. Exactly at the threshold is a
+    rejection. The T-139 symbol budget is recorded and reported, never used to
+    widen this decision.
+    """
+    frozen = load_baseline_fixture() if baseline is None else baseline
+    decision = _decision_shell(case, stage)
+    decision["baseline_artifact"] = frozen.get("source_artifact")
+    try:
+        frozen_observation = root_observation(
+            frozen, case=S098_BASELINE_CASE, stage=S098_BASELINE_STAGE
+        )
+    except BaselineError as error:
+        decision["reason"] = error.reason
+        decision["reasons"] = [error.reason]
+        decision["detail"] = f"baseline: {error.detail}"
+        return decision
+    decision["baseline"] = frozen_observation
+    try:
+        candidate = root_observation(report, case=case, stage=stage)
+    except BaselineError as error:
+        decision["reason"] = error.reason
+        decision["reasons"] = [error.reason]
+        decision["detail"] = f"candidate: {error.detail}"
+        return decision
+
+    decision["candidate"] = candidate
+    reasons = set()
+    if candidate["identity"] != frozen_observation["identity"]:
+        reasons.add(S098_REASON_IDENTITY)
+    if not candidate["authoritative_timing"] or not candidate["quiescent"]:
+        reasons.add(S098_REASON_CONTENDED)
+    if candidate["trial_count"] < MINIMUM_TRIALS:
+        reasons.add(S098_REASON_TRIALS)
+    if candidate["parity_failures"] or not candidate["semantic_parity"]:
+        reasons.add(S098_REASON_PARITY)
+    if candidate["traversal_budget_exceeded_trials"]:
+        reasons.add(S098_REASON_TRAVERSAL_BUDGET)
+    if not candidate["fixed_root_median"] < S098_FIXED_ROOT_BUDGET_SECONDS:
+        reasons.add(S098_REASON_FIXED_ROOT_BUDGET)
+
+    ordered = [reason for reason in S098_REJECTION_REASONS if reason in reasons]
+    decision["reasons"] = ordered
+    decision["reason"] = ordered[0] if ordered else None
+    decision["ship_eligible"] = not ordered
+    decision["fixed_root_median_seconds"] = candidate["fixed_root_median"]
+    decision["baseline_fixed_root_median_seconds"] = frozen_observation[
+        "fixed_root_median"
+    ]
+    decision["fixed_root_improvement_seconds"] = (
+        frozen_observation["fixed_root_median"] - candidate["fixed_root_median"]
+    )
+    decision["symbol_root_median_seconds"] = candidate["symbol_root_median"]
+    decision["symbol_root_budget_met"] = (
+        candidate["symbol_root_median"] < S098_SYMBOL_ROOT_BUDGET_SECONDS
+    )
+    return decision
+
+
 def _host_quiescence() -> dict[str, Any]:
     process_text = _command_text(["ps", "-axo", "pid=,pcpu=,command="])
     competitors = [
@@ -1387,6 +2090,9 @@ def main() -> int:
 
     report["attribution_results"] = attribution_summary(
         report["aggregates"], args.representative_files, args.scale_files
+    )
+    report["s098_root_fusion"] = qualify(
+        report, case=f"header-heavy:{args.representative_files}:forward"
     )
     args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(args.output)

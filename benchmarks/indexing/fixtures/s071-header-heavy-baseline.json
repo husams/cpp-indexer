@@ -1,0 +1,174 @@
+{
+  "fixture": "s098-baseline/v2",
+  "description": "Compact excerpt of the S-071 authoritative header-heavy baseline run. Field shape matches the full HSE-103 report so the same S-098 summary reads either one. Carries the corpus, method, and front-end-reuse parameters the identity fingerprint binds.",
+  "source_artifact": {
+    "backlog_task": "S-098",
+    "name": "s071-authoritative-r3.json",
+    "rel_path": "artifacts/S-098/s071-authoritative-r3.json",
+    "sha256": "014795c0eaf813e75ab81adf7b925e6df2a8bc616319ad2c2214b9c015d8fede",
+    "bytes": 3196668
+  },
+  "method": "HSE-103",
+  "authoritative_timing": true,
+  "host_quiescence": {
+    "load_average": [
+      4.57177734375,
+      4.1298828125,
+      3.984375
+    ],
+    "competing_cidx_indexers": [],
+    "quiescent": true
+  },
+  "corpus_contract": {
+    "baseline_distinct_owned_headers": 2,
+    "many_header_target": 16,
+    "shapes": [
+      "baseline",
+      "header-heavy",
+      "many-headers",
+      "fan-in"
+    ],
+    "orders": [
+      "forward",
+      "reverse"
+    ]
+  },
+  "front_end_reuse": null,
+  "identity": {
+    "host": {
+      "platform": "Darwin-25.1.0-arm64-arm-64bit-Mach-O",
+      "machine": "arm64",
+      "processor": "arm",
+      "cpu_count": 10
+    },
+    "executable": {
+      "sha256": "041033a1d29fc77feab466b1e3f33b30e0518bb549f9c1fddd81f0c3de003ed4",
+      "version": "cidx 0.53.0"
+    },
+    "checkout": {
+      "commit": "265d4f95945dfe29e4f845607837c8bc666008f8"
+    },
+    "sqlite": {
+      "version": "3.53.3"
+    },
+    "clang": {
+      "resource_dir": "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/17"
+    },
+    "schema": {
+      "version": 40,
+      "catalog_version": 1,
+      "catalog_hash": "c4f426232c34739c83a3d15c3bd91b4d4f8934ec8853f8efaa7a27939e37e9f7"
+    }
+  },
+  "parity_failures": [],
+  "individual_trials": {
+    "header-heavy:8:forward:trial-1": {
+      "kind": "synthetic",
+      "shape": "header-heavy",
+      "order": "forward",
+      "files": 8,
+      "baseline_distinct_owned_headers": 2,
+      "target_distinct_owned_headers": 18
+    },
+    "header-heavy:8:forward:trial-2": {
+      "kind": "synthetic",
+      "shape": "header-heavy",
+      "order": "forward",
+      "files": 8,
+      "baseline_distinct_owned_headers": 2,
+      "target_distinct_owned_headers": 18
+    },
+    "header-heavy:8:forward:trial-3": {
+      "kind": "synthetic",
+      "shape": "header-heavy",
+      "order": "forward",
+      "files": 8,
+      "baseline_distinct_owned_headers": 2,
+      "target_distinct_owned_headers": 18
+    }
+  },
+  "aggregates": {
+    "header-heavy:8:forward": {
+      "trial_count": 3,
+      "parity_failures": [],
+      "stages": {
+        "cold": {
+          "wall_seconds": 0.2557328330585733,
+          "wall_seconds_trials": [
+            0.2557328330585733,
+            0.2543906250502914,
+            0.26297070807777345
+          ],
+          "semantic_parity": true,
+          "canonical_sha256_trials": [
+            "5525263dbd6c68437702bf3146b6d5dd68e10fb0de26bc4f9e97dd2cf1622548",
+            "5525263dbd6c68437702bf3146b6d5dd68e10fb0de26bc4f9e97dd2cf1622548",
+            "5525263dbd6c68437702bf3146b6d5dd68e10fb0de26bc4f9e97dd2cf1622548"
+          ],
+          "profile_summary": {
+            "timings": {
+              "root_symbols": {
+                "median": 0.031090999999999994,
+                "trials": [
+                  0.030957000000000005,
+                  0.031090999999999994,
+                  0.032137
+                ]
+              },
+              "root_declarations": {
+                "median": 0.006606000000000001,
+                "trials": [
+                  0.006502,
+                  0.006606000000000001,
+                  0.006663
+                ]
+              },
+              "root_definitions": {
+                "median": 0.001938,
+                "trials": [
+                  0.001938,
+                  0.001938,
+                  0.0019769999999999996
+                ]
+              },
+              "root_namespaces": {
+                "median": 0.0009760000000000001,
+                "trials": [
+                  0.000975,
+                  0.0009760000000000001,
+                  0.0009989999999999999
+                ]
+              }
+            },
+            "counters": {
+              "registered_root_traversal_budget": {
+                "median": 32,
+                "trials": [
+                  32,
+                  32,
+                  32
+                ]
+              },
+              "observed_root_traversals": {
+                "median": 32,
+                "trials": [
+                  32,
+                  32,
+                  32
+                ]
+              },
+              "root_traverse_decl_calls": {
+                "median": 32,
+                "trials": [
+                  32,
+                  32,
+                  32
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
