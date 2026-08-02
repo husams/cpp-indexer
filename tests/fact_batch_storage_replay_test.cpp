@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -50,6 +51,16 @@ auto symbol(const ast::FactPartitionKey &owner, std::string usr,
   return result;
 }
 
+auto diagnostic(const ast::FactPartitionKey &owner)
+    -> ast::DiagnosticFactRecord {
+  return {.partition = owner,
+          .severity = ast::DiagnosticSeverity::warning,
+          .spelling = "replay warning",
+          .location_file = owner.file,
+          .line = 7,
+          .col = 3};
+}
+
 class StorageReplayPort final : public application::FactBatchReplayPort {
 public:
   explicit StorageReplayPort(Storage &storage)
@@ -68,6 +79,7 @@ public:
     symbols_.reset_all_counters();
     edges_.reset_all_fact_ids();
     files_.clear();
+    diagnostics_.clear();
     transaction_ = ports_.unit_of_work.begin();
   }
 
@@ -114,15 +126,31 @@ public:
   }
 
   void
-  apply_other(const ast::FactPartitionKey & /*owner*/, ast::FactFamily family,
-              std::size_t /*record_index*/,
-              const ast::FactRecords & /*records*/,
+  apply_other(const ast::FactPartitionKey &owner, ast::FactFamily family,
+              std::size_t record_index, const ast::FactRecords &records,
               const application::TransientFactApplyMap & /*ids*/) override {
+    if (family == ast::FactFamily::diagnostics) {
+      const ast::DiagnosticFactRecord &record =
+          records.diagnostics.at(record_index);
+      diagnostics_[files_.at(owner)].push_back(
+          {.severity = static_cast<int>(record.severity) + 1,
+           .spelling = record.spelling,
+           .file_path =
+               record.location_file
+                   ? std::optional(record.location_file->portable_path())
+                   : std::nullopt,
+           .line = record.line,
+           .col = record.col});
+      return;
+    }
     throw std::runtime_error("unsupported family in focused replay oracle: " +
                              std::to_string(static_cast<unsigned>(family)));
   }
 
   void commit_translation_unit() override {
+    for (const auto &[file_id, records] : diagnostics_) {
+      sqlite_.source_write().replace_diagnostics(file_id, records);
+    }
     transaction_->commit();
     transaction_.reset();
   }
@@ -145,6 +173,7 @@ private:
   ast::StorageEdgeSink edges_;
   std::unique_ptr<storage::UnitOfWork> transaction_;
   std::map<ast::FactPartitionKey, std::int64_t> files_;
+  std::map<std::int64_t, std::vector<Diagnostic>> diagnostics_;
   bool rollback_failed_ = false;
 };
 
@@ -152,13 +181,15 @@ struct NormalizedLayerZero {
   std::vector<std::string> symbols;
   std::vector<std::string> relations;
   std::vector<std::string> definitions;
+  std::vector<std::string> diagnostics;
+  std::uint64_t canonical_digest = 0;
 
   bool operator==(const NormalizedLayerZero &) const = default;
 };
 
 auto normalized(Storage &storage) -> NormalizedLayerZero {
   NormalizedLayerZero result;
-  for (const std::string usr : {"usr-shared", "usr-target"}) {
+  for (const std::string usr : {"usr-shared", "usr-target", "usr-main-only"}) {
     for (const Symbol &stored : storage.lookup_symbols_by_usr(usr)) {
       result.symbols.push_back(stored.usr + ':' +
                                stored.display_name.value_or("-") + ':' +
@@ -176,9 +207,33 @@ auto normalized(Storage &storage) -> NormalizedLayerZero {
       }
     }
   }
+  const auto main_file = storage.get_file("/tmp/cidx-s072-replay/main.cpp");
+  if (!main_file) {
+    throw std::logic_error("normalized replay fixture has no main file");
+  }
+  for (const Diagnostic &record : storage.get_diagnostics(main_file->id)) {
+    result.diagnostics.push_back(std::to_string(record.severity) + ':' +
+                                 record.spelling + ':' +
+                                 record.file_path.value_or("-") + ':' +
+                                 std::to_string(record.line.value_or(0)) + ':' +
+                                 std::to_string(record.col.value_or(0)));
+  }
   std::ranges::sort(result.symbols);
   std::ranges::sort(result.relations);
   std::ranges::sort(result.definitions);
+  std::ranges::sort(result.diagnostics);
+  std::string canonical;
+  const auto append = [&canonical](std::string_view family,
+                                   const std::vector<std::string> &records) {
+    for (const std::string &record : records) {
+      canonical += std::string(family) + ':' + record + '\n';
+    }
+  };
+  append("symbol", result.symbols);
+  append("relation", result.relations);
+  append("definition", result.definitions);
+  append("diagnostic", result.diagnostics);
+  result.canonical_digest = ast::stable_fact_hash(canonical);
   return result;
 }
 
@@ -228,6 +283,49 @@ void apply_direct(Storage &storage, const ast::FactPartitionKey &header,
                                     .is_virtual = std::nullopt}));
   static_cast<void>(edges.get_or_create_definition(target, main_id, 4, 2, 4, 8,
                                                    std::nullopt));
+  const ast::DiagnosticFactRecord record = diagnostic(main);
+  sqlite.source_write().replace_diagnostics(
+      main_id,
+      {{.severity = static_cast<int>(record.severity) + 1,
+        .spelling = record.spelling,
+        .file_path = record.location_file
+                         ? std::optional(record.location_file->portable_path())
+                         : std::nullopt,
+        .line = record.line,
+        .col = record.col}});
+  transaction->commit();
+}
+
+void apply_direct_main_only(Storage &storage,
+                            const ast::FactPartitionKey &main) {
+  storage::SqliteStoragePorts sqlite(storage);
+  storage::AstStoragePorts ports{.workspace = sqlite.workspace_catalog_read(),
+                                 .source = sqlite.source_read(),
+                                 .symbols_read = sqlite.symbol_read(),
+                                 .symbols_write = sqlite.symbol_write(),
+                                 .types_write = sqlite.type_write(),
+                                 .facts_write = sqlite.fact_write(),
+                                 .definitions_write = sqlite.definition_write(),
+                                 .unit_of_work = sqlite.unit_of_work()};
+  ast::StorageSymbolSink symbols(ports);
+  auto transaction = ports.unit_of_work.begin();
+  const auto main_file = ports.source.get_file(main.file.portable_path());
+  if (!main_file) {
+    throw std::logic_error("direct main-only fixture file was not preplanned");
+  }
+  symbols.set_identity_translation_unit_file_id(main_file->id);
+  symbols.set_current_file_id(main_file->id);
+  symbols.emit(symbol(main, "usr-main-only", "main-only"));
+  const ast::DiagnosticFactRecord record = diagnostic(main);
+  sqlite.source_write().replace_diagnostics(
+      main_file->id,
+      {{.severity = static_cast<int>(record.severity) + 1,
+        .spelling = record.spelling,
+        .file_path = record.location_file
+                         ? std::optional(record.location_file->portable_path())
+                         : std::nullopt,
+        .line = record.line,
+        .col = record.col}});
   transaction->commit();
 }
 
@@ -255,6 +353,16 @@ auto replay_batch(const ast::FactPartitionKey &header,
                                        .is_virtual = std::nullopt}));
   static_cast<void>(recorder.get_or_create_definition(target.value(), 102, 4, 2,
                                                       4, 8, std::nullopt));
+  recorder.emit(diagnostic(main));
+  return recorder.canonical_batch();
+}
+
+auto replay_batch_main_only(const ast::FactPartitionKey &main)
+    -> ast::FactBatch {
+  ast::FactBatchRecorder recorder("storage-replay-main-only-oracle");
+  recorder.set_partition(main, 102);
+  recorder.emit(symbol(main, "usr-main-only", "main-only"));
+  recorder.emit(diagnostic(main));
   return recorder.canonical_batch();
 }
 
@@ -283,4 +391,24 @@ TEST_CASE("storage-backed replay matches the direct sink and legacy order") {
   INFO(repeated.error.value_or(""));
   REQUIRE(repeated.committed);
   CHECK(normalized(replayed) == first_replay);
+}
+
+TEST_CASE("storage-backed replay matches a main-only direct sink") {
+  const auto main = partition("main.cpp", "/tmp/cidx-s072-replay/main.cpp");
+  Storage direct(":memory:");
+  Storage replayed(":memory:");
+  prepare(direct);
+  prepare(replayed);
+  apply_direct_main_only(direct, main);
+
+  StorageReplayPort replay_port(replayed);
+  const auto replay_result =
+      application::replay_fact_batch(replay_batch_main_only(main), replay_port);
+  INFO(replay_result.error.value_or(""));
+  REQUIRE(replay_result.committed);
+  const NormalizedLayerZero expected = normalized(direct);
+  const NormalizedLayerZero actual = normalized(replayed);
+  CHECK(actual == expected);
+  CHECK(actual.canonical_digest == expected.canonical_digest);
+  CHECK(actual.diagnostics.size() == 1);
 }

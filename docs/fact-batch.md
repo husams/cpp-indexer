@@ -153,6 +153,12 @@ conflicts are applied in recorded legacy emission order even though the
 published record vectors are canonical. Any failure before apply, mid-family,
 before commit, or from commit rolls the whole TU back.
 
+The correctness replay oracle applies symbols, relations, definitions, and
+diagnostics for main-only and preplanned multi-file routes. Include and
+applicability publication, generation lifecycle, and derived resolve inputs
+remain deliberate `apply_other` boundaries: S-099 owns their controlled
+planning/lifecycle, and S-073 owns their set-based storage publication.
+
 ## Ownership boundaries
 
 - S-099 owns owned-header planning, file-row creation, lifecycle execution,
