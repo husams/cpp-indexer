@@ -62,10 +62,17 @@ auto FactPartitionKey::stable_string() const -> std::string {
 }
 
 auto SymbolNaturalKey::stable_string() const -> std::string {
-  std::string result = partition.stable_string();
+  std::string result;
+  append_field(result, partition.configuration.semantic_universe);
+  const bool local =
+      linkage && (*linkage == "internal" || *linkage == "no-linkage");
+  if (local) {
+    append_field(result, "local");
+    append_field(result, partition.configuration.translation_unit);
+    append_field(result, partition.configuration.identity_source);
+    append_optional(result, local_anchor);
+  }
   append_field(result, usr);
-  append_optional(result, local_anchor);
-  append_optional(result, linkage);
   return result;
 }
 

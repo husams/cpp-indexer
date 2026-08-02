@@ -88,6 +88,8 @@ public:
       -> const std::map<std::int64_t, std::string> &;
   [[nodiscard]] auto definition_keys() const
       -> const std::map<std::int64_t, std::string> &;
+  [[nodiscard]] auto file_keys() const
+      -> const std::map<std::int64_t, FactPartitionKey> &;
 
 private:
   struct Data {
@@ -100,6 +102,7 @@ private:
     std::map<std::int64_t, std::string> relation_keys;
     std::map<std::int64_t, std::string> type_keys;
     std::map<std::int64_t, std::string> definition_keys;
+    std::map<std::int64_t, FactPartitionKey> file_keys;
   };
 
   explicit FactBatch(std::shared_ptr<const Data> data);
@@ -114,6 +117,9 @@ struct FactBatchOperationCounters {
 
   void note(std::string_view operation, std::uint64_t touched = 0);
 };
+
+[[nodiscard]] auto stable_symbol_record_key(const SymbolRecord &record)
+    -> std::string;
 
 // Complexity contract (T-052): emit/index operations are amortised O(1),
 // exact and source-less symbol lookup are O(1) plus result selection,
@@ -226,8 +232,12 @@ private:
   [[nodiscard]] static auto natural_key(const SymbolRecord &symbol,
                                         const FactPartitionKey &partition)
       -> SymbolNaturalKey;
-  [[nodiscard]] static auto source_lookup_key(std::string_view source,
+  [[nodiscard]] static auto source_lookup_key(const FactPartitionKey &partition,
+                                              std::string_view source,
                                               std::string_view usr)
+      -> std::string;
+  [[nodiscard]] static auto scope_lookup_key(const FactPartitionKey &partition,
+                                             std::string_view usr)
       -> std::string;
   [[nodiscard]] static auto name_kind_key(std::string_view name,
                                           std::string_view kind) -> std::string;
@@ -273,7 +283,8 @@ private:
   CollisionSafeHandleIndex definition_handles_;
   CollisionSafeHandleIndex file_handles_;
   std::unordered_map<std::string, std::int64_t> symbol_ids_by_source_usr_;
-  std::unordered_map<std::string, std::set<std::int64_t>> symbol_ids_by_usr_;
+  std::unordered_map<std::string, std::set<std::int64_t>>
+      symbol_ids_by_scope_usr_;
   std::unordered_map<std::int64_t, std::vector<std::size_t>>
       symbol_positions_by_id_;
   std::unordered_map<std::string, std::vector<TypeArgCandidate>>
@@ -286,6 +297,8 @@ private:
   std::unordered_map<std::int64_t, std::vector<std::size_t>>
       body_edge_positions_by_source_;
   std::unordered_map<std::string, std::int64_t> definition_ids_by_key_;
+  std::unordered_map<std::int64_t, FactPartitionKey>
+      definition_partitions_by_id_;
   std::map<std::int64_t, std::string> display_names_;
   std::uint64_t next_emission_order_ = 0;
   FactBatchOperationCounters counters_;

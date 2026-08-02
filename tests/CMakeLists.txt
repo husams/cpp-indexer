@@ -27,6 +27,7 @@ set(CIDX_DEFAULT_TESTS
   workspace_context_test
   ast_pass_test
   fact_batch_pipeline_test
+  fact_batch_storage_replay_test
   fact_batch_complexity_test
   ui_graph_view_test
   ui_server_test

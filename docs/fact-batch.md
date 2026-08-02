@@ -18,13 +18,21 @@ configuration = (semantic universe, translation unit,
                  normalized configuration, identity source)
 ```
 
-`SymbolNaturalKey` adds USR, optional local anchor, and linkage. Type and
-relation natural keys refer to the same partitioned identity vocabulary.
+`SymbolNaturalKey` follows storage linkage semantics: externally linked
+symbols coalesce by semantic universe and USR, while internal and no-linkage
+symbols additionally include translation-unit, identity-source, and optional
+local-anchor identity. Type and relation natural keys refer to the same
+partitioned identity vocabulary.
 Emitter ports continue to exchange `int64_t` values for source compatibility,
 but these are collision-checked transient handles backed by natural-key
 dictionaries. They are never SQLite `file.id`, `symbol.id`, `edge.id`, or
 `definition.id`. The writer resolves them to database-local IDs through a
 per-transaction apply map.
+
+The published `file_keys()` dictionary maps every transient file handle used
+by file-bearing facts to its portable partition key. Replay resolves these
+handles before applying symbols or later families; no transient file handle is
+passed to storage.
 
 The initial replay key is exactly `(component.path, directory.path,
 file.name)`. `LegacyApplyOrderKey` additionally retains first-seen and conflict
@@ -59,7 +67,7 @@ This table is authoritative and mirrors the comment beside
 | Operation | Index or bucket | Bound |
 |---|---|---|
 | symbol emit / exact source lookup | natural key and `(source, USR)` | amortised O(1) |
-| source-less symbol lookup | USR → ordered transient handles | amortised O(1), plus one selected result |
+| source-less symbol lookup | `(universe, TU, USR)` → transient handles | amortised O(1); succeeds only for one unambiguous result |
 | qualified/unqualified type candidate lookup | name → first-seen candidates | amortised O(1) + output |
 | qualified-name and kind lookup | `(qualified name, kind)` → handles | amortised O(1) + output |
 | display-name update | symbol handle → record positions | O(records for that symbol) |
@@ -75,6 +83,8 @@ No per-emission operation scans a growing whole-batch vector. The isolated
 and 8,000 symbols with at least five trials, reports emission separately from
 canonicalization, fits a quadratic component, and rejects it above the recorded
 tolerance.
+Each trial also compares a canonical-output fingerprint across repeated builds
+of the same mixed-partition workload.
 
 ## Extraction and replay failure boundaries
 
@@ -85,8 +95,10 @@ partial batch and has no storage port to mutate.
 
 `application::replay_fact_batch` applies partitions in the legacy file order
 inside one `FactBatchReplayPort` translation-unit transaction. It resolves
-natural handles through transient symbol/relation/definition maps. Any failure
-before apply, mid-family, before commit, or from commit rolls the whole TU back.
+natural handles through transient file/symbol/relation/definition maps. Symbol
+conflicts are applied in recorded legacy emission order even though the
+published record vectors are canonical. Any failure before apply, mid-family,
+before commit, or from commit rolls the whole TU back.
 
 ## Ownership boundaries
 

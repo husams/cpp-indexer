@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <ranges>
+#include <stdexcept>
 #include <tuple>
 #include <utility>
 
@@ -185,18 +186,34 @@ void append_unique(std::vector<T> &values, const T &value) {
   }
 }
 
-auto file_identity_from_path(std::string_view value) -> PortableFileIdentity {
-  const std::size_t separator = value.find_last_of("/\\");
-  const std::string directory = separator == std::string_view::npos
-                                    ? std::string{}
-                                    : std::string(value.substr(0, separator));
+auto file_identity_from_path(std::string_view value,
+                             std::string_view component_path)
+    -> PortableFileIdentity {
+  std::string_view relative = value;
+  if (!component_path.empty() && value.starts_with(component_path)) {
+    relative.remove_prefix(component_path.size());
+    if (relative.starts_with('/') || relative.starts_with('\\')) {
+      relative.remove_prefix(1);
+    }
+  }
+  const std::size_t separator = relative.find_last_of("/\\");
+  const std::string directory =
+      separator == std::string_view::npos
+          ? std::string{}
+          : std::string(relative.substr(0, separator));
   const std::string file = separator == std::string_view::npos
-                               ? std::string(value)
-                               : std::string(value.substr(separator + 1));
-  return {.component_path = {}, .directory_path = directory, .file_name = file};
+                               ? std::string(relative)
+                               : std::string(relative.substr(separator + 1));
+  return {.component_path = std::string(component_path),
+          .directory_path = directory,
+          .file_name = file};
 }
 
 } // namespace
+
+auto stable_symbol_record_key(const SymbolRecord &record) -> std::string {
+  return symbol_record_key(record);
+}
 
 FactBatch::FactBatch() : data_(std::make_shared<const Data>()) {}
 
@@ -233,6 +250,10 @@ auto FactBatch::type_keys() const
 auto FactBatch::definition_keys() const
     -> const std::map<std::int64_t, std::string> & {
   return data_->definition_keys;
+}
+auto FactBatch::file_keys() const
+    -> const std::map<std::int64_t, FactPartitionKey> & {
+  return data_->file_keys;
 }
 
 void FactBatchOperationCounters::note(std::string_view operation,
@@ -275,7 +296,8 @@ auto FactBatchRecorder::partition_for_symbol(const SymbolRecord &symbol) const
         handle != file_handles_by_path_.end()) {
       result = partition_for_file_handle(handle->second);
     } else {
-      result.file = file_identity_from_path(symbol.file);
+      result.file =
+          file_identity_from_path(symbol.file, result.file.component_path);
     }
   }
   if (!symbol.semantic_universe.empty()) {
@@ -312,9 +334,18 @@ auto FactBatchRecorder::natural_key(const SymbolRecord &symbol,
           .linkage = symbol.linkage};
 }
 
-auto FactBatchRecorder::source_lookup_key(std::string_view source,
+auto FactBatchRecorder::source_lookup_key(const FactPartitionKey &partition,
+                                          std::string_view source,
                                           std::string_view usr) -> std::string {
-  return std::string(source) + '\n' + std::string(usr);
+  return partition.configuration.semantic_universe + '\n' +
+         partition.configuration.translation_unit + '\n' + std::string(source) +
+         '\n' + std::string(usr);
+}
+
+auto FactBatchRecorder::scope_lookup_key(const FactPartitionKey &partition,
+                                         std::string_view usr) -> std::string {
+  return partition.configuration.semantic_universe + '\n' +
+         partition.configuration.translation_unit + '\n' + std::string(usr);
 }
 
 auto FactBatchRecorder::name_kind_key(std::string_view name,
@@ -332,9 +363,9 @@ void FactBatchRecorder::emit(const SymbolRecord &symbol) {
   symbol_positions_by_id_[id].push_back(position);
 
   const std::string source = symbol.identity_source.value_or(symbol.file);
-  symbol_ids_by_source_usr_.try_emplace(source_lookup_key(source, symbol.usr),
-                                        id);
-  symbol_ids_by_usr_[symbol.usr].insert(id);
+  symbol_ids_by_source_usr_.try_emplace(
+      source_lookup_key(partition, source, symbol.usr), id);
+  symbol_ids_by_scope_usr_[scope_lookup_key(partition, symbol.usr)].insert(id);
 
   const char *mapped_kind = cidx_kind_name_from_int(symbol.kind);
   std::string kind = symbol.kind_name;
@@ -360,6 +391,7 @@ void FactBatchRecorder::emit(const SymbolRecord &symbol) {
                        .first_seen = emission,
                        .conflict_ordinal = static_cast<std::uint64_t>(
                            symbol_positions_by_id_[id].size() - 1)},
+       .record_key = symbol_record_key(symbol),
        .first_seen = emission,
        .last_seen = emission});
   counters_.note("emit_symbol");
@@ -409,27 +441,42 @@ auto FactBatchRecorder::lookup_symbol_id(
                                  : "lookup_symbol_sourceless");
   if (identity_source) {
     const auto found = symbol_ids_by_source_usr_.find(
-        source_lookup_key(*identity_source, usr));
-    return found == symbol_ids_by_source_usr_.end()
-               ? std::nullopt
-               : std::optional<std::int64_t>(found->second);
+        source_lookup_key(current_partition_, *identity_source, usr));
+    if (found == symbol_ids_by_source_usr_.end()) {
+      return std::nullopt;
+    }
+    ++counters_.records_touched["lookup_symbol_exact"];
+    return found->second;
   }
-  const auto found = symbol_ids_by_usr_.find(usr);
-  if (found == symbol_ids_by_usr_.end() || found->second.empty()) {
+  const auto found =
+      symbol_ids_by_scope_usr_.find(scope_lookup_key(current_partition_, usr));
+  if (found == symbol_ids_by_scope_usr_.end() || found->second.empty()) {
     return std::nullopt;
+  }
+  counters_.records_touched["lookup_symbol_sourceless"] +=
+      std::min<std::size_t>(found->second.size(), 2);
+  if (found->second.size() != 1) {
+    throw std::runtime_error("ambiguous symbol USR within translation unit: " +
+                             usr);
   }
   return *found->second.begin();
 }
 
 auto FactBatchRecorder::mint_symbol(const MintRequest &request)
     -> std::int64_t {
-  const std::string source =
-      request.identity_source.value_or(request.decl_path.value_or(""));
+  std::optional<std::string> source = request.identity_source;
+  if ((!source || source->empty()) && request.decl_path &&
+      !request.decl_path->empty()) {
+    source = request.decl_path;
+  }
+  if (source && source->empty()) {
+    source.reset();
+  }
   if (const auto existing = lookup_symbol_id(request.usr, source)) {
     return *existing;
   }
   SymbolRecord symbol;
-  symbol.file = source;
+  symbol.file = source.value_or("");
   symbol.usr = request.usr;
   symbol.spelling = request.spelling;
   symbol.kind = -1;
@@ -443,7 +490,11 @@ auto FactBatchRecorder::mint_symbol(const MintRequest &request)
   symbol.identity_source = source;
   symbol.kind_name = request.kind_name;
   emit(symbol);
-  return symbol_ids_by_source_usr_.at(source_lookup_key(source, request.usr));
+  const auto created = lookup_symbol_id(request.usr, source);
+  if (!created) {
+    throw std::logic_error("minted symbol is not indexed");
+  }
+  return *created;
 }
 
 auto FactBatchRecorder::file_id_for_path(const std::string &path)
@@ -554,7 +605,7 @@ auto FactBatchRecorder::intern_type_node(const TypeNodeRecord &node)
                            .type_key = node.type_key};
   const std::string stable = "type:" + key.stable_string();
   if (const auto found = type_handles_.find(stable)) {
-    counters_.note("intern_type_node");
+    counters_.note("intern_type_node", 1);
     return *found;
   }
   const std::int64_t id = type_handles_.find_or_insert(stable);
@@ -601,12 +652,13 @@ auto FactBatchRecorder::get_or_create_definition(
       optional_text(init_text);
   if (const auto found = definition_ids_by_key_.find(natural);
       found != definition_ids_by_key_.end()) {
-    counters_.note("get_or_create_definition");
+    counters_.note("get_or_create_definition", 1);
     return found->second;
   }
   const std::int64_t id =
       definition_handles_.find_or_insert("definition:" + natural);
   definition_ids_by_key_.emplace(natural, id);
+  definition_partitions_by_id_.emplace(id, partition);
   definitions_.push_back({.partition = partition,
                           .record = {.id = id,
                                      .symbol_id = symbol_id,
@@ -623,7 +675,11 @@ auto FactBatchRecorder::get_or_create_definition(
 void FactBatchRecorder::add_def_edge(std::int64_t definition_id,
                                      std::int64_t destination_id,
                                      std::int64_t kind) {
-  definition_edges_.push_back({.partition = current_partition_,
+  const auto partition = definition_partitions_by_id_.find(definition_id);
+  const FactPartitionKey &owner_partition =
+      partition == definition_partitions_by_id_.end() ? current_partition_
+                                                      : partition->second;
+  definition_edges_.push_back({.partition = owner_partition,
                                .record = {.definition_id = definition_id,
                                           .destination_id = destination_id,
                                           .kind = kind}});
@@ -844,6 +900,8 @@ auto FactBatchRecorder::build_batch(bool canonical) const -> FactBatch {
   data->relation_keys = edge_handles_.entries();
   data->type_keys = type_handles_.entries();
   data->definition_keys = definition_handles_.entries();
+  data->file_keys.insert(partitions_by_file_handle_.begin(),
+                         partitions_by_file_handle_.end());
   Memberships memberships;
   append_symbol_records(*data, memberships, canonical);
   append_type_records(*data, memberships, canonical);

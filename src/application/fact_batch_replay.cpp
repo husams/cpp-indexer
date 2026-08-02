@@ -1,6 +1,10 @@
 #include "application/fact_batch_replay.hpp"
 
+#include <algorithm>
+#include <cstddef>
 #include <stdexcept>
+#include <utility>
+#include <vector>
 
 namespace cidx::application {
 
@@ -30,6 +34,69 @@ void inject(FactReplayFailurePoint actual, FactReplayFailurePoint requested) {
   }
 }
 
+struct SymbolLocation {
+  ast::FactPartitionKey partition;
+  std::size_t index = 0;
+};
+
+auto symbol_locations(const ast::FactBatch &batch)
+    -> std::map<std::string, std::vector<SymbolLocation>> {
+  std::map<std::string, std::vector<SymbolLocation>> result;
+  const ast::FactRecords &records = batch.records();
+  for (const ast::FileFactPartition &partition : batch.partitions()) {
+    const auto found = partition.members.find(ast::FactFamily::symbols);
+    if (found == partition.members.end()) {
+      continue;
+    }
+    for (const std::size_t index : found->second) {
+      const ast::SymbolRecord &record = records.symbols.at(index);
+      const std::string key = symbol_natural_key(partition.key, record) + '\n' +
+                              ast::stable_symbol_record_key(record);
+      result[key].push_back({.partition = partition.key, .index = index});
+    }
+  }
+  return result;
+}
+
+void apply_files(const ast::FactBatch &batch, FactBatchReplayPort &port,
+                 TransientFactApplyMap &ids) {
+  std::map<ast::FactPartitionKey, std::vector<std::int64_t>> handles;
+  for (const auto &[handle, partition] : batch.file_keys()) {
+    handles[partition].push_back(handle);
+  }
+  for (const auto &[partition, partition_handles] : handles) {
+    const std::int64_t applied =
+        port.apply_file(partition, partition.stable_string());
+    for (const std::int64_t handle : partition_handles) {
+      ids.files[handle] = applied;
+    }
+  }
+}
+
+void apply_symbols(const ast::FactBatch &batch, FactBatchReplayPort &port,
+                   const std::map<std::string, std::int64_t> &symbol_handles,
+                   TransientFactApplyMap &ids) {
+  const ast::FactRecords &records = batch.records();
+  auto locations = symbol_locations(batch);
+  std::map<std::string, std::size_t> next_location;
+  for (const ast::SymbolEmissionMetadata &metadata : records.symbol_order) {
+    const std::string natural = "symbol:" + metadata.symbol.stable_string();
+    const std::string key = natural + '\n' + metadata.record_key;
+    const auto found = locations.find(key);
+    if (found == locations.end() || found->second.empty()) {
+      throw std::logic_error("symbol apply-order metadata has no record");
+    }
+    std::size_t &cursor = next_location[key];
+    const SymbolLocation &location =
+        found->second[std::min(cursor, found->second.size() - 1)];
+    ++cursor;
+    const ast::SymbolRecord &record = records.symbols.at(location.index);
+    const std::int64_t batch_id = symbol_handles.at(natural);
+    ids.symbols[batch_id] =
+        port.apply_symbol(location.partition, record, natural);
+  }
+}
+
 } // namespace
 
 auto replay_fact_batch(const ast::FactBatch &batch, FactBatchReplayPort &port,
@@ -40,19 +107,9 @@ auto replay_fact_batch(const ast::FactBatch &batch, FactBatchReplayPort &port,
   try {
     port.begin_translation_unit();
     inject(FactReplayFailurePoint::before_apply, failure);
+    apply_files(batch, port, result.ids);
     const ast::FactRecords &records = batch.records();
-    for (const ast::FileFactPartition &partition : batch.partitions()) {
-      const auto symbols = partition.members.find(ast::FactFamily::symbols);
-      if (symbols != partition.members.end()) {
-        for (const std::size_t index : symbols->second) {
-          const ast::SymbolRecord &record = records.symbols.at(index);
-          const std::string natural = symbol_natural_key(partition.key, record);
-          const std::int64_t batch_id = symbol_handles.at(natural);
-          result.ids.symbols[batch_id] =
-              port.apply_symbol(partition.key, record, natural);
-        }
-      }
-    }
+    apply_symbols(batch, port, symbol_handles, result.ids);
     inject(FactReplayFailurePoint::after_symbols, failure);
 
     for (const ast::FileFactPartition &partition : batch.partitions()) {
@@ -84,6 +141,7 @@ auto replay_fact_batch(const ast::FactBatch &batch, FactBatchReplayPort &port,
                 records.definitions.at(index);
             const std::int64_t batch_definition = definition.id;
             definition.symbol_id = result.ids.symbols.at(definition.symbol_id);
+            definition.file_id = result.ids.files.at(definition.file_id);
             result.ids.definitions[batch_definition] =
                 port.apply_definition(partition.key, definition);
             continue;

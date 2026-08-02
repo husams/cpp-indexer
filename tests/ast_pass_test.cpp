@@ -1055,7 +1055,7 @@ TEST_CASE("partition identity prevents file and configuration aliasing") {
   const FactPartitionKey first =
       fact_partition("one.cpp", "workspace", "debug", "src/one.cpp");
   const FactPartitionKey second =
-      fact_partition("two.cpp", "workspace", "release", "src/two.cpp");
+      fact_partition("two.cpp", "dependency", "release", "src/two.cpp");
   FactBatchRecorder recorder("partition-test");
   recorder.set_partition(first, 11);
   emit_test_symbol(recorder, first, "same-usr", "one", 8);
@@ -1078,6 +1078,8 @@ TEST_CASE("partition identity prevents file and configuration aliasing") {
   REQUIRE(first_handle != second_handle);
 
   CHECK(published.records().symbols.size() == 1);
+  REQUIRE(published.file_keys().contains(11));
+  CHECK(published.file_keys().at(11) == first);
   const FactBatch complete = recorder.canonical_batch();
   REQUIRE(complete.partitions().size() == 2);
   CHECK(complete.records().symbols.size() == 2);
@@ -1087,6 +1089,51 @@ TEST_CASE("partition identity prevents file and configuration aliasing") {
     REQUIRE(partition.members.contains(FactFamily::symbols));
     CHECK(partition.members.at(FactFamily::symbols).size() == 1);
   }
+}
+
+TEST_CASE("symbol identities match external coalescing and local splitting") {
+  const FactPartitionKey header =
+      fact_partition("header.hpp", "workspace", "debug", "src/header.hpp");
+  const FactPartitionKey main =
+      fact_partition("main.cpp", "workspace", "debug", "src/main.cpp");
+  FactBatchRecorder recorder("identity-oracle-test");
+
+  auto emit = [&recorder](const FactPartitionKey &owner, std::string usr,
+                          std::string linkage) {
+    recorder.set_partition(owner);
+    SymbolRecord record;
+    record.file = owner.file.portable_path();
+    record.usr = std::move(usr);
+    record.spelling = "shared";
+    record.kind = 8;
+    record.linkage = std::move(linkage);
+    record.identity_source = owner.configuration.identity_source;
+    recorder.emit(record);
+    const auto id = recorder.lookup_symbol_id(
+        record.usr, owner.configuration.identity_source);
+    if (!id) {
+      throw std::logic_error("identity fixture symbol was not indexed");
+    }
+    return id.value();
+  };
+
+  const std::int64_t external_header = emit(header, "shared-usr", "external");
+  const std::int64_t external_main = emit(main, "shared-usr", "external");
+  CHECK(external_header == external_main);
+
+  const std::int64_t internal_header = emit(header, "local-usr", "internal");
+  const std::int64_t internal_main = emit(main, "local-usr", "internal");
+  CHECK(internal_header != internal_main);
+  recorder.set_partition(main);
+  bool refused_ambiguity = false;
+  try {
+    static_cast<void>(recorder.lookup_symbol_id("local-usr"));
+  } catch (const std::runtime_error &) {
+    refused_ambiguity = true;
+  }
+  CHECK(refused_ambiguity);
+  CHECK(recorder.counters().records_touched.at("lookup_symbol_sourceless") ==
+        2);
 }
 
 TEST_CASE("finalized batches expose every fact family through const records") {
@@ -1179,7 +1226,7 @@ TEST_CASE("symbol lookup indexes honor source name qualification and kind") {
   REQUIRE(classes.size() == 1);
   CHECK(functions.front() != classes.front());
   CHECK(recorder.counters().records_touched.at("lookup_symbol_sourceless") ==
-        0);
+        1);
 }
 
 TEST_CASE("mutation and aggregation operations touch only keyed buckets") {
@@ -1237,6 +1284,35 @@ TEST_CASE("mutation and aggregation operations touch only keyed buckets") {
   replacement.name = "only";
   recorder.replace_parameters(ids[0], {replacement});
   CHECK(recorder.counters().records_touched.at("replace_parameters") == 3);
+
+  TypeNodeRecord type_node;
+  type_node.type_key = "builtin:int";
+  type_node.spelling = "int";
+  type_node.kind = 1;
+  const std::int64_t type_id = recorder.intern_type_node(type_node);
+  CHECK(recorder.intern_type_node(type_node) == type_id);
+  CHECK(recorder.counters().calls.at("intern_type_node") == 2);
+  CHECK(recorder.counters().records_touched.at("intern_type_node") == 1);
+
+  const auto exact = recorder.lookup_symbol_id("usr-0", "src/main.cpp");
+  if (!exact) {
+    FAIL("exact lookup did not find the indexed symbol");
+    return;
+  }
+  CHECK(exact.value() == ids[0]);
+  CHECK(recorder.counters().records_touched.at("lookup_symbol_exact") == 1);
+
+  const std::int64_t definition_id =
+      recorder.get_or_create_definition(ids[0], 0, 3, 4, 3, 12, std::nullopt);
+  CHECK(recorder.get_or_create_definition(ids[0], 0, 3, 4, 3, 12,
+                                          std::nullopt) == definition_id);
+  CHECK(recorder.counters().calls.at("get_or_create_definition") == 2);
+  CHECK(recorder.counters().records_touched.at("get_or_create_definition") ==
+        1);
+  recorder.copy_body_edges_to_def_edge(definition_id, ids[0]);
+  CHECK(recorder.counters().records_touched.at("copy_body_edges_to_def_edge") ==
+        10);
+
   const FactBatch batch = recorder.canonical_batch();
   REQUIRE(batch.records().parameters.size() == 1);
   CHECK(batch.records().parameters.front().parameter.name == "only");

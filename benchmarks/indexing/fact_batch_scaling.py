@@ -64,6 +64,7 @@ def main() -> int:
     for size in sizes:
         trials = []
         canonical = []
+        fingerprints: set[int] = set()
         for _ in range(args.trials):
             completed = subprocess.run(
                 [str(args.benchmark), "--symbols", str(size)],
@@ -74,6 +75,11 @@ def main() -> int:
             measurement = json.loads(completed.stdout)
             trials.append(int(measurement["emission_ns"]))
             canonical.append(int(measurement["canonicalization_ns"]))
+            fingerprints.add(int(measurement["canonical_fingerprint"]))
+        if len(fingerprints) != 1:
+            raise RuntimeError(
+                f"canonical output changed across trials for {size} symbols"
+            )
         emission_median = float(statistics.median(trials))
         canonical_median = float(statistics.median(canonical))
         samples.append((size, emission_median))
@@ -83,6 +89,7 @@ def main() -> int:
                 "trials": args.trials,
                 "emission_median_ns": emission_median,
                 "canonicalization_median_ns": canonical_median,
+                "canonical_fingerprint": next(iter(fingerprints)),
             }
         )
 

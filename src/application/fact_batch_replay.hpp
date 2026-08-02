@@ -11,6 +11,7 @@
 namespace cidx::application {
 
 struct TransientFactApplyMap {
+  std::map<std::int64_t, std::int64_t> files;
   std::map<std::int64_t, std::int64_t> symbols;
   std::map<std::int64_t, std::int64_t> relations;
   std::map<std::int64_t, std::int64_t> definitions;
@@ -21,6 +22,8 @@ public:
   virtual ~FactBatchReplayPort() = default;
 
   virtual void begin_translation_unit() = 0;
+  virtual auto apply_file(const ast::FactPartitionKey &partition,
+                          std::string_view natural_key) -> std::int64_t = 0;
   virtual auto apply_symbol(const ast::FactPartitionKey &partition,
                             const ast::SymbolRecord &record,
                             std::string_view natural_key) -> std::int64_t = 0;

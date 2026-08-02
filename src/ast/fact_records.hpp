@@ -43,6 +43,7 @@ struct PresentationIntent {
 struct SymbolEmissionMetadata {
   SymbolNaturalKey symbol;
   LegacyApplyOrderKey apply_order;
+  std::string record_key;
   std::uint64_t first_seen = 0;
   std::uint64_t last_seen = 0;
 };
@@ -55,7 +56,6 @@ struct DeclarationSiteRecord {
   std::int64_t end_line = 0;
   std::int64_t end_col = 0;
   bool is_definition = false;
-  LegacyApplyOrderKey apply_order;
 };
 
 enum class IncludeDirectiveKind : std::uint8_t {

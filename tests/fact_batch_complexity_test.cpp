@@ -42,13 +42,26 @@ auto counter(const cidx::ast::FactBatchOperationCounters &counters,
   return found == values.end() ? 0 : found->second;
 }
 
+auto canonical_fingerprint(const cidx::ast::FactBatch &batch) -> std::uint64_t {
+  std::string material;
+  for (const auto &[handle, key] : batch.symbol_keys()) {
+    material += std::to_string(handle) + ':' + key + '\n';
+  }
+  for (const cidx::ast::SymbolRecord &record : batch.records().symbols) {
+    material += cidx::ast::stable_symbol_record_key(record) + '\n';
+  }
+  for (const cidx::ast::FileFactPartition &owner : batch.partitions()) {
+    material += owner.key.stable_string() + '\n';
+  }
+  return cidx::ast::stable_fact_hash(material);
+}
+
 } // namespace
 
 auto main(int argc, char **argv) -> int {
   try {
     const std::size_t symbol_count = symbols_from_args(argc, argv);
     cidx::ast::FactBatchRecorder recorder("complexity-benchmark");
-    recorder.set_partition(partition());
     const auto emission_started = std::chrono::steady_clock::now();
     std::int64_t first_id = 0;
     for (std::size_t index = 0; index < symbol_count; ++index) {
@@ -57,6 +70,12 @@ auto main(int argc, char **argv) -> int {
       const std::string identity_suffix = std::to_string(identity_index / 2);
       const std::string usr = "usr-" + identity_suffix;
       const std::string qualified = "scale::symbol_" + identity_suffix;
+      cidx::ast::FactPartitionKey current_partition = partition();
+      current_partition.configuration.semantic_universe =
+          identity_index % 2 == 0 ? "benchmark-primary" : "benchmark-secondary";
+      current_partition.configuration.normalized_configuration =
+          identity_index % 4 < 2 ? "release" : "release-with-debug-info";
+      recorder.set_partition(current_partition);
       cidx::ast::SymbolRecord symbol;
       symbol.file = "/benchmark/src/scale.cpp";
       symbol.usr = usr;
@@ -64,10 +83,6 @@ auto main(int argc, char **argv) -> int {
       symbol.kind = 8;
       symbol.kind_name = "function";
       symbol.qual_name = qualified;
-      symbol.semantic_universe =
-          identity_index % 2 == 0 ? "benchmark-primary" : "benchmark-secondary";
-      symbol.normalized_configuration =
-          identity_index % 4 < 2 ? "release" : "release-with-debug-info";
       symbol.identity_source = "/benchmark/src/scale.cpp";
       recorder.emit(symbol);
       const std::int64_t id = recorder.lookup_symbol_id(usr).value_or(0);
@@ -89,7 +104,9 @@ auto main(int argc, char **argv) -> int {
     const auto emission_finished = std::chrono::steady_clock::now();
     const auto canonical_started = std::chrono::steady_clock::now();
     const cidx::ast::FactBatch batch = recorder.canonical_batch();
+    const cidx::ast::FactBatch repeated_batch = recorder.canonical_batch();
     const auto canonical_finished = std::chrono::steady_clock::now();
+    const std::uint64_t fingerprint = canonical_fingerprint(batch);
 
     const auto &counters = recorder.counters();
     const std::size_t repeated_declarations = symbol_count / 8;
@@ -97,7 +114,7 @@ auto main(int argc, char **argv) -> int {
         ((3 * symbol_count) / 2) - repeated_declarations;
     const bool bounded =
         counter(counters, "lookup_symbol_sourceless", false) == symbol_count &&
-        counter(counters, "lookup_symbol_sourceless", true) == 0 &&
+        counter(counters, "lookup_symbol_sourceless", true) == symbol_count &&
         counter(counters, "type_arg_candidates", true) ==
             candidate_records_touched &&
         counter(counters, "symbol_ids_by_qual_name_kind", true) ==
@@ -105,8 +122,9 @@ auto main(int argc, char **argv) -> int {
         counter(counters, "update_display_name", true) ==
             symbol_count + repeated_declarations &&
         batch.records().symbols.size() == symbol_count &&
-        batch.partitions().size() == 5 &&
-        batch.symbol_keys().size() == symbol_count - repeated_declarations;
+        batch.partitions().size() == 4 &&
+        batch.symbol_keys().size() == symbol_count - repeated_declarations &&
+        canonical_fingerprint(repeated_batch) == fingerprint;
     if (!bounded) {
       std::cerr << "operation-count contract failed: candidates="
                 << counter(counters, "type_arg_candidates", true)
@@ -137,7 +155,8 @@ auto main(int argc, char **argv) -> int {
               << ",\"qualified_kind_touched\":"
               << counter(counters, "symbol_ids_by_qual_name_kind", true)
               << ",\"display_touched\":"
-              << counter(counters, "update_display_name", true) << "}\n";
+              << counter(counters, "update_display_name", true)
+              << ",\"canonical_fingerprint\":" << fingerprint << "}\n";
     return EXIT_SUCCESS;
   } catch (const std::exception &error) {
     std::cerr << error.what() << '\n';

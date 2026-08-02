@@ -3,11 +3,17 @@
 
 #include "application/fact_batch_replay.hpp"
 #include "ast/fact_extraction.hpp"
+#include "storage/storage.hpp"
 
+#include <chrono>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -44,12 +50,62 @@ auto descriptor() -> ast::ExtractionPassDescriptor {
                      .declared = true}};
 }
 
+class SnapshotDatabase {
+public:
+  SnapshotDatabase()
+      : path_(
+            std::filesystem::temp_directory_path() /
+            ("cidx-s072-extraction-" +
+             std::to_string(
+                 std::chrono::steady_clock::now().time_since_epoch().count()) +
+             ".db")) {
+    Storage storage(path_.string());
+    static_cast<void>(
+        storage.add_component("snapshot", "/tmp/cidx-s072", "repo"));
+  }
+
+  ~SnapshotDatabase() {
+    std::error_code ignored;
+    static_cast<void>(std::filesystem::remove(path_, ignored));
+  }
+
+  SnapshotDatabase(const SnapshotDatabase &) = delete;
+  SnapshotDatabase &operator=(const SnapshotDatabase &) = delete;
+
+  [[nodiscard]] auto bytes() const -> std::vector<char> {
+    std::ifstream stream(path_, std::ios::binary);
+    return {std::istreambuf_iterator<char>(stream),
+            std::istreambuf_iterator<char>()};
+  }
+
+private:
+  std::filesystem::path path_;
+};
+
+void emit_one_symbol(ast::PassExecutionContext &context) {
+  if (context.session == nullptr) {
+    throw std::logic_error("serial extraction session is missing");
+  }
+  ast::MintRequest symbol;
+  symbol.usr = "snapshot-symbol";
+  symbol.spelling = "snapshot_symbol";
+  symbol.qual_name = "snapshot_symbol";
+  symbol.display_name = "snapshot_symbol";
+  symbol.kind_name = "function";
+  context.session->declaration_ports->mint_symbol(symbol);
+}
+
 class RecordingReplayPort final : public application::FactBatchReplayPort {
 public:
   explicit RecordingReplayPort(bool fail_commit = false)
       : fail_commit_(fail_commit) {}
 
   void begin_translation_unit() override { working_ = committed_; }
+
+  auto apply_file(const ast::FactPartitionKey & /*key*/,
+                  std::string_view /*natural_key*/) -> std::int64_t override {
+    return next_id_++;
+  }
 
   auto apply_symbol(const ast::FactPartitionKey &key,
                     const ast::SymbolRecord &record,
@@ -217,7 +273,6 @@ TEST_CASE("prepublication failure exposes no partial batch") {
   const ast::SerialFactRoute route{
       .partitions = {{.partition = partition("main.cpp", "/repo/src/main.cpp"),
                       .transient_file_handle = std::nullopt}}};
-  int authoritative_mutations = 0;
   const auto result = ast::extract_serial_fact_batch(
       {}, registry, plan, route, [](const ast::FactBatchRecorder &) {
         throw std::runtime_error("before publication");
@@ -231,7 +286,6 @@ TEST_CASE("prepublication failure exposes no partial batch") {
   }
   CHECK(result.failure.value().kind ==
         ast::FactExtractionFailureKind::prepublication_failed);
-  CHECK(authoritative_mutations == 0);
 }
 
 TEST_CASE("pass and budget failures expose no partial batch") {
@@ -287,10 +341,54 @@ TEST_CASE("pass and budget failures expose no partial batch") {
         ast::FactExtractionFailureKind::budget_exceeded);
 }
 
+TEST_CASE("unpublished extraction preserves a byte-identical database") {
+  SnapshotDatabase database;
+  const std::vector<char> before = database.bytes();
+  const ast::SerialFactRoute route{
+      .partitions = {{.partition = partition("main.cpp", "/repo/src/main.cpp"),
+                      .transient_file_handle = std::nullopt}}};
+  ast::IndexingPlan plan;
+  plan.add("facts");
+
+  ast::ExtractionPassRegistry success_registry;
+  success_registry.register_pass(descriptor(), emit_one_symbol);
+  CHECK(ast::extract_serial_fact_batch({}, success_registry, plan, route).ok());
+  CHECK(database.bytes() == before);
+
+  ast::ExtractionPassRegistry failure_registry;
+  failure_registry.register_pass(
+      descriptor(), [](ast::PassExecutionContext & /*context*/) {
+        throw std::runtime_error("injected parse failure");
+      });
+  CHECK(
+      !ast::extract_serial_fact_batch({}, failure_registry, plan, route).ok());
+  CHECK(database.bytes() == before);
+
+  ast::ExtractionPassDescriptor bounded = descriptor();
+  bounded.budget.max_emitted_facts = 1;
+  ast::ExtractionPassRegistry budget_registry;
+  budget_registry.register_pass(bounded,
+                                [](ast::PassExecutionContext &context) {
+                                  emit_one_symbol(context);
+                                  emit_one_symbol(context);
+                                });
+  CHECK(!ast::extract_serial_fact_batch({}, budget_registry, plan, route).ok());
+  CHECK(database.bytes() == before);
+
+  const auto prepublication = ast::extract_serial_fact_batch(
+      {}, success_registry, plan, route,
+      [](const ast::FactBatchRecorder & /*recorder*/) {
+        throw std::runtime_error("injected prepublication failure");
+      });
+  CHECK(!prepublication.ok());
+  CHECK(database.bytes() == before);
+}
+
 TEST_CASE("transactional replay is deterministic and rolls back failures") {
   RecordingReplayPort forward_port;
   const auto forward =
       application::replay_fact_batch(replay_fixture(false), forward_port);
+  INFO(forward.error.value_or(""));
   REQUIRE(forward.committed);
 
   RecordingReplayPort reverse_port;
