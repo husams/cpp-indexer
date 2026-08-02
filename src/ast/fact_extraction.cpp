@@ -1,9 +1,25 @@
 #include "ast/fact_extraction.hpp"
 
+#include <algorithm>
 #include <exception>
 #include <stdexcept>
+#include <utility>
 
 namespace cidx::ast {
+
+namespace {
+
+auto report_completeness(const PassExecutionReport &report)
+    -> FactCompleteness {
+  return std::ranges::max(report.passes, {},
+                          [](const PassExecutionRecord &record) {
+                            return std::to_underlying(
+                                record.descriptor.completeness);
+                          })
+      .descriptor.completeness;
+}
+
+} // namespace
 
 auto extract_serial_fact_batch(FrontendSession session,
                                const ExtractionPassRegistry &registry,
@@ -37,6 +53,7 @@ auto extract_serial_fact_batch(FrontendSession session,
   try {
     result.report = registry.run(plan, &session);
     passes_complete = true;
+    recorder.set_completeness(report_completeness(result.report));
     if (before_publication) {
       before_publication(recorder);
     }

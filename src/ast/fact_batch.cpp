@@ -337,6 +337,10 @@ FactBatchRecorder::FactBatchRecorder(
       edge_handles_(primary_hasher), type_handles_(primary_hasher),
       definition_handles_(primary_hasher), file_handles_(primary_hasher) {}
 
+void FactBatchRecorder::set_completeness(FactCompleteness completeness) {
+  completeness_ = completeness;
+}
+
 void FactBatchRecorder::set_partition(
     FactPartitionKey partition,
     std::optional<std::int64_t> transient_file_handle) {
@@ -979,6 +983,7 @@ void FactBatchRecorder::append_auxiliary_records(FactBatch::Data &data,
 auto FactBatchRecorder::build_batch(bool canonical) const -> FactBatch {
   auto data = std::make_shared<FactBatch::Data>();
   data->producer = producer_;
+  data->completeness = completeness_;
   data->symbol_keys = symbol_handles_.entries();
   data->relation_keys = edge_handles_.entries();
   data->type_keys = type_handles_.entries();

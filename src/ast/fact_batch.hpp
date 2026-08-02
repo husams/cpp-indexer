@@ -128,6 +128,7 @@ struct FactBatchOperationCounters {
 //
 // Operation                                          Bound
 // set_partition                                      O(log n)
+// set_completeness                                   O(1)
 // emit(SymbolRecord), mint_symbol                    O(log n)
 // emit(EvidenceRecord/DeclarationSiteRecord)         amortised O(1)
 // emit(IncludeDirectiveRecord/MacroUseRecord)        amortised O(1)
@@ -169,6 +170,7 @@ public:
                              const CollisionSafeHandleIndex::Hasher
                                  &primary_hasher = stable_fact_hash);
 
+  void set_completeness(FactCompleteness completeness);
   void set_partition(
       FactPartitionKey partition,
       std::optional<std::int64_t> transient_file_handle = std::nullopt);
@@ -279,6 +281,7 @@ private:
                                 bool canonical) const;
 
   std::string producer_;
+  FactCompleteness completeness_ = FactCompleteness::complete;
   FactPartitionKey current_partition_;
   std::map<std::int64_t, FactPartitionKey> partitions_by_file_handle_;
   std::unordered_map<std::string, std::int64_t> file_handles_by_path_;

@@ -224,7 +224,9 @@ auto unresolved_definition_fixture() -> ast::FactBatch {
 
 TEST_CASE("serial extraction publishes one immutable batch") {
   ast::ExtractionPassRegistry registry;
-  registry.register_pass(descriptor(), [](ast::PassExecutionContext &context) {
+  ast::ExtractionPassDescriptor partial = descriptor();
+  partial.completeness = ast::FactCompleteness::partial;
+  registry.register_pass(partial, [](ast::PassExecutionContext &context) {
     if (context.session == nullptr) {
       throw std::logic_error("serial extraction session is missing");
     }
@@ -272,6 +274,7 @@ TEST_CASE("serial extraction publishes one immutable batch") {
   CHECK(batch.partitions().size() == 2);
   CHECK(batch.records().symbols.size() == 2);
   CHECK(batch.records().relations.size() == 1);
+  CHECK(batch.completeness() == ast::FactCompleteness::partial);
   CHECK(result.report.passes.size() == 1);
 }
 
