@@ -79,7 +79,7 @@ auto main(int argc, char **argv) -> int {
       cidx::ast::SymbolRecord symbol;
       symbol.file = "/benchmark/src/scale.cpp";
       symbol.usr = usr;
-      symbol.spelling = "symbol_" + suffix;
+      symbol.spelling = "overload_" + std::to_string(index % 16);
       symbol.kind = 8;
       symbol.kind_name = "function";
       symbol.qual_name = qualified;
@@ -112,7 +112,14 @@ auto main(int argc, char **argv) -> int {
     const std::size_t repeated_declarations = symbol_count / 8;
     const std::size_t candidate_records_touched =
         ((3 * symbol_count) / 2) - repeated_declarations;
+    constexpr std::size_t candidate_memberships_per_symbol = 3;
+    const std::size_t candidate_memberships =
+        candidate_memberships_per_symbol * symbol_count;
     const bool bounded =
+        counter(counters, "emit_candidate_membership", false) ==
+            candidate_memberships &&
+        counter(counters, "emit_candidate_membership", true) ==
+            candidate_memberships &&
         counter(counters, "lookup_symbol_sourceless", false) == symbol_count &&
         counter(counters, "lookup_symbol_sourceless", true) == symbol_count &&
         counter(counters, "type_arg_candidates", true) ==
@@ -128,6 +135,8 @@ auto main(int argc, char **argv) -> int {
     if (!bounded) {
       std::cerr << "operation-count contract failed: candidates="
                 << counter(counters, "type_arg_candidates", true)
+                << " candidate_membership="
+                << counter(counters, "emit_candidate_membership", true)
                 << " qualified_kind="
                 << counter(counters, "symbol_ids_by_qual_name_kind", true)
                 << " display=" << counter(counters, "update_display_name", true)
@@ -152,6 +161,8 @@ auto main(int argc, char **argv) -> int {
               << counter(counters, "lookup_symbol_sourceless", true)
               << ",\"candidate_touched\":"
               << counter(counters, "type_arg_candidates", true)
+              << ",\"candidate_membership_touched\":"
+              << counter(counters, "emit_candidate_membership", true)
               << ",\"qualified_kind_touched\":"
               << counter(counters, "symbol_ids_by_qual_name_kind", true)
               << ",\"display_touched\":"
