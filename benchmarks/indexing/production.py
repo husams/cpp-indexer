@@ -229,15 +229,12 @@ S098_SHAPE_CONTRACT_FIELDS: dict[str, tuple[str, ...]] = {
 # mechanism *in force*, never the presence of the section: S-071 predates the
 # S-075 contract and records no section, while every run of this harness records
 # `qualification_contract`, which is that same shipped no-reuse control. Both
-# describe a front end that reused nothing, so both normalise to
-# `S098_NO_REUSE_CONTROL`. `identity_version` and `explicitly_disabled` are
-# deliberately out: they say which contract emitted the control and how it was
-# selected, not what the front end did.
-S098_FRONT_END_REUSE_FIELDS = (
-    "mechanism",
-    "artifact_construction",
-    "artifact_injection",
-)
+# describe a front end that reused nothing, so both normalise to this control.
+# Its keys are the bound field set - `front_end_reuse_identity` builds exactly
+# them on both paths - so this dict is the only place that set is written down.
+# `identity_version` and `explicitly_disabled` are deliberately out: they say
+# which contract emitted the control and how it was selected, not what the front
+# end did.
 S098_NO_REUSE_MECHANISM = "none"
 S098_NO_REUSE_CONTROL: dict[str, Any] = {
     "mechanism": S098_NO_REUSE_MECHANISM,
