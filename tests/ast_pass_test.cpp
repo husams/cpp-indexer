@@ -1077,17 +1077,42 @@ TEST_CASE("partition identity prevents file and configuration aliasing") {
   const std::int64_t second_handle = second_id.value();
   REQUIRE(first_handle != second_handle);
 
+  recorder.set_partition(first, 11);
+  emit_test_symbol(recorder, first, "first-again-usr", "one-again", 8);
+
   CHECK(published.records().symbols.size() == 1);
   REQUIRE(published.file_keys().contains(11));
   CHECK(published.file_keys().at(11) == first);
   const FactBatch complete = recorder.canonical_batch();
+  const FactBatch repeated = recorder.canonical_batch();
   REQUIRE(complete.partitions().size() == 2);
-  CHECK(complete.records().symbols.size() == 2);
+  CHECK(complete.records().symbols.size() == 3);
   CHECK(complete.symbol_keys().contains(first_handle));
   CHECK(complete.symbol_keys().contains(second_handle));
+  std::size_t symbol_memberships = 0;
   for (const FileFactPartition &partition : complete.partitions()) {
     REQUIRE(partition.members.contains(FactFamily::symbols));
-    CHECK(partition.members.at(FactFamily::symbols).size() == 1);
+    for (const std::size_t index : partition.members.at(FactFamily::symbols)) {
+      ++symbol_memberships;
+      REQUIRE(index < complete.records().symbols.size());
+      CHECK(complete.records().symbols[index].file ==
+            partition.key.file.portable_path());
+    }
+  }
+  CHECK(symbol_memberships == complete.records().symbols.size());
+
+  REQUIRE(repeated.partitions().size() == complete.partitions().size());
+  REQUIRE(repeated.records().symbols.size() ==
+          complete.records().symbols.size());
+  for (std::size_t index = 0; index < complete.partitions().size(); ++index) {
+    CHECK(repeated.partitions()[index].key == complete.partitions()[index].key);
+    CHECK(repeated.partitions()[index].members ==
+          complete.partitions()[index].members);
+  }
+  for (std::size_t index = 0; index < complete.records().symbols.size();
+       ++index) {
+    CHECK(stable_symbol_record_key(repeated.records().symbols[index]) ==
+          stable_symbol_record_key(complete.records().symbols[index]));
   }
 }
 
