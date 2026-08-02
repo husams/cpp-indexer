@@ -208,11 +208,12 @@ void apply_direct(Storage &storage, const ast::FactPartitionKey &header,
   const std::int64_t header_id = header_file->id;
   const std::int64_t main_id = main_file->id;
   symbols.set_identity_translation_unit_file_id(main_id);
-  symbols.set_current_file_id(header_id);
-  symbols.emit(symbol(header, "usr-shared", "first"));
-  const std::int64_t shared = symbols.symbol_ids(header_id).back();
   symbols.set_current_file_id(main_id);
-  symbols.emit(symbol(main, "usr-shared", "last"));
+  symbols.emit(symbol(main, "usr-shared", "first"));
+  const std::int64_t shared = symbols.symbol_ids(main_id).back();
+  symbols.set_current_file_id(header_id);
+  symbols.emit(symbol(header, "usr-shared", "last"));
+  symbols.set_current_file_id(main_id);
   symbols.emit(symbol(main, "usr-target", "target"));
   const std::int64_t target = symbols.symbol_ids(main_id).back();
   edges.set_current_file_id(main_id);
@@ -230,12 +231,13 @@ void apply_direct(Storage &storage, const ast::FactPartitionKey &header,
 auto replay_batch(const ast::FactPartitionKey &header,
                   const ast::FactPartitionKey &main) -> ast::FactBatch {
   ast::FactBatchRecorder recorder("storage-replay-oracle");
-  recorder.set_partition(header, 101);
-  recorder.emit(symbol(header, "usr-shared", "first"));
-  const auto shared = recorder.lookup_symbol_id(
-      "usr-shared", header.configuration.identity_source);
   recorder.set_partition(main, 102);
-  recorder.emit(symbol(main, "usr-shared", "last"));
+  recorder.emit(symbol(main, "usr-shared", "first"));
+  const auto shared = recorder.lookup_symbol_id(
+      "usr-shared", main.configuration.identity_source);
+  recorder.set_partition(header, 101);
+  recorder.emit(symbol(header, "usr-shared", "last"));
+  recorder.set_partition(main, 102);
   recorder.emit(symbol(main, "usr-target", "target"));
   const auto target = recorder.lookup_symbol_id(
       "usr-target", main.configuration.identity_source);

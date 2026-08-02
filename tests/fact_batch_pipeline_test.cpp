@@ -198,6 +198,28 @@ auto replay_fixture(bool reverse) -> ast::FactBatch {
   return recorder.canonical_batch();
 }
 
+auto unresolved_definition_fixture() -> ast::FactBatch {
+  const auto owner = partition("main.cpp", "/repo/src/main.cpp");
+  ast::FactBatchRecorder recorder("unresolved-definition-fixture");
+  recorder.set_partition(owner);
+  ast::SymbolRecord symbol;
+  symbol.file = owner.file.portable_path();
+  symbol.usr = "usr-definition";
+  symbol.spelling = "definition";
+  symbol.kind = 8;
+  symbol.kind_name = "function";
+  symbol.identity_source = owner.configuration.identity_source;
+  recorder.emit(symbol);
+  const auto symbol_id = recorder.lookup_symbol_id(
+      symbol.usr, owner.configuration.identity_source);
+  if (!symbol_id) {
+    throw std::logic_error("unresolved definition symbol was not indexed");
+  }
+  static_cast<void>(recorder.get_or_create_definition(symbol_id.value(), -1, 1,
+                                                      1, 1, 8, std::nullopt));
+  return recorder.canonical_batch();
+}
+
 } // namespace
 
 TEST_CASE("serial extraction publishes one immutable batch") {
@@ -424,4 +446,25 @@ TEST_CASE("transactional replay is deterministic and rolls back failures") {
   CHECK(!commit_failure.committed);
   CHECK(commit_failure.error.has_value());
   CHECK(commit_failure_port.committed().empty());
+}
+
+TEST_CASE("replay names an unresolved definition file handle") {
+  RecordingReplayPort port;
+  const auto result =
+      application::replay_fact_batch(unresolved_definition_fixture(), port);
+  if (result.committed) {
+    throw std::logic_error(
+        "unresolved file handle replay unexpectedly committed");
+  }
+  if (!result.error) {
+    throw std::logic_error(
+        "unresolved file handle did not return a replay error");
+  }
+  if (!result.error->starts_with(
+          "unresolved transient file handle -1 for definition ")) {
+    throw std::logic_error("unresolved file handle returned the wrong error");
+  }
+  if (!port.committed().empty()) {
+    throw std::logic_error("failed replay leaked committed records");
+  }
 }

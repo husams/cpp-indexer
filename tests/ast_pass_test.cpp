@@ -1136,6 +1136,47 @@ TEST_CASE("symbol identities match external coalescing and local splitting") {
         2);
 }
 
+TEST_CASE("inferred file identities enforce component path boundaries") {
+  FactBatchRecorder recorder("inferred-file-boundary-test");
+  const FactPartitionKey owner =
+      fact_partition("main.cpp", "workspace", "debug", "src/main.cpp");
+  recorder.set_partition(owner);
+
+  auto emit = [&recorder](std::string file, std::string usr) {
+    SymbolRecord record;
+    record.file = std::move(file);
+    record.usr = std::move(usr);
+    record.spelling = "inferred";
+    record.kind = 8;
+    record.linkage = "external";
+    record.identity_source = record.file;
+    recorder.emit(record);
+  };
+  emit("/repo/include/inside.hpp", "inside-usr");
+  emit("/repository/include/prefix.hpp", "prefix-usr");
+  emit("/usr/include/foreign.hpp", "foreign-usr");
+
+  const FactBatch batch = recorder.canonical_batch();
+  const auto find_file = [&batch](std::string_view name) {
+    return std::ranges::find_if(batch.partitions(),
+                                [name](const FileFactPartition &partition) {
+                                  return partition.key.file.file_name == name;
+                                });
+  };
+  const auto inside = find_file("inside.hpp");
+  const auto prefix = find_file("prefix.hpp");
+  const auto foreign = find_file("foreign.hpp");
+  REQUIRE(inside != batch.partitions().end());
+  REQUIRE(prefix != batch.partitions().end());
+  REQUIRE(foreign != batch.partitions().end());
+  CHECK(inside->key.file.component_path == "/repo");
+  CHECK(inside->key.file.directory_path == "include");
+  CHECK(prefix->key.file.component_path.empty());
+  CHECK(prefix->key.file.directory_path == "/repository/include");
+  CHECK(foreign->key.file.component_path.empty());
+  CHECK(foreign->key.file.directory_path == "/usr/include");
+}
+
 TEST_CASE("finalized batches expose every fact family through const records") {
   static_assert(
       std::is_same_v<decltype(std::declval<const FactBatch &>().records()),

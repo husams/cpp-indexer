@@ -3,6 +3,7 @@
 #include "ast/kind_map.hpp"
 
 #include <algorithm>
+#include <iterator>
 #include <ranges>
 #include <stdexcept>
 #include <tuple>
@@ -179,6 +180,45 @@ auto evidence_key(const EvidenceRecord &record) -> std::string {
          record.detail;
 }
 
+auto canonical_symbol_order(
+    const std::vector<SymbolEmissionMetadata> &emissions)
+    -> std::vector<SymbolEmissionMetadata> {
+  std::map<std::string, std::vector<SymbolEmissionMetadata>> groups;
+  for (const SymbolEmissionMetadata &metadata : emissions) {
+    groups[metadata.symbol.stable_string()].push_back(metadata);
+  }
+  using GroupOrder =
+      std::tuple<std::string, std::string, std::string, std::string>;
+  std::vector<std::pair<GroupOrder, std::vector<SymbolEmissionMetadata>>>
+      ordered_groups;
+  ordered_groups.reserve(groups.size());
+  for (auto &[natural, entries] : groups) {
+    std::ranges::sort(entries, {}, &SymbolEmissionMetadata::first_seen);
+    const auto first_file = std::ranges::min_element(
+        entries, {}, [](const SymbolEmissionMetadata &metadata) {
+          return std::tuple(metadata.apply_order.component_path,
+                            metadata.apply_order.directory_path,
+                            metadata.apply_order.file_name);
+        });
+    ordered_groups.emplace_back(
+        GroupOrder{first_file->apply_order.component_path,
+                   first_file->apply_order.directory_path,
+                   first_file->apply_order.file_name, natural},
+        std::move(entries));
+  }
+  std::ranges::sort(
+      ordered_groups, {},
+      [](const auto &group) -> const GroupOrder & { return group.first; });
+  std::vector<SymbolEmissionMetadata> result;
+  result.reserve(emissions.size());
+  for (auto &group : ordered_groups) {
+    auto &entries = group.second;
+    result.insert(result.end(), std::make_move_iterator(entries.begin()),
+                  std::make_move_iterator(entries.end()));
+  }
+  return result;
+}
+
 template <typename T>
 void append_unique(std::vector<T> &values, const T &value) {
   if (std::ranges::find(values, value) == values.end()) {
@@ -190,11 +230,13 @@ auto file_identity_from_path(std::string_view value,
                              std::string_view component_path)
     -> PortableFileIdentity {
   std::string_view relative = value;
-  if (!component_path.empty() && value.starts_with(component_path)) {
-    relative.remove_prefix(component_path.size());
-    if (relative.starts_with('/') || relative.starts_with('\\')) {
-      relative.remove_prefix(1);
-    }
+  const bool within_component = !component_path.empty() &&
+                                value.size() > component_path.size() &&
+                                value.starts_with(component_path) &&
+                                (value[component_path.size()] == '/' ||
+                                 value[component_path.size()] == '\\');
+  if (within_component) {
+    relative.remove_prefix(component_path.size() + 1);
   }
   const std::size_t separator = relative.find_last_of("/\\");
   const std::string directory =
@@ -204,7 +246,8 @@ auto file_identity_from_path(std::string_view value,
   const std::string file = separator == std::string_view::npos
                                ? std::string(relative)
                                : std::string(relative.substr(separator + 1));
-  return {.component_path = std::string(component_path),
+  return {.component_path =
+              within_component ? std::string(component_path) : std::string{},
           .directory_path = directory,
           .file_name = file};
 }
@@ -906,14 +949,8 @@ auto FactBatchRecorder::build_batch(bool canonical) const -> FactBatch {
   append_symbol_records(*data, memberships, canonical);
   append_type_records(*data, memberships, canonical);
   append_auxiliary_records(*data, memberships, canonical);
-  data->records.symbol_order = symbol_order_;
-  if (canonical) {
-    std::ranges::sort(data->records.symbol_order, {},
-                      [](const SymbolEmissionMetadata &metadata) {
-                        return std::tuple(metadata.apply_order,
-                                          metadata.symbol.stable_string());
-                      });
-  }
+  data->records.symbol_order =
+      canonical ? canonical_symbol_order(symbol_order_) : symbol_order_;
   for (auto &[partition, members] : memberships) {
     data->partitions.push_back(
         {.key = partition, .members = std::move(members)});

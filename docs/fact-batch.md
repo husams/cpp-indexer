@@ -37,6 +37,10 @@ passed to storage.
 The initial replay key is exactly `(component.path, directory.path,
 file.name)`. `LegacyApplyOrderKey` additionally retains first-seen and conflict
 ordinals where the current first-writer or last-writer behavior is observable.
+Paths inferred outside the active component retain an empty component rather
+than being falsely rebased beneath it. Symbol groups are ordered by their first
+portable file key, while conflicting records within one natural-symbol group
+retain emission order.
 Canonicalization sorts and deduplicates exact records inside each partition;
 it retains conflicting payloads, repeated declarations, duplicate-USR groups,
 semantic-universe distinctions, and their apply metadata.

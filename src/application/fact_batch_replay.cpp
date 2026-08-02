@@ -141,7 +141,14 @@ auto replay_fact_batch(const ast::FactBatch &batch, FactBatchReplayPort &port,
                 records.definitions.at(index);
             const std::int64_t batch_definition = definition.id;
             definition.symbol_id = result.ids.symbols.at(definition.symbol_id);
-            definition.file_id = result.ids.files.at(definition.file_id);
+            const auto file = result.ids.files.find(definition.file_id);
+            if (file == result.ids.files.end()) {
+              throw std::runtime_error("unresolved transient file handle " +
+                                       std::to_string(definition.file_id) +
+                                       " for definition " +
+                                       std::to_string(batch_definition));
+            }
+            definition.file_id = file->second;
             result.ids.definitions[batch_definition] =
                 port.apply_definition(partition.key, definition);
             continue;
