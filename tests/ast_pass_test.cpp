@@ -1078,7 +1078,19 @@ TEST_CASE("partition identity prevents file and configuration aliasing") {
   REQUIRE(first_handle != second_handle);
 
   recorder.set_partition(first, 11);
+  emit_test_symbol(recorder, second, "second-while-first-current", "two-routed",
+                   8);
   emit_test_symbol(recorder, first, "first-again-usr", "one-again", 8);
+  recorder.add_edge_site({.edge_id = 73,
+                          .file_id = 22,
+                          .line = 5,
+                          .col = 7,
+                          .conditional = 0,
+                          .recv_src_kind = std::nullopt,
+                          .recv_type_usr = std::nullopt,
+                          .recv_decl_usr = std::nullopt,
+                          .recv_param_pos = std::nullopt,
+                          .recv_type_is_value = std::nullopt});
 
   CHECK(published.records().symbols.size() == 1);
   REQUIRE(published.file_keys().contains(11));
@@ -1086,10 +1098,13 @@ TEST_CASE("partition identity prevents file and configuration aliasing") {
   const FactBatch complete = recorder.canonical_batch();
   const FactBatch repeated = recorder.canonical_batch();
   REQUIRE(complete.partitions().size() == 2);
-  CHECK(complete.records().symbols.size() == 3);
+  CHECK(complete.records().symbols.size() == 4);
+  REQUIRE(complete.records().edge_sites.size() == 1);
   CHECK(complete.symbol_keys().contains(first_handle));
   CHECK(complete.symbol_keys().contains(second_handle));
   std::size_t symbol_memberships = 0;
+  std::size_t edge_site_memberships = 0;
+  bool cross_file_symbol_routed = false;
   for (const FileFactPartition &partition : complete.partitions()) {
     REQUIRE(partition.members.contains(FactFamily::symbols));
     for (const std::size_t index : partition.members.at(FactFamily::symbols)) {
@@ -1097,9 +1112,25 @@ TEST_CASE("partition identity prevents file and configuration aliasing") {
       REQUIRE(index < complete.records().symbols.size());
       CHECK(complete.records().symbols[index].file ==
             partition.key.file.portable_path());
+      if (complete.records().symbols[index].usr ==
+          "second-while-first-current") {
+        cross_file_symbol_routed = true;
+        CHECK(partition.key == second);
+      }
+    }
+    if (partition.members.contains(FactFamily::edge_sites)) {
+      for (const std::size_t index :
+           partition.members.at(FactFamily::edge_sites)) {
+        ++edge_site_memberships;
+        REQUIRE(index < complete.records().edge_sites.size());
+        CHECK(partition.key == second);
+        CHECK(complete.records().edge_sites[index].file_id == 22);
+      }
     }
   }
+  CHECK(cross_file_symbol_routed);
   CHECK(symbol_memberships == complete.records().symbols.size());
+  CHECK(edge_site_memberships == complete.records().edge_sites.size());
 
   REQUIRE(repeated.partitions().size() == complete.partitions().size());
   REQUIRE(repeated.records().symbols.size() ==
