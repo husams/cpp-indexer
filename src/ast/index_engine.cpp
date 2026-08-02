@@ -8,6 +8,7 @@
 #include "ast/location.hpp"
 #include "ast/namespace_use_visitor.hpp"
 #include "ast/pass_registry.hpp"
+#include "ast/routed_root_events.hpp"
 #include "ast/storage_edge_sink.hpp"
 #include "ast/storage_symbol_sink.hpp"
 #include "ast/symbol_visitor.hpp"
@@ -239,6 +240,12 @@ public:
   }
 
 private:
+  // The rooted graph collector's event bound, matching the emitted-fact budget
+  // every extraction pass declares. Overflow raises the named
+  // PassBudgetExceeded diagnostic instead of letting the buffer grow without
+  // limit.
+  static constexpr std::size_t kRoutedGraphEventBudget = 20'000'000;
+
   static auto descriptor(
       std::string id, std::vector<FrontendCapability> capabilities,
       std::vector<std::string> consumed, std::vector<std::string> produced,
@@ -323,6 +330,7 @@ private:
             PassScope::owned_header, TraversalMode::declaration,
             FactCompleteness::complete, FactTrust::trusted, 1),
         [this](PassExecutionContext &execution) -> void {
+          collect_routed_graph_events(execution);
           run_routed_declaration_stage(execution);
           for (PendingHeader &header : pending_headers_) {
             header.edge_ids = edges_.edge_ids(header.file_id);
@@ -332,10 +340,13 @@ private:
           main_definition_ids_ = edges_.definition_ids(state_.rec->id);
         });
     registry.register_pass(
+        // Replays the graph collector's recorded stream: a logical pass with
+        // its own provider id, diagnostics and fact families, but no rooted
+        // traversal of its own.
         descriptor("definitions.headers", {FrontendCapability::ast},
                    {"symbols"}, {"definitions"}, {"declarations.headers"},
                    PassScope::owned_header, TraversalMode::declaration,
-                   FactCompleteness::complete, FactTrust::trusted, 1),
+                   FactCompleteness::complete, FactTrust::trusted, 0),
         [this](PassExecutionContext &execution) -> void {
           routed_definition_visitor_ = collect_routed_definitions(execution);
           for (PendingHeader &header : pending_headers_) {
@@ -358,11 +369,13 @@ private:
 
   void register_header_association(ExtractionPassRegistry &registry) {
     registry.register_pass(
+        // Also a replay of the graph collector's stream, and the last consumer
+        // of it: no rooted traversal of its own.
         descriptor("namespaces.headers", {FrontendCapability::ast},
                    {"symbols", "relations"}, {"relations"},
                    {"statements.headers"}, PassScope::owned_header,
                    TraversalMode::declaration, FactCompleteness::complete,
-                   FactTrust::trusted, 1),
+                   FactTrust::trusted, 0),
         [this](PassExecutionContext &execution) -> void {
           run_routed_namespace_stage(execution);
           for (PendingHeader &header : pending_headers_) {
@@ -761,6 +774,17 @@ private:
     return file->second;
   }
 
+  // The same routing answer without route_fact_file's side effect of switching
+  // the fact sink's current file. Recording events is not emitting facts, so
+  // the collector must not move the sink; replay does that through the
+  // visitors' own routers, in emission order.
+  [[nodiscard]] auto route_fact_file_id(const std::string &path) const
+      -> std::optional<int64_t> {
+    const auto file = routed_file_ids_.find(path);
+    return file == routed_file_ids_.end() ? std::nullopt
+                                          : std::optional{file->second};
+  }
+
   void configure_fact_file(int64_t file_id, bool reset) {
     edges_.set_current_file_id(file_id);
     edges_.set_identity_translation_unit_config_id(state_.normalized_config_id,
@@ -781,8 +805,31 @@ private:
     }
   }
 
-  void run_routed_declaration_stage(PassExecutionContext &execution) {
+  // The single rooted graph traversal. It records declaration,
+  // definition-candidate and namespace-scope/use events and emits nothing; the
+  // declaration, definition and namespace stages then replay it in logical
+  // order. Statement bodies are neither traversed nor emitted here - they stay
+  // in the separate statements.main phase, which owns no root budget.
+  void collect_routed_graph_events(PassExecutionContext &execution) {
+    graph_events_.reset();
     if (!state_.graph_enabled) {
+      return;
+    }
+    // Bounded by the declared emitted-fact budget of the owning pass and
+    // reported against its id. Metrics are deliberately not wired into the
+    // recorder: every recorded declaration is counted once, by the visitor
+    // that replays it, exactly as the separate root walks counted it.
+    graph_events_ = std::make_unique<RoutedRootEventBuffer>(
+        context_,
+        [this](const std::string &path) { return route_fact_file_id(path); },
+        kRoutedGraphEventBudget, "declarations.headers");
+    execution.metrics.note_whole_tu_traversal();
+    profile::add_counter("root_traverse_decl_calls");
+    graph_events_->collect(tu_);
+  }
+
+  void run_routed_declaration_stage(PassExecutionContext &execution) {
+    if (!state_.graph_enabled || graph_events_ == nullptr) {
       return;
     }
     edges_.reset_all_fact_ids();
@@ -797,14 +844,12 @@ private:
         context_, ports, {}, -1, &definitions, &execution.metrics,
         &presentation_intents,
         [this](const std::string &path) { return route_fact_file(path); });
-    execution.metrics.note_whole_tu_traversal();
-    profile::add_counter("root_traverse_decl_calls");
-    decls.TraverseDecl(tu_);
+    graph_events_->replay_declarations(decls);
   }
 
   auto collect_routed_definitions(PassExecutionContext &execution)
       -> std::unique_ptr<FunctionDefinitionVisitor> {
-    if (!state_.graph_enabled) {
+    if (!state_.graph_enabled || graph_events_ == nullptr) {
       return nullptr;
     }
     edges_.reset_fact_ids();
@@ -814,9 +859,7 @@ private:
         static_cast<DefinitionScopeEmitter &>(edges_), std::string{}, -1,
         &execution.metrics,
         [this](const std::string &path) { return route_fact_file(path); });
-    execution.metrics.note_whole_tu_traversal();
-    profile::add_counter("root_traverse_decl_calls");
-    visitor->TraverseDecl(tu_);
+    graph_events_->replay_definitions(*visitor);
     return visitor;
   }
 
@@ -844,18 +887,20 @@ private:
   }
 
   void run_routed_namespace_stage(PassExecutionContext &execution) {
-    if (!state_.graph_enabled) {
+    if (!state_.graph_enabled || graph_events_ == nullptr) {
       return;
     }
     edges_.reset_fact_ids();
+    routed_fact_file_id_ = -1;
     BudgetedNamespacePassPorts ports(static_cast<NamespacePassPorts &>(edges_),
                                      execution.metrics);
     NamespaceUseVisitor ns(
         context_, ports, {}, -1, &execution.metrics,
         [this](const std::string &path) { return route_fact_file(path); });
-    execution.metrics.note_whole_tu_traversal();
-    profile::add_counter("root_traverse_decl_calls");
-    ns.TraverseDecl(tu_);
+    graph_events_->replay_namespaces(ns);
+    // The recorded stream is valid only while this ASTContext lives, and the
+    // last consumer has just run.
+    graph_events_.reset();
   }
 
   [[nodiscard]] bool header_covered_by_current_config(
@@ -976,6 +1021,9 @@ private:
   std::vector<int64_t> main_edge_ids_;
   std::vector<int64_t> main_definition_ids_;
   std::unique_ptr<FunctionDefinitionVisitor> routed_definition_visitor_;
+  // The one rooted graph traversal's recorded event stream, alive only between
+  // its collection and the last replay of the same translation unit.
+  std::unique_ptr<RoutedRootEventBuffer> graph_events_;
 };
 
 class IndexASTConsumer : public clang::ASTConsumer {

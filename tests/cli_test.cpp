@@ -2326,13 +2326,17 @@ TEST_SUITE("clang") {
       CHECK(outcome.pass_metrics[index].id == expected[index]);
       CHECK(!outcome.pass_metrics[index].produced_fact_families.empty());
     }
+    // Two rooted traversals per translation unit: one complete routed symbol
+    // walk, then one rooted graph-event collection owned by
+    // declarations.headers. definitions.headers and namespaces.headers replay
+    // that recorded stream and own no root budget, and statement-body
+    // extraction is a separate non-root phase that never increments either
+    // counter.
     std::size_t whole_tu_traversals = 0;
     std::size_t registered_whole_tu_traversal_budget = 0;
     for (const auto &metrics : outcome.pass_metrics) {
       const bool routed_root_pass = metrics.id == "symbols.headers" ||
-                                    metrics.id == "declarations.headers" ||
-                                    metrics.id == "definitions.headers" ||
-                                    metrics.id == "namespaces.headers";
+                                    metrics.id == "declarations.headers";
       CHECK(metrics.whole_tu_traversals == (routed_root_pass ? 1U : 0U));
       CHECK(metrics.registered_whole_tu_traversal_budget ==
             (routed_root_pass ? 1U : 0U));
@@ -2340,10 +2344,10 @@ TEST_SUITE("clang") {
       registered_whole_tu_traversal_budget +=
           metrics.registered_whole_tu_traversal_budget;
     }
-    CHECK(whole_tu_traversals == 4);
-    CHECK(registered_whole_tu_traversal_budget == 4);
-    CHECK(outcome.observed_whole_tu_traversals == 4);
-    CHECK(outcome.registered_whole_tu_traversal_budget == 4);
+    CHECK(whole_tu_traversals == 2);
+    CHECK(registered_whole_tu_traversal_budget == 2);
+    CHECK(outcome.observed_whole_tu_traversals == 2);
+    CHECK(outcome.registered_whole_tu_traversal_budget == 2);
     const std::vector<std::vector<cidx::ast::FrontendCapability>> capabilities{
         {cidx::ast::FrontendCapability::ast},
         {cidx::ast::FrontendCapability::ast,
@@ -2449,6 +2453,55 @@ TEST_SUITE("clang") {
           std::vector<std::string>{"presentation_intents"});
     CHECK(presentation->produced_fact_families ==
           std::vector<std::string>{"display_names"});
+  }
+
+  // The point of the two-root topology is that the rooted cost stops depending
+  // on how many owned headers a translation unit pulls in: one routed symbol
+  // walk plus one rooted graph-event collection, whatever the header count.
+  TEST_CASE("rooted traversals per TU are independent of owned-header count") {
+    for (const int header_count : {0, 1, 2, 16}) {
+      CAPTURE(header_count);
+      const std::string dir = make_temp_dir();
+      const std::string source = dir + "/fanin.cpp";
+      std::string includes;
+      for (int index = 0; index < header_count; ++index) {
+        const std::string name = "fanin_" + std::to_string(index) + ".hpp";
+        write_file(dir + "/" + name, "struct FanIn" + std::to_string(index) +
+                                         " { int value; };\n");
+        includes += "#include \"" + name + "\"\n";
+      }
+      write_file(source, includes + "int fanin_main() { return 1; }\n");
+
+      Storage db(":memory:");
+      db.add_component("fanin", dir);
+      const int64_t file_id = db.add_file_path(
+          source, std::nullopt, std::nullopt,
+          std::vector<std::string>{"-std=c++23"}, std::string("clang++"));
+      const auto file = db.get_file_by_id(file_id);
+      REQUIRE(file.has_value());
+      db.stamp_graph_resolved();
+      db.stamp_index_identity();
+
+      const auto outcome = cidx::ast::run_index_one(db, *file, source, true);
+      REQUIRE(!outcome.parse_failed);
+      CHECK(outcome.registered_whole_tu_traversal_budget == 2);
+      CHECK(outcome.observed_whole_tu_traversals == 2);
+      // Non-vacuity: the headers really were owned and indexed.
+      CHECK(outcome.headers.indexed == static_cast<int>(header_count));
+
+      // Body extraction is reported separately and owns no root budget, and
+      // the replay stages keep their own provider ids and fact families.
+      for (const auto &metrics : outcome.pass_metrics) {
+        if (metrics.id == "statements.main" ||
+            metrics.id == "statements.headers" ||
+            metrics.id == "definitions.headers" ||
+            metrics.id == "namespaces.headers") {
+          CHECK(metrics.whole_tu_traversals == 0U);
+          CHECK(metrics.registered_whole_tu_traversal_budget == 0U);
+          CHECK(!metrics.produced_fact_families.empty());
+        }
+      }
+    }
   }
 
   TEST_CASE(
