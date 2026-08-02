@@ -140,11 +140,20 @@ method:
   candidate measured on a lighter header-heavy corpus would compare as
   identity-matched. Trials of one case must agree on their corpus, or the
   report is `malformed-report`;
-- the declared `corpus_contract` (`many_header_target` is 16 for this baseline,
-  not the shipped default);
-- the front-end reuse mechanism in force. S-071 predates the S-075 contract and
-  records no section, and that absence is part of the identity: a candidate
-  that declares any mechanism, including an explicit `none`, does not compare;
+- the `corpus_contract` fields the measured shape actually depends on:
+  `baseline_distinct_owned_headers`, `shapes`, and `orders` for every shape,
+  plus `many_header_target` for `many-headers` only. `generate_corpus` writes a
+  fixed 16 heavy headers for `header-heavy` and never reads
+  `many_header_target` there, so binding it would refuse a re-run that
+  regenerated exactly the baseline's corpus with the shipped default;
+- the front-end reuse **mechanism in force**, never the presence of the
+  section. S-071 predates the S-075 contract and records no section; every
+  report this harness emits records `qualification_contract`, which declares
+  the same shipped no-reuse control. Both mean the front end reused nothing, so
+  both normalise to `mechanism: none` with no artifact construction and no
+  artifact injection, and compare equal — `--no-front-end-reuse` included. Any
+  other mechanism, or any artifact construction or injection, still does not
+  compare. A section that exists but names no mechanism is `malformed-report`;
 - host platform/machine/CPU count, schema and catalog identity, Clang resource
   directory, and SQLite version.
 
@@ -157,9 +166,13 @@ T-139 owns that gate, and S-098 eligibility is governed by the 0.025 s total.
 
 A full `production.py` run appends the same decision to its report as
 `s098_root_fusion`, computed for `header-heavy:<representative-files>:forward`.
-Only `--representative-files 8` matches the pinned baseline; any other size is
-recorded with `identity-mismatch` rather than silently compared. The decision
-never changes the process exit code, which still tracks `parity_failures`.
+`--representative-files 8` is the only run flag that has to match the pinned
+baseline; any other size is recorded with `identity-mismatch` rather than
+silently compared. Everything else the run records by default — the
+`front_end_reuse` contract, and `--many-header-target` at any value — already
+compares equal to the baseline, so a run at the sub-25 ms target reaches
+`ship_eligible` without special arguments. The decision never changes the
+process exit code, which still tracks `parity_failures`.
 
 Decide over an existing candidate report. This resolves and verifies the
 authoritative artifact through the registry, so it needs a reachable backlog

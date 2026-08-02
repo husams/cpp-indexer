@@ -210,23 +210,40 @@ S098_CORPUS_FIELDS = (
     "baseline_distinct_owned_headers",
     "target_distinct_owned_headers",
 )
+# Contract fields every measured shape depends on: the owned-header floor each
+# shape builds on, and the shape/order vocabulary the case key is written in.
 S098_CORPUS_CONTRACT_FIELDS = (
     "baseline_distinct_owned_headers",
-    "many_header_target",
     "shapes",
     "orders",
 )
+# Contract fields only some shapes depend on. `generate_corpus` writes a fixed
+# 16 heavy headers for `header-heavy` and ignores `many_header_target` there, so
+# binding it for that shape would refuse a re-run that regenerated exactly the
+# baseline's corpus with a different flag value.
+S098_SHAPE_CONTRACT_FIELDS: dict[str, tuple[str, ...]] = {
+    "many-headers": ("many_header_target",),
+}
 # Front-end reuse changes front-end cost, so a candidate that enables a reuse
-# mechanism is not comparable to the no-reuse baseline. S-071 predates the
-# S-075 contract, so its report records no section at all; that absence is
-# itself part of the identity.
+# mechanism is not comparable to the no-reuse baseline. What is bound is the
+# mechanism *in force*, never the presence of the section: S-071 predates the
+# S-075 contract and records no section, while every run of this harness records
+# `qualification_contract`, which is that same shipped no-reuse control. Both
+# describe a front end that reused nothing, so both normalise to
+# `S098_NO_REUSE_CONTROL`. `identity_version` and `explicitly_disabled` are
+# deliberately out: they say which contract emitted the control and how it was
+# selected, not what the front end did.
 S098_FRONT_END_REUSE_FIELDS = (
-    "identity_version",
     "mechanism",
-    "explicitly_disabled",
     "artifact_construction",
     "artifact_injection",
 )
+S098_NO_REUSE_MECHANISM = "none"
+S098_NO_REUSE_CONTROL: dict[str, Any] = {
+    "mechanism": S098_NO_REUSE_MECHANISM,
+    "artifact_construction": False,
+    "artifact_injection": False,
+}
 
 # Named rejection reasons, in the deterministic order they are reported.
 S098_REASON_ARTIFACT_MISSING = "baseline-artifact-missing"
@@ -1295,6 +1312,12 @@ def _mapping(value: Any, where: str) -> Mapping[str, Any]:
     return value
 
 
+def _flag(value: Any, where: str) -> bool:
+    if not isinstance(value, bool):
+        raise BaselineError(S098_REASON_MALFORMED, f"{where} is not a boolean")
+    return value
+
+
 def _trial_series(section: Any, name: str, where: str) -> list[float]:
     entry = _mapping(_mapping(section, where).get(name), f"{where}.{name}")
     trials = entry.get("trials")
@@ -1340,16 +1363,66 @@ def corpus_identity(report: Mapping[str, Any], *, case: str) -> dict[str, Any]:
             S098_REASON_MALFORMED,
             f"{case!r} trials were measured on different corpora: {sorted(distinct)}",
         )
-    return next(iter(descriptors.values()))
+    descriptor = next(iter(descriptors.values()))
+    if not isinstance(descriptor["shape"], str):
+        raise BaselineError(
+            S098_REASON_MALFORMED, f"{case!r} does not name the shape it was generated from"
+        )
+    return descriptor
 
 
-def front_end_reuse_identity(report: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Bind the front-end reuse mechanism in force, including its absence."""
+def corpus_contract_identity(
+    report: Mapping[str, Any], *, shape: str
+) -> dict[str, Any]:
+    """Bind the declared contract fields the measured shape depends on.
+
+    A field the shape's corpus does not read cannot invalidate a comparison, so
+    binding it would refuse a re-run that regenerated exactly the baseline's
+    corpus. `many_header_target` is the case in point: it only sizes the
+    `many-headers` shape.
+    """
+    contract = _mapping(report.get("corpus_contract"), "corpus_contract")
+    fields = (
+        *S098_CORPUS_CONTRACT_FIELDS,
+        *S098_SHAPE_CONTRACT_FIELDS.get(shape, ()),
+    )
+    return {field: contract.get(field) for field in sorted(fields)}
+
+
+def front_end_reuse_identity(report: Mapping[str, Any]) -> dict[str, Any]:
+    """Bind the front-end reuse mechanism in force, normalising the control.
+
+    S-071's report predates the S-075 contract and carries no `front_end_reuse`
+    section; every report this harness emits carries `qualification_contract`,
+    which declares the same shipped no-reuse control. Both mean the front end
+    reused nothing, so both normalise to `S098_NO_REUSE_CONTROL` and compare
+    equal. Any other mechanism, or any artifact construction or injection,
+    still differs and still mismatches. A section that exists but does not say
+    which mechanism was in force cannot be compared and is malformed.
+    """
     section = report.get("front_end_reuse")
     if section is None:
-        return None
+        return dict(S098_NO_REUSE_CONTROL)
     section = _mapping(section, "front_end_reuse")
-    return {field: section.get(field) for field in S098_FRONT_END_REUSE_FIELDS}
+    if "mechanism" not in section:
+        raise BaselineError(
+            S098_REASON_MALFORMED, "front_end_reuse does not declare its mechanism"
+        )
+    if not isinstance(section["mechanism"], str):
+        raise BaselineError(
+            S098_REASON_MALFORMED, "front_end_reuse.mechanism is not a string"
+        )
+    return {
+        "mechanism": section["mechanism"],
+        "artifact_construction": _flag(
+            section.get("artifact_construction", False),
+            "front_end_reuse.artifact_construction",
+        ),
+        "artifact_injection": _flag(
+            section.get("artifact_injection", False),
+            "front_end_reuse.artifact_injection",
+        ),
+    }
 
 
 def identity_fingerprint(
@@ -1359,16 +1432,17 @@ def identity_fingerprint(
 
     The executable digest and checkout commit deliberately stay out: a
     candidate run must differ there. Everything that would silently invalidate
-    a comparison against the frozen baseline stays in - including the corpus
-    the case was generated from, the declared corpus contract, and the
-    front-end reuse mechanism.
+    a comparison against the frozen baseline stays in - the corpus the case was
+    generated from, the contract fields that corpus depends on, and the
+    front-end reuse mechanism in force. Nothing else: a field the measured
+    corpus never reads would refuse an otherwise identical re-run.
     """
     identity = _mapping(report.get("identity"), "identity")
     host = _mapping(identity.get("host"), "identity.host")
     schema = _mapping(identity.get("schema"), "identity.schema")
     clang = _mapping(identity.get("clang"), "identity.clang")
     sqlite = _mapping(identity.get("sqlite"), "identity.sqlite")
-    contract = _mapping(report.get("corpus_contract"), "corpus_contract")
+    corpus = corpus_identity(report, case=case)
     return {
         "method": report.get("method"),
         "case": case,
@@ -1381,10 +1455,8 @@ def identity_fingerprint(
         "catalog_hash": schema.get("catalog_hash"),
         "clang_resource_dir": clang.get("resource_dir"),
         "sqlite_version": sqlite.get("version"),
-        "corpus": corpus_identity(report, case=case),
-        "corpus_contract": {
-            field: contract.get(field) for field in S098_CORPUS_CONTRACT_FIELDS
-        },
+        "corpus": corpus,
+        "corpus_contract": corpus_contract_identity(report, shape=corpus["shape"]),
         "front_end_reuse": front_end_reuse_identity(report),
     }
 
