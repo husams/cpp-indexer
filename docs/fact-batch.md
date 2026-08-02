@@ -30,6 +30,18 @@ symbols coalesce by semantic universe and USR, while internal and no-linkage
 symbols additionally include translation-unit, identity-source, and optional
 local-anchor identity. Type and relation natural keys refer to the same
 partitioned identity vocabulary.
+
+| Domain | Natural identity |
+|---|---|
+| file | `(component.path, directory.path, file.name)` |
+| configuration | semantic universe, translation unit, normalized configuration digest, identity source, and reconstructable configuration content |
+| partition | portable file plus configuration identity |
+| symbol | partition/linkage scope, USR, and optional local anchor |
+| type | partition plus `type_key` |
+| relation | source symbol identity, destination symbol identity, kind, base access, and virtual flag |
+| definition | owning partition, symbol identity, source extent, and optional initializer text |
+| other typed families | owning partition plus the family's complete typed payload; canonicalization removes only exact duplicates |
+
 Emitter ports continue to exchange `int64_t` values for source compatibility,
 but these are collision-checked transient handles backed by natural-key
 dictionaries. They are never SQLite `file.id`, `symbol.id`, `edge.id`, or
@@ -82,18 +94,39 @@ execute cleanup or mutate authoritative storage.
 This table is authoritative and mirrors the comment beside
 `FactBatchRecorder` in `src/ast/fact_batch.hpp`.
 
-| Operation | Index or bucket | Bound |
-|---|---|---|
-| symbol emit / exact source lookup | natural key and `(source, USR)` | amortised O(1) |
-| source-less symbol lookup | `(universe, TU, USR)` → transient handles | amortised O(1); succeeds only for one unambiguous result |
-| qualified/unqualified type candidate lookup | name → first-seen candidates | amortised O(1) + output |
-| qualified-name and kind lookup | `(qualified name, kind)` → handles | amortised O(1) + output |
-| display-name update | symbol handle → record positions | O(records for that symbol) |
-| edge add/aggregation | relation natural key → record position | amortised O(1) |
-| parameter replacement | owner handle → parameter bucket | O(new owner parameters) |
-| body-edge count/copy | source handle → body-edge positions | O(requested source bucket) |
-| type/definition interning | natural key → transient handle | amortised O(1) |
-| final canonicalization | partition/family sort, dedup, materialization | O(n log n) + output |
+Here `k` is one selected keyed bucket, `r` is returned or copied output, and
+`n` is the whole batch. Hash-table bounds are amortised; ordered maps are
+`O(log n)`.
+
+| Operation | Bound |
+|---|---|
+| `set_partition` | `O(log n)` |
+| `set_completeness` | `O(1)` |
+| `emit(SymbolRecord)`, `mint_symbol` | `O(log n)` |
+| `emit(EvidenceRecord/DeclarationSiteRecord)` | amortised `O(1)` |
+| `emit(IncludeDirectiveRecord/MacroUseRecord)` | amortised `O(1)` |
+| `emit(DiagnosticFactRecord/LifecycleCleanupIntent)` | amortised `O(1)` |
+| `emit(ApplicabilityOwnershipRecord/PresentationIntent)` | amortised `O(1)` |
+| `lookup_symbol_id` | amortised `O(1)` |
+| `file_id_for_path` | amortised `O(1)` |
+| `type_arg_candidates`, `symbol_ids_by_qual_name_kind` | `O(r)` |
+| `add_edge`, `ensure_edge` | `O(log n)` |
+| `add_edge_site`, `add_call_arg` | `O(log n)` |
+| `add_template_param`, `add_template_arg` | amortised `O(1)` |
+| `intern_type_node` | `O(log n)` |
+| `add_type_edge`, `add_symbol_type`, `add_def_edge` | amortised `O(1)` |
+| `replace_parameters` | `O(log n + input)` |
+| `get_or_create_definition` | `O(log n)` |
+| `body_edge_count` | amortised `O(1)` |
+| `copy_body_edges_to_def_edge` | `O(k)` |
+| `set_current_file_id` | `O(log n)` |
+| `set_identity_translation_unit_config_id` | `O(log n)` |
+| `set_identity_translation_unit_file_id` | `O(log n)` |
+| `delete_edges_for_file`, `delete_definitions_for_file` | `O(log n)` |
+| `lookup_display_name` | `O(log n)` |
+| `update_display_name` | `O(log n + k)` |
+| `snapshot`, `batch`, `canonical_batch` | `O(n log n)` |
+| `counters` | `O(1)` |
 
 No per-emission operation scans a growing whole-batch vector. The isolated
 `fact_batch_complexity_test` asserts touched-record counts. The
@@ -112,7 +145,8 @@ registered pass ports to one recorder, and returns either one finalized batch
 or a typed failure. A parse, budget, pass, or pre-publication failure exposes no
 partial batch and has no storage port to mutate.
 
-`application::replay_fact_batch` applies partitions in the legacy file order
+`application::replay_fact_batch` applies partitions in the exact legacy file
+order `(component.path, directory.path, file.name)`
 inside one `FactBatchReplayPort` translation-unit transaction. It resolves
 natural handles through transient file/symbol/relation/definition maps. Symbol
 conflicts are applied in recorded legacy emission order even though the
