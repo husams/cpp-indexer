@@ -147,3 +147,35 @@ The shipped profile is the control.
 - [ ] 1,000-TU production harness baseline attached
 - [ ] HSE-114 external-identity hot-path baseline attached
 - [ ] Raw artifacts remain outside the checkout
+
+## Routed root-fusion decision (S-098)
+
+Fill this in for any change to the rooted traversal topology. The decision is
+made by `production.qualify(report)`, never by reading the numbers by hand.
+
+- Selected topology: `<four-root / two-root / one-root>`
+- Conclusion: `<ship / do-not-ship>`
+- Source commit / dirty state: `<value>`
+- Build configuration: `<cmake line, including CMAKE_BUILD_TYPE>`
+- Executable SHA-256: `<value>`
+- Corpus identity: `<case key, stage, target and baseline distinct owned headers>`
+- Reference-host identity: `<platform, machine, CPU count, clang version>`
+- Baseline artifact and verification: `<name, registry resolution, verified yes/no>`
+
+| Trial | `root_symbols` | Remaining rooted components | Fixed root | Cold wall | Cold CPU | Peak RSS | Registered / observed |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | `<value>` | `<value>` | `<value>` | `<value>` | `<value>` | `<value>` | `<value>` |
+| 2 | `<value>` | `<value>` | `<value>` | `<value>` | `<value>` | `<value>` | `<value>` |
+| 3 | `<value>` | `<value>` | `<value>` | `<value>` | `<value>` | `<value>` | `<value>` |
+
+- Computed fixed-root median vs the strict 0.025 s threshold: `<value>`
+- `root_symbols` median vs the T-139 0.015480 s budget: `<value>`
+- Traversal-budget result: `<observed <= registered, per trial>`
+- Semantic parity: `<parity_failures list, canonical digest per trial>`
+- Normalized Layer-0 parity: `<control and candidate digests, diff result>`
+- Disposable-database integrity / foreign keys: `<result; must not use the committed index.db>`
+- On do-not-ship: failed invariant, residual owner, measured value, and the
+  0.025 s threshold: `<value>`
+- Ownership boundaries restated: S-070 applicability SQL, S-072/S-100 FactBatch
+  and serialization, S-099 controlled-writer header lifecycle, S-078 final
+  integrated SLO.

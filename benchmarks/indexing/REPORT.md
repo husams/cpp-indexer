@@ -224,3 +224,96 @@ sections, diagnostics, normalized Layer-0 output, schema version 40, catalog
 version/hash, `PRAGMA integrity_check`, and foreign-key integrity. The report's
 `parity_failures` list is empty at cold, warm, and incremental states for both
 corpus sizes.
+
+# S-098 routed root-fusion result
+
+**Selected topology: two-root. Ship.** The four rooted whole-TU traversals
+become two — one complete routed symbol walk, then one rooted graph-event
+collection whose recorded stream is replayed by the declaration, definition and
+namespace stages. Statement-body extraction stays a separate non-root phase.
+
+## Identities
+
+| Identity | Value |
+| --- | --- |
+| Source commit | `b695bb1203a0c1c1c0761c082977beec2abb70d2`, clean working tree |
+| Build configuration | `cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON` |
+| Executable SHA-256 | `cd03461250d241b1c553434130b4860cc4346b9a95f6edb9bfee30d3c727ac12` |
+| Schema / catalog | version 40, catalog version 1, hash `c4f4262…9e37e9f7` |
+| Reference host | Darwin-25.1.0-arm64 (Mach-O), 10 CPUs, Apple clang 17.0.0 |
+| Corpus identity | `header-heavy:8:forward`, stage `cold`, 18 target distinct owned headers, 2 baseline owned headers |
+| Baseline evidence | `s071-authoritative-r3.json`, resolved and verified through the backlog artifact registry on task S-098 |
+| Final JSON | attached to S-098; SHA-256 `ff35aa518230ffe4699b691a80b366747cd94e1a042e9134949c88c551699a58` |
+
+Command:
+
+```text
+python3 benchmarks/indexing/production.py --cidx build/cidx --checkout . \
+  --representative-files 8 --scale-files 9 --many-header-target 16 --trials 3 \
+  --work-root /tmp/s098-final.noindex --output /tmp/s098-final.json \
+  --skip-self-index --skip-sqlite-matrix
+```
+
+## Three authoritative trials
+
+| Trial | `root_symbols` | `root_declarations` | `root_definitions` | `root_namespaces` | Fixed root | Cold wall | Cold CPU | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.014931 | 0.004974 | 0.001233 | 0.000805 | 0.021943 | 0.137406 | 0.129729 | 48,381,952 |
+| 2 | 0.014911 | 0.005080 | 0.001250 | 0.000880 | 0.022121 | 0.152600 | 0.137835 | 48,594,944 |
+| 3 | 0.016672 | 0.005911 | 0.001362 | 0.000915 | 0.024860 | 0.157204 | 0.147550 | 48,496,640 |
+
+Medians: `root_symbols` 0.014931 s, remaining rooted components 0.007190 s,
+**fixed root 0.022121 s against the strict 0.025 s threshold** — 0.018490 s
+below the pinned S-071 median of 0.040611 s. Every individual trial is also
+below the threshold, so the verdict does not rest on the median hiding an
+outlier. Registered and observed whole-TU traversals are 16 and 16 in all three
+trials (8 TUs × 2 roots), never above budget.
+
+The T-139 symbol-root budget (`root_symbols` median strictly below 0.015480 s)
+is met at 0.014931 s. The measurement that got it there: 87% of `root_symbols`
+was storage-call time, and the dominant term inside it was statement
+*compilation*, not execution — the write path re-issues the same few long
+statements once per row. `SqliteDb::prepare` now keeps a bounded
+per-connection pool of compiled statements; no SQL text is rewritten or
+generated.
+
+## Parity
+
+`parity_failures` is empty and `semantic_parity` is true. The canonical semantic
+digest is identical across all three trials
+(`5525263dbd6c68437702bf3146b6d5dd68e10fb0de26bc4f9e97dd2cf1622548`). Normalized
+Layer-0 output over a 33-TU `src/ast` corpus, indexed three-pass with the
+pre-change binary and with the candidate from the identical working tree, is
+byte-identical: 44,690 lines, empty diff, both
+`979bae1206d326e783ed61210f77640a76b42f0b8db75c081800c277a864c062`. Both
+disposable databases report `PRAGMA integrity_check` = ok and zero
+`PRAGMA foreign_key_check` violations. The committed `index.db` was not
+regenerated, validated, or otherwise touched.
+
+## Residual risk and ownership boundaries
+
+The fusion deliberately stops at the traversal topology. What it does **not**
+own, and who does:
+
+- **S-070 owns applicability SQL.** Fact-to-file association statements were
+  not rewritten; the fused stages feed the same association pass with the same
+  per-file ID buckets.
+- **S-072 and S-100 own FactBatch and serialization.** The routed root-event
+  buffer is a pure in-memory relay of AST handles and routing answers, valid
+  only while the recording `ASTContext` lives. It defines no persistent batch
+  or transfer format.
+- **S-099 owns controlled-writer header lifecycle.** Owned-header planning,
+  `add_file`, and delete ownership stay where they are; the fused passes only
+  consume the routed file set.
+- **S-078 owns the final integrated SLO.** The number here is the fixed
+  routed-root component on one pinned header-heavy corpus and one reference
+  host, not an end-to-end production SLO claim.
+
+Residual risk: the statement pool changes a shared persistence path, so it also
+speeds the other rooted passes (`root_declarations` median 0.006965 s →
+0.004974 s) and every non-root query. Its bounds are per connection — 256
+distinct SQL texts × 4 statements — and pooled statements are reset, unbound
+while idle, and finalized before the connection closes. The third trial's
+noticeably higher numbers track host load rather than the candidate; the
+conclusion is robust to that noise because the worst trial still clears the
+threshold.

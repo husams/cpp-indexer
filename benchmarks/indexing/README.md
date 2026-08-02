@@ -164,6 +164,20 @@ The T-139 symbol budget (`root_symbols` median strictly below 0.015480 s) is
 recorded in the decision as `symbol_root_budget_met` and is advisory here:
 T-139 owns that gate, and S-098 eligibility is governed by the 0.025 s total.
 
+### Recorded outcome
+
+S-098 measured and selected the **two-root** topology and shipped it. At source
+commit `b695bb1`, Release build, on the pinned `header-heavy:8:forward` cold
+corpus and the reference host recorded in the report, three authoritative
+quiescent trials gave a fixed routed-root median of **0.022121 s** against the
+strict 0.025 s threshold (per trial 0.021943 / 0.022121 / 0.024860), with
+`root_symbols` median 0.014931 s meeting the T-139 budget, 16 registered and 16
+observed traversals in every trial, empty `parity_failures`, one canonical
+semantic digest across all three trials, and normalized Layer-0 output
+byte-identical to the S-071 control. The full breakdown, identities, residual
+risk, and the S-070 / S-072 / S-100 / S-099 / S-078 ownership boundaries are in
+[REPORT.md](REPORT.md); the final JSON is attached to backlog task S-098.
+
 A full `production.py` run appends the same decision to its report as
 `s098_root_fusion`, computed for `header-heavy:<representative-files>:forward`.
 `--representative-files 8` is the only run flag that has to match the pinned
