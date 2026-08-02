@@ -147,6 +147,13 @@ const upsertMeta = (db, key, value) =>
   sqlite(db, `INSERT INTO meta(key,value) VALUES('${key}','${value}') ` +
     `ON CONFLICT(key) DO UPDATE SET value=excluded.value;`);
 
+const relocateTrackedWorkspacePaths = (db) => {
+  const escapedRoot = root.replaceAll("'", "''");
+  return sqlite(db, `UPDATE clone SET path='${escapedRoot}' WHERE ` +
+    `repository_id=(SELECT id FROM repository ` +
+    `WHERE name='cpp-indexer-self-host');`);
+};
+
 const prepareScenarioState = async (db, state) => {
   if (state === 'stale') {
     await upsertMeta(db, 'source_fingerprint', 'qualification-stale');
@@ -279,6 +286,7 @@ try {
     if (scenario.state === 'stale') {
       db = join(temporary, `${scenario.id}.db`);
       await copyFile(baseDb, db);
+      await relocateTrackedWorkspacePaths(db);
     }
     if (scenario.state === 'entity' || scenario.state === 'external') {
       db = join(temporary, `${scenario.id}.db`);
