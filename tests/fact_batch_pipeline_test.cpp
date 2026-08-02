@@ -256,7 +256,13 @@ TEST_CASE("serial extraction publishes one immutable batch") {
                     .base_access = std::nullopt,
                     .is_virtual = std::nullopt});
   });
+  ast::ExtractionPassDescriptor complete = descriptor();
+  complete.id = "complete-facts";
+  registry.register_pass(complete, [](ast::PassExecutionContext &context) {
+    static_cast<void>(context);
+  });
   ast::IndexingPlan plan;
+  plan.add("complete-facts");
   plan.add("facts");
   const ast::SerialFactRoute route{
       .partitions = {{.partition = partition("main.cpp", "/repo/src/main.cpp"),
@@ -275,7 +281,7 @@ TEST_CASE("serial extraction publishes one immutable batch") {
   CHECK(batch.records().symbols.size() == 2);
   CHECK(batch.records().relations.size() == 1);
   CHECK(batch.completeness() == ast::FactCompleteness::partial);
-  CHECK(result.report.passes.size() == 1);
+  CHECK(result.report.passes.size() == 2);
 }
 
 TEST_CASE("prepublication failure exposes no partial batch") {
