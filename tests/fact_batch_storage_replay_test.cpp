@@ -65,6 +65,9 @@ public:
         symbols_(ports_), edges_(ports_) {}
 
   void begin_translation_unit() override {
+    symbols_.reset_all_counters();
+    edges_.reset_all_fact_ids();
+    files_.clear();
     transaction_ = ports_.unit_of_work.begin();
   }
 
@@ -273,4 +276,11 @@ TEST_CASE("storage-backed replay matches the direct sink and legacy order") {
   INFO(replay_result.error.value_or(""));
   REQUIRE(replay_result.committed);
   CHECK(normalized(replayed) == normalized(direct));
+
+  const NormalizedLayerZero first_replay = normalized(replayed);
+  const auto repeated =
+      application::replay_fact_batch(replay_batch(header, main), replay_port);
+  INFO(repeated.error.value_or(""));
+  REQUIRE(repeated.committed);
+  CHECK(normalized(replayed) == first_replay);
 }
