@@ -1,10 +1,10 @@
 // Bounded, routed root-event contract for the whole-TU declaration visitors.
 //
-// The four routed root passes (symbols, declaration edges, function
-// definitions, namespace uses) each run their own RecursiveASTVisitor over the
-// translation-unit root. Every one of those walks re-derives the same
-// information: which decl the traversal is on, in which routed file it lives,
-// and how namespace scopes nest around it.
+// The four routed concerns (symbols, declaration edges, function definitions,
+// namespace uses) historically ran independent RecursiveASTVisitor walks over
+// the translation-unit root. Each walk re-derived the same information: which
+// decl the traversal is on, in which routed file it lives, and how namespace
+// scopes nest around it.
 //
 // RoutedRootEventBuffer records that shared information ONCE, in deterministic
 // RecursiveASTVisitor encounter order, so the same non-recursive handlers can
@@ -26,9 +26,9 @@
 // there follows the instantiation statement, not the template's file, so such
 // a declaration is retained even when the template itself is unrouted.
 //
-// This header defines the contract only. Registering a fused pass that
-// consumes it is deliberately out of scope: the production plan still runs
-// four whole-TU root traversals.
+// The shipped production topology uses two whole-TU root traversals: one
+// routed symbol walk and one graph-event collection walk. The declaration,
+// definition, and namespace stages replay the latter walk's recorded stream.
 #pragma once
 
 #include "clang/AST/NestedNameSpecifier.h"
