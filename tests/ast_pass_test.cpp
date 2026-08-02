@@ -1628,3 +1628,34 @@ TEST_CASE("mutation and aggregation operations touch only keyed buckets") {
   CHECK(aggregated_edge->count == 2);
   CHECK(batch.records().definition_edges.size() == 10);
 }
+
+TEST_CASE(
+    "candidate emission probes keyed membership for large overload sets") {
+  FactBatchRecorder recorder("candidate-membership-test");
+  const FactPartitionKey partition = fact_partition(
+      "overloads.cpp", "workspace", "debug", "src/overloads.cpp");
+  recorder.set_partition(partition);
+
+  constexpr int overload_count = 256;
+  for (int index = 0; index < overload_count; ++index) {
+    emit_test_symbol(recorder, partition,
+                     "overload-usr-" + std::to_string(index), "overload", 8,
+                     "ns::overload");
+  }
+  emit_test_symbol(recorder, partition, "overload-usr-0", "overload", 8,
+                   "ns::overload");
+
+  constexpr std::uint64_t memberships_per_qualified_symbol = 3;
+  const std::uint64_t expected_probes =
+      memberships_per_qualified_symbol * (overload_count + 1);
+  CHECK(recorder.counters().calls.at("emit_candidate_membership") ==
+        expected_probes);
+  CHECK(recorder.counters().records_touched.at("emit_candidate_membership") ==
+        expected_probes);
+  CHECK(recorder.type_arg_candidates("overload", false).size() ==
+        overload_count);
+  CHECK(recorder.type_arg_candidates("ns::overload", true).size() ==
+        overload_count);
+  CHECK(recorder.symbol_ids_by_qual_name_kind("ns::overload", "function")
+            .size() == overload_count);
+}

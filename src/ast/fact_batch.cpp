@@ -234,6 +234,17 @@ auto candidate_key(const TypeArgCandidate &candidate) -> std::string {
          (candidate.is_instantiation ? "1" : "0");
 }
 
+template <typename T, typename Key>
+void append_indexed_unique(std::vector<T> &values,
+                           std::unordered_set<Key> &membership, Key key,
+                           const T &value,
+                           FactBatchOperationCounters &counters) {
+  counters.note("emit_candidate_membership", 1);
+  if (membership.insert(std::move(key)).second) {
+    values.push_back(value);
+  }
+}
+
 auto file_identity_from_path(std::string_view value,
                              std::string_view component_path)
     -> PortableFileIdentity {
@@ -425,23 +436,18 @@ void FactBatchRecorder::emit(const SymbolRecord &symbol) {
   }
   const TypeArgCandidate candidate{
       .id = id, .kind_name = kind, .is_instantiation = symbol.is_instantiation};
-  if (candidate_keys_by_name_[symbol.spelling]
-          .insert(candidate_key(candidate))
-          .second) {
-    candidates_by_name_[symbol.spelling].push_back(candidate);
-  }
+  append_indexed_unique(candidates_by_name_[symbol.spelling],
+                        candidate_keys_by_name_[symbol.spelling],
+                        candidate_key(candidate), candidate, counters_);
   if (symbol.qual_name) {
-    if (candidate_keys_by_qualified_name_[*symbol.qual_name]
-            .insert(candidate_key(candidate))
-            .second) {
-      candidates_by_qualified_name_[*symbol.qual_name].push_back(candidate);
-    }
+    append_indexed_unique(candidates_by_qualified_name_[*symbol.qual_name],
+                          candidate_keys_by_qualified_name_[*symbol.qual_name],
+                          candidate_key(candidate), candidate, counters_);
     const std::string qualified_kind = name_kind_key(*symbol.qual_name, kind);
-    if (symbol_id_keys_by_qualified_name_kind_[qualified_kind]
-            .insert(id)
-            .second) {
-      symbol_ids_by_qualified_name_kind_[qualified_kind].push_back(id);
-    }
+    append_indexed_unique(
+        symbol_ids_by_qualified_name_kind_[qualified_kind],
+        symbol_id_keys_by_qualified_name_kind_[qualified_kind], id, id,
+        counters_);
   }
 
   const std::uint64_t emission = next_emission_order_++;
