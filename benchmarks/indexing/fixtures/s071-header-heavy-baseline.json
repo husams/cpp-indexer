@@ -1,6 +1,6 @@
 {
-  "fixture": "s098-baseline/v1",
-  "description": "Compact excerpt of the S-071 authoritative header-heavy baseline run. Field shape matches the full HSE-103 report so the same S-098 summary reads either one.",
+  "fixture": "s098-baseline/v2",
+  "description": "Compact excerpt of the S-071 authoritative header-heavy baseline run. Field shape matches the full HSE-103 report so the same S-098 summary reads either one. Carries the corpus, method, and front-end-reuse parameters the identity fingerprint binds.",
   "source_artifact": {
     "backlog_task": "S-098",
     "name": "s071-authoritative-r3.json",
@@ -19,6 +19,21 @@
     "competing_cidx_indexers": [],
     "quiescent": true
   },
+  "corpus_contract": {
+    "baseline_distinct_owned_headers": 2,
+    "many_header_target": 16,
+    "shapes": [
+      "baseline",
+      "header-heavy",
+      "many-headers",
+      "fan-in"
+    ],
+    "orders": [
+      "forward",
+      "reverse"
+    ]
+  },
+  "front_end_reuse": null,
   "identity": {
     "host": {
       "platform": "Darwin-25.1.0-arm64-arm-64bit-Mach-O",
@@ -46,6 +61,32 @@
     }
   },
   "parity_failures": [],
+  "individual_trials": {
+    "header-heavy:8:forward:trial-1": {
+      "kind": "synthetic",
+      "shape": "header-heavy",
+      "order": "forward",
+      "files": 8,
+      "baseline_distinct_owned_headers": 2,
+      "target_distinct_owned_headers": 18
+    },
+    "header-heavy:8:forward:trial-2": {
+      "kind": "synthetic",
+      "shape": "header-heavy",
+      "order": "forward",
+      "files": 8,
+      "baseline_distinct_owned_headers": 2,
+      "target_distinct_owned_headers": 18
+    },
+    "header-heavy:8:forward:trial-3": {
+      "kind": "synthetic",
+      "shape": "header-heavy",
+      "order": "forward",
+      "files": 8,
+      "baseline_distinct_owned_headers": 2,
+      "target_distinct_owned_headers": 18
+    }
+  },
   "aggregates": {
     "header-heavy:8:forward": {
       "trial_count": 3,
