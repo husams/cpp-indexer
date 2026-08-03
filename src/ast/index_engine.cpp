@@ -1,12 +1,14 @@
 #include "ast/index_engine.hpp"
 #include "ast/front_end_reuse.hpp"
 
+#include "ast/controlled_header_writer.hpp"
 #include "ast/declaration_edge_visitor.hpp"
 #include "ast/display_name_rewrite.hpp"
 #include "ast/function_definition_visitor.hpp"
 #include "ast/include_facts.hpp"
 #include "ast/location.hpp"
 #include "ast/namespace_use_visitor.hpp"
+#include "ast/owned_header_plan.hpp"
 #include "ast/pass_registry.hpp"
 #include "ast/routed_root_events.hpp"
 #include "ast/storage_edge_sink.hpp"
@@ -226,8 +228,9 @@ public:
         tu_(context.getTranslationUnitDecl()) {}
 
   void run() {
-    db_.capture_transform_changes_for_file(state_.rec->id);
-    db_.delete_symbols_for_file(state_.rec->id);
+    if (!prepare_routed_files()) {
+      return;
+    }
     ExtractionPassRegistry registry;
     register_header_passes(registry);
     register_main_passes(registry);
@@ -296,7 +299,6 @@ private:
           for (const cidx::Diagnostic &diagnostic : state_.out->diagnostics) {
             execution.metrics.note_diagnostic(diagnostic.spelling);
           }
-          prepare_routed_files();
         });
     registry.register_pass(
         descriptor("symbols.headers",
@@ -716,7 +718,7 @@ private:
   // recorder, with its freshly minted file row.
   struct PendingHeader {
     std::string path;
-    int64_t file_id;
+    int64_t file_id = -1;
     std::optional<double> mtime;
     std::optional<std::string> md5;
     bool covered_by_current_config = false;
@@ -740,31 +742,179 @@ private:
     visitor.TraverseDecl(tu_);
   }
 
-  // Header planning is the routed symbol pass's file-routing work: it decides
-  // which files this translation unit owns and normalizes their paths and
-  // content hashes. Its storage calls are attributed to the persistence span
-  // instead, so the two root_symbols subcomponents stay disjoint.
-  void prepare_routed_files() {
+  [[nodiscard]] auto translation_unit_route_key() const -> std::string {
+    return state_.ports->workspace
+        .portable_translation_unit_identity_for_config(
+            state_.normalized_config_id, state_.rec->id);
+  }
+
+  [[nodiscard]] auto portable_file_identity(const std::string &path) const
+      -> PortableFileIdentity {
+    const std::string absolute = pathutil::normpath(pathutil::abspath(path));
+    const std::optional<Component> component = db_.component_for_path(absolute);
+    if (!component) {
+      return {.file_name = absolute};
+    }
+    const std::string component_root =
+        pathutil::normpath(db_.component_abs_base(*component));
+    const std::string relative = pathutil::relpath(absolute, component_root);
+    std::string directory = pathutil::dirname(relative);
+    if (directory == ".") {
+      directory.clear();
+    }
+    return {.component_path = component_root,
+            .directory_path = std::move(directory),
+            .file_name = pathutil::basename(relative)};
+  }
+
+  [[nodiscard]] auto fact_partition(const std::string &path) const
+      -> FactPartitionKey {
+    const std::int64_t universe_id =
+        state_.ports->workspace.semantic_universe_for_file_id(state_.rec->id);
+    const std::optional<SemanticUniverse> universe =
+        state_.ports->workspace.get_semantic_universe_by_id(universe_id);
+    return {
+        .file = portable_file_identity(path),
+        .configuration = {
+            .semantic_universe = universe ? universe->key : "legacy",
+            .translation_unit = translation_unit_route_key(),
+            .normalized_configuration = include_config_digest(*state_.config),
+            .identity_source = path,
+            .content = {.driver = state_.config->driver,
+                        .working_dir = state_.config->working_dir,
+                        .arguments = state_.config->arguments,
+                        .lang_mode = state_.config->lang_mode,
+                        .resource_dir = state_.config->resource_dir}}};
+  }
+
+  [[nodiscard]] auto route_generation() const -> std::string {
+    return std::to_string(state_.session_metrics->generation) + ':' +
+           include_config_digest(*state_.config) + ':' +
+           translation_unit_route_key();
+  }
+
+  [[nodiscard]] auto build_owned_header_route_plan() -> OwnedHeaderRoutePlan {
+    const std::string translation_unit = translation_unit_route_key();
+    std::vector<OwnedHeaderRouteCandidate> candidates;
+    candidates.reserve(pending_headers_.size() + 1);
+    candidates.push_back({.role = PlannedFileRole::translation_unit,
+                          .translation_unit = translation_unit,
+                          .translation_unit_file_id = state_.rec->id,
+                          .path = state_.path,
+                          .discovery_ordinal = 0,
+                          .existing_file_id = state_.rec->id,
+                          .snapshot = {.mtime = state_.out->source_mtime,
+                                       .md5 = state_.out->source_md5},
+                          .compile_options = state_.rec->compile_options,
+                          .driver = state_.rec->driver,
+                          .cleanup_symbols = true,
+                          .partition = fact_partition(state_.path)});
+    for (std::size_t index = 0; index < pending_headers_.size(); ++index) {
+      const PendingHeader &header = pending_headers_[index];
+      candidates.push_back(
+          {.role = PlannedFileRole::owned_header,
+           .translation_unit = translation_unit,
+           .translation_unit_file_id = state_.rec->id,
+           .path = header.path,
+           .discovery_ordinal = index + 1,
+           .existing_file_id = std::nullopt,
+           .snapshot = {.mtime = header.mtime, .md5 = header.md5},
+           .compile_options = state_.rec->compile_options,
+           .driver = state_.rec->driver,
+           .cleanup_symbols = header.covered_by_current_config,
+           .partition = fact_partition(header.path)});
+    }
+    return plan_owned_header_routes(route_generation(), std::move(candidates));
+  }
+
+  [[nodiscard]] bool
+  apply_owned_header_route_plan(const OwnedHeaderRoutePlan &plan,
+                                double &persistence_seconds) {
+    const profile::ScopedAccumulator persistence(persistence_seconds);
+    ControlledHeaderWriter writer(
+        [this](const PlannedFileRoute &route) {
+          return state_.ports->source_write.add_file_path(
+              route.path, route.snapshot.mtime, route.snapshot.md5,
+              route.compile_options, route.driver);
+        },
+        [this](std::int64_t file_id) {
+          db_.capture_transform_changes_for_file(file_id);
+          state_.ports->symbols_write.delete_symbols_for_file(file_id);
+        });
+    const ControlledHeaderWriteResult applied = writer.apply(
+        plan, translation_unit_route_key(), route_generation(),
+        [](const std::string &path, const PlannedSourceSnapshot &snapshot) {
+          return SourceSnapshot{.mtime = snapshot.mtime, .md5 = snapshot.md5}
+              .matches(path);
+        });
+    if (!applied.ok()) {
+      const HeaderPlanRejection rejection =
+          applied.rejection.value_or(HeaderPlanRejection{
+              .kind = HeaderPlanRejectionKind::invalid_route,
+              .path = {},
+              .detail = "controlled writer rejected a route without a reason"});
+      if (rejection.kind == HeaderPlanRejectionKind::stale_source) {
+        state_.out->source_changed = true;
+      } else {
+        state_.out->parse_failed = true;
+        state_.out->error = rejection.path.empty()
+                                ? rejection.detail
+                                : rejection.path + ": " + rejection.detail;
+      }
+      return false;
+    }
+    for (const PlannedFileRoute &route : plan.routes()) {
+      if (route.translation_unit != translation_unit_route_key()) {
+        continue;
+      }
+      if (route.role != PlannedFileRole::owned_header) {
+        continue;
+      }
+      const auto pending =
+          std::ranges::find(pending_headers_, route.path, &PendingHeader::path);
+      const std::optional<std::int64_t> transient_handle =
+          route.extraction.transient_file_handle;
+      if (pending == pending_headers_.end() || !transient_handle.has_value()) {
+        state_.out->parse_failed = true;
+        state_.out->error =
+            "controlled writer returned an invalid header route";
+        return false;
+      }
+      const auto file_id = applied.file_ids.find(*transient_handle);
+      if (file_id == applied.file_ids.end()) {
+        state_.out->parse_failed = true;
+        state_.out->error =
+            "controlled writer omitted a planned header file identity";
+        return false;
+      }
+      pending->file_id = file_id->second;
+    }
+    return true;
+  }
+
+  // Planning and lifecycle publication complete before semantic pass
+  // dispatch. The passes consume only the frozen path-to-file routing answer.
+  [[nodiscard]] bool prepare_routed_files() {
     double routing_seconds = 0.0;
     double persistence_seconds = 0.0;
     {
       const profile::ScopedAccumulator routing(routing_seconds);
-      pending_headers_ = plan_owned_headers(persistence_seconds);
+      pending_headers_ = discover_owned_headers(persistence_seconds);
+      const OwnedHeaderRoutePlan plan = build_owned_header_route_plan();
+      if (!apply_owned_header_route_plan(plan, persistence_seconds)) {
+        return false;
+      }
       routed_file_ids_.clear();
       routed_file_ids_.emplace(state_.path, state_.rec->id);
       for (const PendingHeader &header : pending_headers_) {
         routed_file_ids_.emplace(header.path, header.file_id);
-        if (header.covered_by_current_config) {
-          const profile::ScopedAccumulator persistence(persistence_seconds);
-          db_.capture_transform_changes_for_file(header.file_id);
-          db_.delete_symbols_for_file(header.file_id);
-        }
       }
     }
     profile::add_timing(profile::kRootSymbolRoutingTiming,
                         routing_seconds - persistence_seconds);
     profile::add_timing(profile::kRootSymbolPersistenceTiming,
                         persistence_seconds);
+    return true;
   }
 
   bool route_symbol_file(const std::string &path) {
@@ -956,7 +1106,8 @@ private:
     return !current_md5 || existing->md5 == current_md5;
   }
 
-  std::vector<PendingHeader> plan_owned_headers(double &persistence_seconds) {
+  std::vector<PendingHeader>
+  discover_owned_headers(double &persistence_seconds) {
     std::vector<PendingHeader> plan;
     std::unordered_set<std::string> seen;
     cidx::HeaderStats &counts = state_.out->headers;
@@ -994,12 +1145,7 @@ private:
       }
       ++state_.session_metrics->file_stat_reads;
       const std::optional<double> mtime = file_mtime(abs);
-      const profile::ScopedAccumulator persistence(persistence_seconds);
-      const int64_t hid =
-          db_.add_file_path(abs, mtime, parsed_md5, state_.rec->compile_options,
-                            state_.rec->driver);
       plan.push_back({.path = abs,
-                      .file_id = hid,
                       .mtime = mtime,
                       .md5 = parsed_md5,
                       .covered_by_current_config = covered_by_current_config,
@@ -1695,6 +1841,7 @@ struct IndexOneSetup {
         collector(out.diagnostics), injector(failure), ports(db, &injector),
         ast_ports{.workspace = ports.workspace_catalog_read(),
                   .source = ports.source_read(),
+                  .source_write = ports.source_write(),
                   .symbols_read = ports.symbol_read(),
                   .symbols_write = ports.symbol_write(),
                   .types_write = ports.type_write(),

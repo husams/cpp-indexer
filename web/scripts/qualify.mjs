@@ -149,9 +149,11 @@ const upsertMeta = (db, key, value) =>
 
 const relocateTrackedWorkspacePaths = (db) => {
   const escapedRoot = root.replaceAll("'", "''");
-  return sqlite(db, `UPDATE clone SET path='${escapedRoot}' WHERE ` +
-    `repository_id=(SELECT id FROM repository ` +
-    `WHERE name='cpp-indexer');`);
+  return sqlite(db, `DELETE FROM clone WHERE repository_id=(` +
+    `SELECT id FROM repository WHERE name='cpp-indexer-self-host') AND id != (` +
+    `SELECT active_clone_id FROM repository WHERE name='cpp-indexer-self-host'); ` +
+    `UPDATE clone SET path='${escapedRoot}' WHERE id=(` +
+    `SELECT active_clone_id FROM repository WHERE name='cpp-indexer-self-host');`);
 };
 
 const stampQualificationIdentity = async (db) => {
@@ -167,7 +169,8 @@ const stampQualificationIdentity = async (db) => {
     "COALESCE(r.name,'<null>'),COALESCE(r.remote_url,'<null>'),d.path,f.name");
   let manifest = '';
   for (const file of files) {
-    if (file.component_path !== '.' || file.repository_name !== 'cpp-indexer') {
+    if (file.component_path !== '.' ||
+        file.repository_name !== 'cpp-indexer-self-host') {
       throw new Error('cpp-indexer qualification input has an unexpected component root');
     }
     if (Number(file.indexed) !== 1) {

@@ -2,9 +2,8 @@
 // (commands.cpp) running the Phase 0-2 parity-proven LibTooling visitors over
 // one translation unit, with AstIndexer's exact sequencing:
 //
-//   symbols(main) -> header registration + header symbols (pass 1)
-//   -> header edges (pass 2, with per-file delete) -> edges(main) (delete +
-//   B1/B2/B3)
+//   immutable owned-file route plan -> controlled file-row/cleanup publication
+//   -> symbols(main + headers) -> routed graph replay -> associations
 //
 // Selected at runtime by CIDX_INDEX_ENGINE=lt. This header is clang-free so
 // commands.cpp can include it without the Clang C++ API.

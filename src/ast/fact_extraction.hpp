@@ -2,6 +2,7 @@
 #pragma once
 
 #include "ast/fact_batch.hpp"
+#include "ast/fact_route.hpp"
 #include "ast/pass_registry.hpp"
 
 #include <cstddef>
@@ -12,16 +13,6 @@
 #include <vector>
 
 namespace cidx::ast {
-
-struct FactRoutePartition {
-  FactPartitionKey partition;
-  std::optional<std::int64_t> transient_file_handle;
-};
-
-struct SerialFactRoute {
-  std::vector<FactRoutePartition> partitions;
-  std::size_t main_partition = 0;
-};
 
 enum class FactExtractionFailureKind : std::uint8_t {
   invalid_route,
