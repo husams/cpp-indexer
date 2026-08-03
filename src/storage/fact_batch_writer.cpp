@@ -2059,6 +2059,58 @@ void collect_maps(SqliteDb &database, FactBatchWriterResult &result,
   result.report.statement_executions += 5;
 }
 
+// The persistent ids a batch published for one planned file, in the shape
+// SqliteStorageService::note_transform_changes consumes.
+struct PublishedFileFacts {
+  std::vector<std::int64_t> symbols;
+  std::vector<std::int64_t> edges;
+  std::vector<std::int64_t> definitions;
+};
+
+// Group the ids this publication wrote by owning file. The row shapes mirror
+// the applicability publication above (planned routes only, located symbols
+// only) so the transform change set names exactly the facts the batch made
+// current.
+auto collect_published_facts(SqliteDb &database, FactBatchWriterResult &result,
+                             std::int64_t token)
+    -> std::map<std::int64_t, PublishedFileFacts> {
+  std::map<std::int64_t, PublishedFileFacts> published;
+  const auto gather =
+      [&](std::string_view sql,
+          std::vector<std::int64_t> PublishedFileFacts::*bucket) -> void {
+    auto statement = prepare_statement(database, result.report, sql);
+    statement.bind(1, token);
+    while (statement.step()) {
+      (published[statement.col_int64(0)].*bucket)
+          .push_back(statement.col_int64(1));
+    }
+    note_statement_stats(result.report, statement);
+    ++result.report.statement_executions;
+  };
+  gather("SELECT fm.file_id,sm.symbol_id FROM temp.cidx_batch_symbol b "
+         "JOIN temp.cidx_batch_symbol_map sm ON sm.batch=b.batch "
+         "AND sm.handle=b.handle "
+         "JOIN temp.cidx_batch_file_map fm ON fm.batch=b.batch "
+         "AND fm.handle=b.file_handle AND fm.planned=1 "
+         "WHERE b.batch=? AND b.line>0 ORDER BY fm.file_id,sm.symbol_id",
+         &PublishedFileFacts::symbols);
+  gather("SELECT fm.file_id,rm.relation_id FROM temp.cidx_batch_relation r "
+         "JOIN temp.cidx_batch_relation_map rm ON rm.batch=r.batch "
+         "AND rm.handle=r.handle "
+         "JOIN temp.cidx_batch_file_map fm ON fm.batch=r.batch "
+         "AND fm.handle=r.file_handle AND fm.planned=1 "
+         "WHERE r.batch=? ORDER BY fm.file_id,rm.relation_id",
+         &PublishedFileFacts::edges);
+  gather("SELECT fm.file_id,dm.definition_id FROM temp.cidx_batch_definition d "
+         "JOIN temp.cidx_batch_definition_map dm ON dm.batch=d.batch "
+         "AND dm.handle=d.handle "
+         "JOIN temp.cidx_batch_file_map fm ON fm.batch=d.batch "
+         "AND fm.handle=d.file_handle AND fm.planned=1 "
+         "WHERE d.batch=? ORDER BY fm.file_id,dm.definition_id",
+         &PublishedFileFacts::definitions);
+  return published;
+}
+
 } // namespace
 
 auto fact_batch_writer_phase_name(FactBatchWriterPhase phase)
@@ -2209,6 +2261,19 @@ auto FactBatchWriter::apply(const ast::FactBatch &batch,
     inject(context.failure, FactBatchWriterFailurePoint::site_apply);
     publish_includes(database, result, publication, token);
     publish_applicability(database, result, publication, token);
+    // Record what this batch published. capture_transform_changes_for_file
+    // above only names the prior identities lifecycle cleanup invalidates; a
+    // change set carrying those alone tells incremental transforms to
+    // re-derive over removed ids while silently omitting every fact the batch
+    // created. The per-file applicability routine this writer replaced closed
+    // the same seam by ending in note_transform_changes. This is not gated on
+    // a configuration id: applicability publication is, and a
+    // configuration-less publication still makes facts current.
+    for (const auto &[file_id, facts] :
+         collect_published_facts(database, result, token)) {
+      storage_.note_transform_changes(file_id, facts.symbols, facts.edges,
+                                      facts.definitions);
+    }
     inject(context.failure, FactBatchWriterFailurePoint::publication);
 
     for (const ast::PlannedFileRoute &route : context.route_plan.routes()) {

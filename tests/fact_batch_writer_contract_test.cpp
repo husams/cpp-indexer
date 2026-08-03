@@ -76,7 +76,9 @@ struct Fixture {
           .partition = header}});
   }
 
-  auto batch() const -> ast::FactBatch {
+  // additions=true appends one symbol, one edge and one definition to the
+  // owned header so a republication genuinely creates new persistent ids.
+  auto batch(bool additions = false) const -> ast::FactBatch {
     ast::FactBatchRecorder recorder("fact-batch-writer-test");
     const auto route = plan.serial_route("/tmp/cidx-s073-writer/main.cpp");
     REQUIRE(route.partitions.size() == 2);
@@ -95,6 +97,25 @@ struct Fixture {
     recorder.emit(symbol(header.partition, "usr-header", "header"));
     const std::int64_t header_symbol =
         recorder.lookup_symbol_id("usr-header").value();
+    if (additions) {
+      ast::SymbolRecord added =
+          symbol(header.partition, "usr-header-added", "headerAdded");
+      added.line = 9;
+      added.col = 1;
+      added.end_line = 9;
+      added.end_col = 12;
+      recorder.emit(added);
+      const std::int64_t added_symbol =
+          recorder.lookup_symbol_id("usr-header-added").value();
+      const std::int64_t added_relation = recorder.add_edge(
+          {.src_id = header_symbol, .dst_id = added_symbol, .kind = 1});
+      recorder.add_edge_site({.edge_id = added_relation,
+                              .file_id = header_handle,
+                              .line = 9,
+                              .col = 5});
+      static_cast<void>(recorder.get_or_create_definition(
+          added_symbol, header_handle, 9, 1, 9, 12, std::nullopt));
+    }
     static_cast<void>(
         recorder.mint_symbol({.usr = "usr-external",
                               .spelling = "External",
@@ -379,6 +400,54 @@ TEST_CASE("FactBatchWriter captures incremental transform invalidation") {
   CHECK(std::ranges::find(changes.edge_ids, header_edge_id) !=
         changes.edge_ids.end());
   CHECK(std::ranges::find(changes.definition_ids, header_definition_id) !=
+        changes.definition_ids.end());
+}
+
+TEST_CASE(
+    "FactBatchWriter records newly published facts as transform changes") {
+  Fixture fixture;
+  storage::FactBatchWriter writer(fixture.storage);
+  auto context = fixture.context();
+  context.configuration = TranslationUnitConfig{
+      .descriptor_hash = "writer-config", .descriptor_json = "{}"};
+  const auto initial = writer.apply(fixture.batch(), context);
+  INFO(initial.error.value_or(""));
+  REQUIRE(initial.ok());
+  REQUIRE(initial.configuration_id >= 0);
+  REQUIRE(fixture.storage.run_transform_pipeline().complete);
+  REQUIRE(fixture.storage.pending_transform_changes().empty());
+
+  // The republication adds facts that do not exist yet, so the pre-cleanup
+  // capture of prior identities cannot possibly name their ids. They can only
+  // reach the change set from the publication path.
+  const auto republished = writer.apply(fixture.batch(true), context);
+  INFO(republished.error.value_or(""));
+  REQUIRE(republished.ok());
+
+  auto added_symbol = fixture.storage.raw_db().prepare(
+      "SELECT id FROM symbol WHERE usr='usr-header-added'");
+  REQUIRE(added_symbol.step());
+  const std::int64_t added_symbol_id = added_symbol.col_int64(0);
+  auto added_edge =
+      fixture.storage.raw_db().prepare("SELECT id FROM edge WHERE dst_id=?");
+  added_edge.bind(1, added_symbol_id);
+  REQUIRE(added_edge.step());
+  const std::int64_t added_edge_id = added_edge.col_int64(0);
+  auto added_definition = fixture.storage.raw_db().prepare(
+      "SELECT id FROM definition WHERE symbol_id=?");
+  added_definition.bind(1, added_symbol_id);
+  REQUIRE(added_definition.step());
+  const std::int64_t added_definition_id = added_definition.col_int64(0);
+
+  const auto changes = fixture.storage.pending_transform_changes();
+  CAPTURE(added_symbol_id);
+  CAPTURE(added_edge_id);
+  CAPTURE(added_definition_id);
+  CHECK(std::ranges::find(changes.symbol_ids, added_symbol_id) !=
+        changes.symbol_ids.end());
+  CHECK(std::ranges::find(changes.edge_ids, added_edge_id) !=
+        changes.edge_ids.end());
+  CHECK(std::ranges::find(changes.definition_ids, added_definition_id) !=
         changes.definition_ids.end());
 }
 
