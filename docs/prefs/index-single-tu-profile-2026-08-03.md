@@ -34,8 +34,10 @@ sample $! 60 1 -mayDie -f /tmp/sample.txt
 Caveat: the index database starts **empty** (cold), so every symbol/type is
 minted rather than matched. An unrelated `cidx ui open` process from another
 session was pinned at 100 % CPU on a different core during the run; the indexer
-is single-threaded and the host has spare cores, so contention is negligible,
-but timings carry that noise.
+is single-threaded and the host has 10 cores, so contention is limited, but
+timings carry that noise. Percentages and ratios are the trustworthy figures —
+which is why the root-cause evidence in §4 is stated in VDBE instructions
+rather than seconds.
 
 ## 2. Object profiled
 
@@ -48,10 +50,19 @@ Exactly one file: **`src/query/exec.cpp`** (largest TU in the tree).
 | `#include` directives seen | 6,039 |
 | Headers newly indexed | 19 (+798 system, 0 already indexed) |
 | Symbols emitted | 194 (main file) + 1,984 (headers) |
-| Wall time | **19.09 s** |
-| In-process CPU | 18.59 s |
-| Driver subprocess wall | 0.026 s (1 subprocess) |
-| Peak RSS | 458,997,760 B (438 MiB) |
+| Wall time | **15.98 s** |
+| In-process CPU | 15.19 s |
+| Driver subprocess wall | 0.020 s (1 subprocess) |
+| Peak RSS | 458,014,720 B (437 MiB) |
+
+Three timing observations were taken; all numbers in this report come from the
+**sampled** run, which is the one the call graph belongs to:
+
+| Run | Instrumentation | Wall |
+| --- | --- | ---: |
+| warm-up | `time` only | 15.19 s |
+| unsampled | `--profile-json` only, taken while `sample` was (mistakenly) profiling an unrelated process that was pinned at 100 % CPU | 19.09 s |
+| **sampled — used throughout** | `--profile-json` + `sample <pid>` | **15.98 s** |
 
 Facts attempted → persisted for this single TU:
 
@@ -74,29 +85,31 @@ text), 1 transaction.
 
 | Span | Seconds | % of wall |
 | --- | ---: | ---: |
-| `clang_tool_inclusive` | 17.60 | 92 % |
-| **`sqlite_vdbe`** | **16.06** | **84 %** |
-| `body_extraction` (= `pass.statements.main`) | 9.70 | 51 % |
-| `pass.namespaces.headers` | 2.90 | 15 % |
-| `clang_front_end` (parse/sema only) | 2.23 | 12 % |
-| `pass.declarations.headers` | 2.01 | 11 % |
-| `commit` | 1.45 | 8 % |
-| `pass.symbols.headers` | 0.69 | 4 % |
-| `sqlite_prepare` | 0.075 | 0.4 % |
-| everything else (`fact_persistence`, `applicability_association`, `include_persistence`, `verification`, …) | < 0.06 each | — |
+| `clang_tool_inclusive` | 14.46 | 90 % |
+| **`sqlite_vdbe`** | **13.85** | **87 %** |
+| `body_extraction` (= `pass.statements.main`) | 8.49 | 53 % |
+| `pass.namespaces.headers` | 2.27 | 14 % |
+| `commit` | 1.48 | 9 % |
+| `pass.declarations.headers` | 1.67 | 10 % |
+| `clang_front_end` (parse/sema only) | 1.45 | 9 % |
+| `pass.symbols.headers` | 0.52 | 3 % |
+| `sqlite_prepare` | 0.065 | 0.4 % |
+| everything else (`fact_persistence`, `applicability_association`, `include_persistence`, `verification`, …) | < 0.08 each | — |
 
-Reading: the Clang front end itself is **12 %** of the run. Storage I/O inside
-the AST passes is **84 %**.
+Reading: the Clang front end itself is **9 %** of the run. Storage work inside
+the AST passes is **87 %**. (`sqlite_prepare` is near-zero because
+`SqliteDb::prepare` pools compiled statements — the 411,822 "prepare calls" are
+almost all cache hits. The cost is in stepping, not compiling.)
 
 ### 3.2 Self (leaf) time by binary image — 10,798 leaf samples
 
 | Image | Samples | % | ≈ seconds |
 | --- | ---: | ---: | ---: |
-| `libsqlite3.dylib` | 8,867 | 82.1 % | 15.7 |
-| `libsystem_platform.dylib` (memmove/memcmp/memset, ~all called from SQLite) | 1,234 | 11.4 % | 2.2 |
-| `libsystem_kernel.dylib` | 407 | 3.8 % | 0.7 |
-| `libsystem_malloc.dylib` | 205 | 1.9 % | 0.4 |
-| **`cidx`** | **26** | **0.2 %** | **0.05** |
+| `libsqlite3.dylib` | 8,867 | 82.1 % | 13.12 |
+| `libsystem_platform.dylib` (memmove/memcmp/memset, ~all called from SQLite) | 1,234 | 11.4 % | 1.83 |
+| `libsystem_kernel.dylib` | 407 | 3.8 % | 0.60 |
+| `libsystem_malloc.dylib` | 205 | 1.9 % | 0.30 |
+| **`cidx`** | **26** | **0.2 %** | **0.04** |
 | `libclang-cpp.dylib` | 19 | 0.2 % | 0.03 |
 | `libLLVM.dylib` | 7 | 0.1 % | 0.01 |
 
@@ -113,29 +126,29 @@ scanning**, not point lookups.
 
 | Samples | % | ≈ s | Frame | Location |
 | ---: | ---: | ---: | --- | --- |
-| 11,173 | 99.8 % | 19.05 | `cidx::ast::run_index_one` | `index_engine.cpp:2051` |
-| 10,705 | 95.6 % | 18.25 | `cidx::SqliteStmt::step` | `sqlite.cpp:172` |
-| 9,884 | 88.3 % | 16.85 | `IndexASTConsumer::HandleTranslationUnit` | `index_engine.cpp:1201` |
-| 9,883 | 88.3 % | 16.85 | `ExtractionPassRegistry::run` | `pass_registry.cpp:586` |
-| 7,248 | 64.7 % | 12.36 | `FunctionDefinitionVisitor::run_statement_pass` | `function_definition_visitor.cpp:67` |
-| 7,241 | 64.7 % | 12.34 | `StatementEdgeVisitor::walk` | `statement_edge_visitor.cpp:101` |
-| **6,988** | **62.4 %** | **11.91** | **`StorageEdgeSink::lookup_symbol_id`** | `storage_edge_sink.cpp:83` |
-| **6,978** | **62.3 %** | **11.90** | **`SqliteStorageService::lookup_symbol`** | `storage_symbols.cpp:302-333` |
-| 5,315 | 47.5 % | 9.06 | `CallEdgeEmitter::emit_resolved_call` | `call_edge_emitter.cpp:200` |
-| 5,129 | 45.8 % | 8.74 | `CallEdgeEmitter::mint_resolved_target` | `call_edge_emitter.cpp:139` |
-| 4,097 | 36.6 % | 6.98 | `StatementEdgeVisitor::emit_call` | `statement_edge_visitor.cpp:168` |
-| 2,148 | 19.2 % | 3.66 | `emit_owner_promotion` | `instantiation_edges.cpp:126` |
-| 1,944 | 17.4 % | 3.31 | `RoutedRootEventBuffer::replay_namespaces` | `routed_root_events.cpp:404` |
-| 1,774 | 15.8 % | 3.02 | `emit_callable_template_identity` | `instantiation_edges.cpp:182` |
-| 1,705 | 15.2 % | 2.91 | `StatementEdgeVisitor::VisitDeclRefExpr` | `statement_edge_visitor.cpp:421` |
-| 1,340 | 12.0 % | 2.28 | `TemplateArgumentEncoder::encode` | `template_argument_encoder.cpp:49` |
-| 1,263 | 11.3 % | 2.15 | `Transaction::commit` | `storage.cpp:95` |
-| 1,260 | 11.3 % | 2.15 | `DeclarationEdgeVisitor::emit_signature_types` | `declaration_edge_visitor.cpp:416` |
-| 1,258 | 11.2 % | 2.14 | `reconcile_pending_symbol_identities` | `storage.cpp:664` |
-| 1,245 | 11.1 % | 2.12 | `TypeInterner::intern` | `type_graph.cpp:73` |
-| 1,129 | 10.1 % | 1.92 | `NamespaceUseVisitor::emit_ns_use` | `namespace_use_visitor.cpp:138` |
-| 1,099 | 9.8 % | 1.87 | `SqliteStorageService::intern_type_node` | `storage_types.cpp:74` |
-| 813 | 7.3 % | 1.39 | `reconcile_type_identity` | `storage.cpp:806-834` |
+| 11,173 | 99.8 % | 15.94 | `cidx::ast::run_index_one` | `index_engine.cpp:2051` |
+| 10,705 | 95.6 % | 15.28 | `cidx::SqliteStmt::step` | `sqlite.cpp:172` |
+| 9,884 | 88.3 % | 14.10 | `IndexASTConsumer::HandleTranslationUnit` | `index_engine.cpp:1201` |
+| 9,883 | 88.3 % | 14.10 | `ExtractionPassRegistry::run` | `pass_registry.cpp:586` |
+| 7,248 | 64.7 % | 10.34 | `FunctionDefinitionVisitor::run_statement_pass` | `function_definition_visitor.cpp:67` |
+| 7,241 | 64.7 % | 10.33 | `StatementEdgeVisitor::walk` | `statement_edge_visitor.cpp:101` |
+| **6,988** | **62.4 %** | **9.97** | **`StorageEdgeSink::lookup_symbol_id`** | `storage_edge_sink.cpp:83` |
+| **6,978** | **62.3 %** | **9.96** | **`SqliteStorageService::lookup_symbol`** | `storage_symbols.cpp:302-333` |
+| 5,315 | 47.5 % | 7.58 | `CallEdgeEmitter::emit_resolved_call` | `call_edge_emitter.cpp:200` |
+| 5,129 | 45.8 % | 7.32 | `CallEdgeEmitter::mint_resolved_target` | `call_edge_emitter.cpp:139` |
+| 4,097 | 36.6 % | 5.85 | `StatementEdgeVisitor::emit_call` | `statement_edge_visitor.cpp:168` |
+| 2,148 | 19.2 % | 3.07 | `emit_owner_promotion` | `instantiation_edges.cpp:126` |
+| 1,944 | 17.4 % | 2.77 | `RoutedRootEventBuffer::replay_namespaces` | `routed_root_events.cpp:404` |
+| 1,774 | 15.8 % | 2.53 | `emit_callable_template_identity` | `instantiation_edges.cpp:182` |
+| 1,705 | 15.2 % | 2.43 | `StatementEdgeVisitor::VisitDeclRefExpr` | `statement_edge_visitor.cpp:421` |
+| 1,340 | 12.0 % | 1.91 | `TemplateArgumentEncoder::encode` | `template_argument_encoder.cpp:49` |
+| 1,263 | 11.3 % | 1.80 | `Transaction::commit` | `storage.cpp:95` |
+| 1,260 | 11.3 % | 1.80 | `DeclarationEdgeVisitor::emit_signature_types` | `declaration_edge_visitor.cpp:416` |
+| 1,258 | 11.2 % | 1.80 | `reconcile_pending_symbol_identities` | `storage.cpp:664` |
+| 1,245 | 11.1 % | 1.78 | `TypeInterner::intern` | `type_graph.cpp:73` |
+| 1,129 | 10.1 % | 1.61 | `NamespaceUseVisitor::emit_ns_use` | `namespace_use_visitor.cpp:138` |
+| 1,099 | 9.8 % | 1.57 | `SqliteStorageService::intern_type_node` | `storage_types.cpp:74` |
+| 813 | 7.3 % | 1.16 | `reconcile_type_identity` | `storage.cpp:792-834` |
 
 ### 3.4 Hottest path
 
@@ -165,7 +178,7 @@ main                                              main.cpp:66
 ```
 
 **Single hottest method: `cidx::SqliteStorageService::lookup_symbol`
-(`src/storage/storage_symbols.cpp:302`), 62.3 % inclusive (~11.9 s of 19.1 s),
+(`src/storage/storage_symbols.cpp:302`), 62.3 % inclusive (~9.96 s of 15.98 s),
 reached from the statement pass via `CallEdgeEmitter::mint_resolved_target`.**
 
 ## 4. Root cause
@@ -203,53 +216,89 @@ SEARCH symbol USING INDEX idx_symbol_identity (semantic_universe_id=? AND identi
 All 2,729 rows in this database sit in one `semantic_universe_id`, so each
 lookup walks the whole symbol table and string-compares `identity_key` per row.
 That explains the 762 M VDBE instructions, the 659,939 fullscan steps, and the
-`sqlite3BtreeNext` / `RecordCompareWithSkip` leaf profile. **The cost grows
-linearly with the number of symbols already stored, making whole-repo indexing
-quadratic in symbol count.**
+`sqlite3BtreeNext` / `RecordCompareWithSkip` leaf profile.
 
-Measured on the produced database, same connection (full data in
-`index-single-tu-sql-evidence-2026-08-03.txt`):
+Worse, `lookup_symbol` probes **two** keys — the TU-local identity first, then
+the external one. For any symbol declared outside the current TU the local
+probe cannot match, so it always pays a *full* scan before the second probe
+even starts.
 
-| Run | Query as shipped | `+ AND identity_key <> ''` | Ratio |
-| --- | ---: | ---: | ---: |
-| 20,000 lookups, light host load | 232.8 µs/lookup | **5.8 µs/lookup** | 40.1× |
-| 5 × 5,000 lookups, heavy host load (median) | 521.7 µs/lookup | **9.2 µs/lookup** | 56.5× |
+### Cost as a function of table size
 
-Absolute numbers move with host load; the ratio sits in the **40–57×** band at
-only 2,729 rows, and the gap widens with table size.
+Measured as **VDBE instructions per lookup** (`sqlite3_progress_handler`, so it
+is exact and independent of host load), with `LIMIT 1` to mirror the C++ path,
+which calls `SqliteStmt::step()` exactly once:
+
+| Symbol rows `N` | as shipped, hit | as shipped, miss | `+ identity_key <> ''`, hit | miss |
+| ---: | ---: | ---: | ---: | ---: |
+| 2,839 (this run's DB, 2 TUs) | 8,087 | 14,206 | **19.1** | **16.0** |
+| 15,015 (repo `index.db`) | 40,844 | 75,086 | **19.1** | **16.0** |
+
+A miss costs exactly `5.00 × N` VDBE instructions (14,206/2,839 = 5.004;
+75,086/15,015 = 5.001); a hit averages `≈2.8 × N`. With the predicate the cost
+is **constant** — 16–19 instructions regardless of `N`. **As shipped the lookup
+is O(N) in stored symbols, so indexing a repository is quadratic in symbol
+count; with the predicate it is O(log N).**
+
+Wall-clock confirms the same shape (absolute numbers move with host load, so
+the ratio is the meaningful figure; full data in `raw/sql-evidence.txt`):
+
+| Symbol rows | as shipped | `+ identity_key <> ''` | Ratio |
+| ---: | ---: | ---: | ---: |
+| 2,729 (light load) | 232.8 µs | **5.8 µs** | 40× |
+| 2,839 (heavy load) | 1,335.6 µs | **16.6 µs** | 80× |
+| 15,015 (heavy load) | 11,314.0 µs | **13.4 µs** | 844× |
 
 ## 5. Secondary findings
 
-1. **No type-intern memoization.** 88,058 `types` facts were attempted with
-   **0 duplicates suppressed**, yet the run produced only 1,773 distinct
-   `type_node` rows — ~98 % of `intern_type_node` calls re-do an upsert plus a
-   `SELECT id` (`storage_types.cpp:46-72`) for a key already interned in this
-   TU. Inclusive cost 1.87 s.
-2. **`reconcile_type_identity` fan-out** (`storage.cpp:800-834`): 5 UPDATE
-   statements per interned type that carries a `decl_usr`, 1.39 s inclusive.
+1. **Misses are never cached.** `StorageEdgeSink::lookup_symbol_id`
+   (`storage_edge_sink.cpp:66-92`) memoizes hits but deliberately not misses
+   ("a later `mint_symbol()` in this TU may create the symbol"). In a cold
+   database most probes miss — and a miss is the *most* expensive case
+   (full scan, no early exit).
+2. **No type-intern memoization across call sites.** 88,058 `types` facts were
+   attempted with **0 duplicates suppressed**, yet the run produced only 1,773
+   distinct `type_node` rows. `CallEdgeEmitter::mint_resolved_target`
+   (`call_edge_emitter.cpp:148-150`) constructs a **fresh `DeclarationEdgeVisitor`
+   — and therefore a fresh `TypeInterner` with an empty memo
+   (`declaration_edge_visitor.hpp:163`) — at every call site, then re-emits the
+   callee's whole signature type graph. Inclusive: `emit_signature_types` 1.80 s,
+   `intern_type_node` 1.57 s.
+3. **`reconcile_type_identity` fan-out** (`storage.cpp:792-834`): 5 UPDATE
+   statements per interned type that carries a `decl_usr`, 1.16 s inclusive.
    All five plans are index-driven — the cost is call volume, not a missing
-   index, so it follows finding 1.
-3. **Commit-time reconciliation**: `Transaction::commit` 2.15 s, essentially
+   index, so it follows finding 2.
+4. **Two statements where one would do.** `mint_symbol_id`
+   (`storage_symbols.cpp:695-702`) and `intern_type_node`
+   (`storage_types.cpp:67-71`) each follow their upsert with a separate
+   `SELECT id`, while `add_edge` (`storage_symbols.cpp:705-720`) already uses
+   `RETURNING id` on the same SQLite build (3.51.0).
+5. **Commit-time reconciliation**: `Transaction::commit` 1.80 s, essentially
    all of it `reconcile_pending_symbol_identities` (`storage.cpp:664`).
-4. **Header passes re-run per TU**: `pass.namespaces.headers` 2.90 s +
-   `pass.declarations.headers` 2.01 s + `pass.symbols.headers` 0.69 s — 30 % of
-   the run spent on 19 headers that every other TU in the component will also
-   pull in.
-5. **`include_facts` is the only family with duplicate suppression working**
+6. **Header passes do not amortize.** `pass.namespaces.headers` 2.27 s +
+   `pass.declarations.headers` 1.67 s + `pass.symbols.headers` 0.52 s = 28 % of
+   this run. Indexing a second TU (`src/query/plan.cpp`) into the same database
+   — `new_headers=0`, 10 headers *already indexed* — still spent 1.65 s + 0.65 s
+   + 0.39 s = 2.69 s in those passes.
+7. **`include_facts` is the only family with duplicate suppression working**
    (17,546 attempted → 314 persisted).
-6. The Clang front end (`clang_front_end` 2.23 s) is *not* the bottleneck; AST
-   traversal plus storage is. Front-end reuse would recover at most 12 %.
+8. The Clang front end (`clang_front_end` 1.45 s) is *not* the bottleneck; AST
+   traversal plus storage is. Front-end reuse would recover at most 9 %.
 
 ## 6. Suggested order of attack
 
+Full write-up with proposed changes, risks and validation:
+[`docs/improvements/indexing-performance.md`](../improvements/indexing-performance.md).
+
 1. Add `AND identity_key <> ''` to the two `lookup_symbol` identity queries
    (`storage_symbols.cpp:311`) — or drop the partial index's `WHERE` clause.
-   One-line change, ~40× on the single hottest path, and it removes the
-   quadratic scaling. Highest value by a wide margin.
-2. Memoize `intern_type_node` per TU (key → `type_id`) to collapse 88 k calls
-   toward the 1.8 k distinct keys; this also removes most of
-   `reconcile_type_identity`.
-3. Cache/skip header passes across TUs sharing already-indexed headers.
+   One-line change; turns an O(N) scan into an O(log N) seek on the single
+   hottest path. Highest value by a wide margin.
+2. Cache negative lookups in `StorageEdgeSink`, invalidated on `mint_symbol`.
+3. Memoize per-callee work in `CallEdgeEmitter::mint_resolved_target` so the
+   signature type graph is emitted once per callee per TU, not once per call
+   site.
+4. Use `RETURNING id` in `mint_symbol_id` / `intern_type_node`.
 
 ## 7. Artifacts
 

@@ -1,0 +1,29 @@
+Side finding from the hot path: parameter.file_id vs parameter.line/col
+
+CallEdgeEmitter::mint_resolved_target (call_edge_emitter.cpp:148-150) builds a
+DeclarationEdgeVisitor with target_file = {} and file_id = the CALL SITE's file,
+then calls emit_signature_types_for. DeclarationEdgeVisitor::fill_signature_parameter
+(declaration_edge_visitor.cpp:351-355) then writes
+    record.file_id = file_id_;                 <- call site's file
+    record.line    = expansion_loc(param).line <- parameter's real declaration line
+so the (file_id, line, col) triple is inconsistent for any callee declared in
+another file. Database: scratch index of src/query/exec.cpp + src/query/plan.cpp.
+
+parameter_rows  file_id_ne_owner_decl_file
+--------------  --------------------------
+1707            251                       
+
+Examples (owner declared in src/cli/json_out.hpp; parameter row points at the caller):
+owner  param  line_recorded  parameter_file_id_points_at  owner_decl_file
+-----  -----  -------------  ---------------------------  ---------------
+of     v      46             exec.cpp                     json_out.hpp   
+of     v      61             plan.cpp                     json_out.hpp   
+of     v      62             plan.cpp                     json_out.hpp   
+arr    v      63             plan.cpp                     json_out.hpp   
+obj    v      64             plan.cpp                     json_out.hpp   
+
+Ground truth from the header (line numbers match the recorded lines, not the caller):
+   src/cli/json_out.hpp:46:   static Value of(bool v);
+   src/cli/json_out.hpp:61:   static Value of(const std::string &v);
+   src/cli/json_out.hpp:62:   static Value of(std::string &&v);
+   src/cli/json_out.hpp:63:   static Value arr(Array v);

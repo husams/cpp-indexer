@@ -7,7 +7,9 @@ Each experiment is one dated report plus its raw artifacts under `raw/`.
 
 | Date | Experiment | Report | Headline result |
 | --- | --- | --- | --- |
-| 2026-08-03 | CPU profile of `cidx index` on a single translation unit | [`index-single-tu-profile-2026-08-03.md`](index-single-tu-profile-2026-08-03.md) | 84 % of the run is SQLite; the hottest method is `SqliteStorageService::lookup_symbol` at 62 % inclusive, because its query cannot use the partial index `idx_symbol_identity` |
+| 2026-08-03 | CPU profile of `cidx index` on a single translation unit | [`index-single-tu-profile-2026-08-03.md`](index-single-tu-profile-2026-08-03.md) | 87 % of the run is SQLite; the hottest method is `SqliteStorageService::lookup_symbol` at 62 % inclusive, because its query cannot use the partial index `idx_symbol_identity` and therefore scans O(N) symbols per probe |
+
+What to do about it: [`docs/improvements/indexing-performance.md`](../improvements/indexing-performance.md).
 
 ---
 
@@ -34,7 +36,7 @@ breakdown rather than an aggregate over a whole repository.
 
 Two independent instruments were used on purpose: `--profile-json` says *which
 pass* is slow, `sample` says *which function and path* is slow, and they agree
-(`sqlite_vdbe` 16.06 s ≈ `libsqlite3.dylib` self time 15.68 s).
+(`sqlite_vdbe` 13.85 s ≈ `libsqlite3.dylib` self time 13.12 s).
 
 ### Method
 
@@ -77,15 +79,19 @@ rebuilds the tree from the indentation column and computes:
 ### Threats to validity
 
 - **Host load.** An unrelated `cidx ui open` process from another session was
-  pinned at 100 % CPU during the sampled run, and load rose further (555 % +
-  95 %) before the repeat micro-benchmarks. The indexer is single-threaded on a
-  10-core M4 so contention is limited, but absolute seconds carry that noise.
-  Percentages and ratios are the trustworthy figures; the SQL micro-benchmark
-  is therefore reported as a ratio (40–57×) across both load conditions.
-- **Cold database.** With a warm database more lookups would *hit*, but the
-  hot query scans regardless of hit or miss, so the finding holds — and the
-  scan gets more expensive as the table grows.
-- **One TU, one repo.** The 84 %-SQLite split is measured on this codebase's
+  pinned at 100 % CPU during the sampled run, and load rose much further (load
+  average 89) before the repeat micro-benchmarks. The indexer is single-threaded
+  on a 10-core M4 so contention is limited, but absolute seconds carry that
+  noise. Percentages and ratios are the trustworthy figures — which is why the
+  root-cause claim is settled in **VDBE instructions** counted through
+  `sqlite3_progress_handler` (`lookup-scaling-vdbe.txt`), a metric that cannot
+  move with load, and wall-clock is used only as corroboration.
+- **Cold database.** With a warm database more lookups would *hit*, but the hot
+  query scans on both paths (a hit averages ~2.8 × N instructions, a miss
+  exactly 5 × N), so the finding holds — and the scan gets more expensive as the
+  table grows. A second TU indexed into the same database was measured to
+  confirm this rather than assumed (`profile-json-second-tu.json`).
+- **One TU, one repo.** The 87 %-SQLite split is measured on this codebase's
   largest file. Header-heavy versus body-heavy TUs will shift the
   `body_extraction` / `pass.*.headers` balance.
 - **`sample` is a wall-clock sampler**, so blocked time counts. Here the
@@ -96,13 +102,24 @@ rebuilds the tree from the indentation column and computes:
 | File | What it is |
 | --- | --- |
 | `sample-callgraph.txt.gz` | Verbatim `/usr/bin/sample` output — full call graph, per-symbol self ranking, binary images. `gunzip -c` to read (8.8 MB uncompressed) |
-| `profile-json.json` | Verbatim `cidx index --profile-json` output: phase timings, fact-family counters, SQLite counters, per-TU record |
+| `profile-json.json` | Verbatim `cidx index --profile-json` output for the sampled run: phase timings, fact-family counters, SQLite counters, per-TU record |
+| `profile-json-second-tu.json` | Same, for a second TU (`src/query/plan.cpp`) indexed into the *same* database — the warm-database comparison behind the header-pass finding |
 | `hotspots-derived.txt` | Tables derived from the call graph: self samples by binary image, verbatim per-function self ranking, inclusive per-frame ranking |
-| `sql-evidence.txt` | `symbol` index definitions, `EXPLAIN QUERY PLAN` for the hot query in both forms, and the micro-benchmark runs |
+| `lookup-scaling-vdbe.txt` | Exact VDBE instructions per identity probe at two database sizes, via `sqlite3_progress_handler` — the load-independent proof that the lookup is O(N) as shipped and O(log N) with the index predicate |
+| `sql-evidence.txt` | `symbol` index definitions, `EXPLAIN QUERY PLAN` for the hot query in both forms, and the wall-clock micro-benchmark runs |
+| `parameter-file-id-evidence.txt` | Side finding from the same hot path: `parameter.file_id` records the call site's file while `parameter.line/col` record the declaration's, for 251 of 1,707 rows |
 | `analyze_sample.py` | The parser/aggregator used to produce `hotspots-derived.txt` |
 | `environment.txt` | OS, kernel, CPU, RAM, compilers, LLVM and SQLite versions, repo commit, and the exact compile command for the profiled TU |
 | `index-stdout.log` | stdout/stderr of the profiled `cidx index` invocation |
 | `cmake-configure.log`, `ninja-build.log` | Configure and build logs for the profiling binary |
+
+### Which run the numbers come from
+
+Three timings were taken: a `time`-only warm-up (15.19 s), a `--profile-json`
+run taken while `sample` was mistakenly attached to an unrelated process
+(19.09 s), and the **sampled** run (15.98 s). `profile-json.json` and
+`sample-callgraph.txt.gz` both belong to the sampled run, and every number in
+the report is scaled to it.
 
 ### Reproducing the analysis from the raw data
 

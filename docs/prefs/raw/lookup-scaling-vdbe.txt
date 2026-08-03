@@ -1,0 +1,22 @@
+VDBE instructions per lookup_symbol probe, counted exactly with
+sqlite3_progress_handler(n=1). LIMIT 1 mirrors the C++ path, which calls
+SqliteStmt::step() exactly once. Load-independent by construction.
+
+A (as shipped, storage_symbols.cpp:311):
+    SELECT id FROM symbol WHERE semantic_universe_id=? AND identity_key=? LIMIT 1
+B (with the partial-index predicate):
+    SELECT id FROM symbol WHERE semantic_universe_id=? AND identity_key=? AND identity_key<>'' LIMIT 1 
+
+scratch index after 2 TUs: N=2839 symbol rows in 1 semantic universe(s)
+   A as shipped   hit     8086.7   miss    14206.0   (miss = 5.004 x N)
+   B with pred    hit       19.1   miss       16.0   (constant)
+   ratio          hit      422.3x  miss      887.9x
+
+copy of the repo's committed index.db: N=15015 symbol rows in 1 semantic universe(s)
+   A as shipped   hit    40843.7   miss    75086.0   (miss = 5.001 x N)
+   B with pred    hit       19.1   miss       16.0   (constant)
+   ratio          hit     2132.8x  miss     4692.9x
+
+Plans:
+   A: SEARCH symbol USING INDEX idx_symbol_scope (semantic_universe_id=?)
+   B: SEARCH symbol USING COVERING INDEX idx_symbol_identity (semantic_universe_id=? AND identity_key=?)
