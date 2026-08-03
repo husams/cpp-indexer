@@ -37,7 +37,11 @@ read adapters.
   `mark_file_indexed`, `component_for_path`, `replace_diagnostics`.
 - **Re-index cleanup**: `delete_edges_for_file` (excludes `contains`, keyed by
   the source symbol's file), `delete_definitions_for_file`.
-- **Resolve**: `resolve_pass()` and its sub-passes (below).
+- **Resolve**: `resolve_pass()` and its sub-passes (below). Each transform
+  persists execution mode, logical rows scanned/inserted/updated/deleted,
+  affected keys, and fallback reason. The pipeline summary is derived from
+  transforms that actually ran and reports `full`, `incremental`, `mixed`, or
+  `reused`; it is never inferred only from the presence of a change set.
 
 ### `Transaction` (`storage.hpp:45`)
 
@@ -110,8 +114,11 @@ feeds Layer-0 (`symbol`, `edge`, `edge_site`, `call_arg`, `template_*`,
 
 ## The resolve pass
 
-`cidx resolve` → `resolve_pass()` (`storage.cpp:4069`) runs pure-SQL transforms
-over Layer-0 and stamps `meta.graph_resolved_at`. See the
+`cidx resolve` → `resolve_pass()` runs pure-SQL transforms over Layer-0 and
+stamps `meta.graph_resolved_at`. The edge-count, multi-definition,
+possible-call, and virtual-dispatch passes update only the trusted per-TU
+change closure when a published full baseline exists; entity projection keeps
+its atomic full-rebuild contract. See the
 [data flow](../data-flow.md#the-resolve-pass) diagram; the sub-passes and their
 products:
 

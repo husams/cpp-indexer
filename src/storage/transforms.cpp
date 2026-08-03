@@ -26,6 +26,10 @@ const char *transform_run_status_name(TransformRunStatus status) {
   return "stale";
 }
 
+const char *transform_execution_mode_name(TransformExecutionMode mode) {
+  return mode == TransformExecutionMode::incremental ? "incremental" : "full";
+}
+
 const char *transform_input_kind_name(TransformInputKind kind) {
   switch (kind) {
   case TransformInputKind::source:
@@ -50,10 +54,9 @@ const char *transform_input_kind_name(TransformInputKind kind) {
   return "implementation";
 }
 
-const char *transform_applicability_name(
-    TransformApplicability applicability) {
+const char *transform_applicability_name(TransformApplicability applicability) {
   return applicability == TransformApplicability::applicable ? "applicable"
-                                                               : "inapplicable";
+                                                             : "inapplicable";
 }
 
 const char *transform_completeness_name(TransformCompleteness completeness) {
@@ -71,9 +74,11 @@ const char *transform_completeness_name(TransformCompleteness completeness) {
 void TransformRegistry::register_source_fact(TransformSourceFact source_fact) {
   if (source_fact.name.empty() || source_fact.schema_version < 1 ||
       source_fact.catalog.empty() ||
-      std::ranges::any_of(source_facts_, [&](const auto &candidate) {
-        return candidate.name == source_fact.name;
-      })) {
+      std::ranges::any_of(
+          source_facts_,
+          [&](const auto &candidate) {
+            return candidate.name == source_fact.name;
+          })) {
     throw std::invalid_argument("invalid or duplicate source fact: " +
                                 source_fact.name);
   }
@@ -91,13 +96,12 @@ void TransformRegistry::register_transform(TransformDescriptor descriptor) {
 }
 
 void TransformRegistry::set_implementation_version(const std::string &id,
-                                                    int version) {
+                                                   int version) {
   if (version < 1) {
-    throw std::invalid_argument("implementation provider version must be positive: " +
-                                id);
+    throw std::invalid_argument(
+        "implementation provider version must be positive: " + id);
   }
-  const auto it = std::ranges::find(descriptors_, id,
-                                    &TransformDescriptor::id);
+  const auto it = std::ranges::find(descriptors_, id, &TransformDescriptor::id);
   if (it == descriptors_.end()) {
     throw std::invalid_argument("unknown transform implementation provider: " +
                                 id);
@@ -121,10 +125,10 @@ TransformRegistry::find(const std::string &id) const {
 }
 
 void TransformRegistry::validate() const {
-  const auto source_fact = [&](const std::string &name)
-      -> const TransformSourceFact * {
-    const auto it = std::ranges::find(source_facts_, name,
-                                      &TransformSourceFact::name);
+  const auto source_fact =
+      [&](const std::string &name) -> const TransformSourceFact * {
+    const auto it =
+        std::ranges::find(source_facts_, name, &TransformSourceFact::name);
     return it == source_facts_.end() ? nullptr : &*it;
   };
   std::unordered_map<std::string, std::string> producers;
@@ -140,8 +144,8 @@ void TransformRegistry::validate() const {
     if (descriptor.options.empty() ||
         std::ranges::find(descriptor.options, "deterministic-sql-v1") ==
             descriptor.options.end()) {
-      throw std::invalid_argument("transform must declare deterministic options: " +
-                                  descriptor.id);
+      throw std::invalid_argument(
+          "transform must declare deterministic options: " + descriptor.id);
     }
     if (descriptor.budget.max_rows < 0 ||
         descriptor.budget.max_milliseconds < 0) {
@@ -154,8 +158,8 @@ void TransformRegistry::validate() const {
                                   descriptor.id);
     }
     if (descriptor.input_schema_version < 1 ||
-        descriptor.output_schema_version < 1 || descriptor.input_catalog.empty() ||
-        descriptor.output_catalog.empty()) {
+        descriptor.output_schema_version < 1 ||
+        descriptor.input_catalog.empty() || descriptor.output_catalog.empty()) {
       throw std::invalid_argument("transform fact schema/catalog is invalid: " +
                                   descriptor.id);
     }
@@ -182,9 +186,9 @@ void TransformRegistry::validate() const {
       std::set<std::string> members;
       for (const auto &fact : requirement.facts) {
         if (fact.empty() || !members.insert(fact).second) {
-          throw std::invalid_argument("duplicate fact-set member: " +
-                                      descriptor.id + " -> " +
-                                      requirement.name);
+          throw std::invalid_argument(
+              "duplicate fact-set member: " + descriptor.id + " -> " +
+              requirement.name);
         }
       }
     }
@@ -208,15 +212,15 @@ void TransformRegistry::validate() const {
         }
         if (requirement.schema_version != descriptor.output_schema_version ||
             requirement.catalog != descriptor.output_catalog) {
-          throw std::invalid_argument("produced fact-set schema mismatch: " +
-                                      descriptor.id + " -> " + requirement.name);
+          throw std::invalid_argument(
+              "produced fact-set schema mismatch: " + descriptor.id + " -> " +
+              requirement.name);
         }
       }
     }
     std::set<std::string> typed_keys;
     for (const auto &input : descriptor.invalidation_inputs) {
-      if (input.name.empty() ||
-          !typed_keys.insert(input.name).second) {
+      if (input.name.empty() || !typed_keys.insert(input.name).second) {
         throw std::invalid_argument("invalid typed invalidation input: " +
                                     descriptor.id);
       }
@@ -228,7 +232,8 @@ void TransformRegistry::validate() const {
     }
     if (descriptor.publication_rule !=
             TransformPublicationRule::preserve_previous_on_failure &&
-        descriptor.publication_rule != TransformPublicationRule::atomic_generation) {
+        descriptor.publication_rule !=
+            TransformPublicationRule::atomic_generation) {
       throw std::invalid_argument("invalid publication rule: " + descriptor.id);
     }
     std::set<std::string> invalidation_keys(
@@ -262,8 +267,8 @@ void TransformRegistry::validate() const {
       if (producer == producers.end()) {
         const auto *source = source_fact(fact);
         if (source == nullptr) {
-          throw std::invalid_argument("undeclared input fact: " + descriptor.id +
-                                      " -> " + fact);
+          throw std::invalid_argument(
+              "undeclared input fact: " + descriptor.id + " -> " + fact);
         }
         if (source->schema_version != descriptor.input_schema_version ||
             source->catalog != descriptor.input_catalog) {
@@ -274,8 +279,8 @@ void TransformRegistry::validate() const {
       }
       if (std::ranges::find(descriptor.dependencies, producer->second) ==
           descriptor.dependencies.end()) {
-        throw std::invalid_argument("missing fact dependency: " + descriptor.id +
-                                    " -> " + producer->second);
+        throw std::invalid_argument("missing fact dependency: " +
+                                    descriptor.id + " -> " + producer->second);
       }
       const auto *producer_descriptor = find(producer->second);
       const auto requirement = std::ranges::find_if(
@@ -284,8 +289,8 @@ void TransformRegistry::validate() const {
       if (requirement == producer_descriptor->fact_set_requirements.end() ||
           requirement->schema_version != descriptor.input_schema_version ||
           requirement->catalog != descriptor.input_catalog) {
-        throw std::invalid_argument("incompatible fact-set schema: " +
-                                    descriptor.id + " -> " + fact);
+        throw std::invalid_argument(
+            "incompatible fact-set schema: " + descriptor.id + " -> " + fact);
       }
     }
   }

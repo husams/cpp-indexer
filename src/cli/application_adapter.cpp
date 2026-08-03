@@ -246,6 +246,8 @@ parse_typed_index(const std::vector<std::string> &argv) {
   for (std::size_t i = first_argument; i < argv.size(); ++i) {
     if (argv[i] == "--no-graph") {
       request.graph = false;
+    } else if (argv[i] == "--defer-transforms") {
+      request.defer_transforms = true;
     } else if (argv[i] == "--no-front-end-reuse") {
       request.no_front_end_reuse = true;
     } else if (argv[i] == "--no-autoderive-labels") {
@@ -272,6 +274,9 @@ parse_typed_index(const std::vector<std::string> &argv) {
   }
   if (request.profile_sqlite_configuration && !request.profile_json) {
     usage_error("--profile-sqlite-config requires --profile-json");
+  }
+  if (!request.graph && request.defer_transforms) {
+    usage_error(application::kIndexTransformFlagConflict);
   }
   return request;
 }

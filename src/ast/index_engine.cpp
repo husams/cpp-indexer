@@ -838,6 +838,7 @@ private:
               route.compile_options, route.driver);
         },
         [this](std::int64_t file_id) {
+          db_.capture_transform_changes_for_file(file_id);
           state_.ports->symbols_write.delete_symbols_for_file(file_id);
         });
     const ControlledHeaderWriteResult applied = writer.apply(

@@ -640,7 +640,7 @@ public:
   void clear_entity_edges();
   // Materialise all 10 entity relation kinds from the Layer-0 graph.
   // Called by resolve_pass() after rollup_edge_counts(). Pure DB pass.
-  void materialise_entity_edges();
+  TransformWork materialise_entity_edges();
 
   // Resolve pass (DB-only, no parse): roll up edge.count from edge_site for
   // calls/uses, report remaining stubs. Returns count of still-unresolved
@@ -649,6 +649,7 @@ public:
   // Execute the named derived-fact pipeline. Each transform is independently
   // identified and reused by content identity; publication is one transaction.
   TransformReport run_transform_pipeline();
+  TransformReport run_transform_pipeline(const TransformChangeSet &changes);
   // Read the last published/attempted lifecycle state without executing.
   TransformReport transform_status(const std::string &fact_set = {});
   // Stable, human-readable reasons for stale or unavailable fact sets.
@@ -656,6 +657,12 @@ public:
   // Named readiness contract for query and proof clients.
   TransformFactSetStatus transform_fact_set_status(const std::string &fact_set);
   void mark_transform_pipeline_pending(const std::string &reason);
+  void capture_transform_changes_for_file(int64_t file_id);
+  void note_transform_changes(int64_t file_id,
+                              const std::vector<int64_t> &symbol_ids,
+                              const std::vector<int64_t> &edge_ids,
+                              const std::vector<int64_t> &definition_ids);
+  [[nodiscard]] TransformChangeSet pending_transform_changes();
   [[nodiscard]] const std::vector<TransformRun> &transform_runs() const {
     return last_transform_runs_;
   }
@@ -674,12 +681,14 @@ public:
 
   // Roll edge.count up to the true site count for calls (kind=1) and uses
   // (kind=7) — idempotent; COUNT(*) is the source of truth.
-  void rollup_edge_counts();
+  TransformWork rollup_edge_counts();
+  TransformWork rollup_edge_counts(const TransformChangeSet &changes);
 
   // Materialise virtual-dispatch caller edges (kind 18, 'dispatch_calls'):
   // caller -> each transitive override of the virtual method it statically
   // calls. Idempotent (DELETE + rebuild). Called by resolve_pass().
-  void materialize_dispatch_calls();
+  TransformWork materialize_dispatch_calls();
+  TransformWork materialize_dispatch_calls(const TransformChangeSet &changes);
 
   // -- v27: multi-definition (per-backend redefinitions) ---------------------
   // Return the `definition` row id for this symbol's body in (component, file),
@@ -704,10 +713,12 @@ public:
   // Drop this file's definition rows (cascades def_edge) before re-index.
   void delete_definitions_for_file(int64_t file_id);
   // Set symbol.multi_def = COUNT(definition rows). Called by resolve_pass().
-  void set_multi_def();
+  TransformWork set_multi_def();
+  TransformWork set_multi_def(const TransformChangeSet &changes);
   // Materialise body->body possible-call fan-out. Called by resolve_pass()
   // after set_multi_def(). Idempotent (DELETE + rebuild).
-  void materialize_possible_calls();
+  TransformWork materialize_possible_calls();
+  TransformWork materialize_possible_calls(const TransformChangeSet &changes);
 
   // Edges whose ends live in different components.
   std::vector<Edge> cross_repo_edges();

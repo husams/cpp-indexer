@@ -83,6 +83,23 @@ Index and resolve stages both retain profiles: `clang_front_end` excludes the
 registered visitor/persistence pass timings, `clang_tool_inclusive` retains the
 enclosing LibTooling wall time, and `transforms` measures the actual resolve
 pipeline.
+
+### S-077 incremental transform release gate
+
+For the one-source production case, retain the index and resolve profile JSON
+and require all four bounded transforms to report `mode=incremental`,
+`identity_rows_scanned=0`, non-negative row-work counters, and a non-zero
+affected-key count when their input family changed. `entity-graph-rollup` must
+report `mode=full` with `generation-gated full rebuild contract`. Compare the
+candidate's canonical semantic digest with a clean full publication of the
+same final Layer-0 facts; any mismatch, fallback of a bounded transform,
+untrusted generation, failed publication, or graph-disabled resolve is a
+release failure. Existing cold, unchanged, integrity, recovery, and profiling
+overhead gates remain required.
+The pipeline-level `transform.pipeline.execution_mode` summarizes transforms
+that actually ran: `full`, `incremental`, `mixed`, or `reused`; a one-source
+publication is normally `mixed` because bounded transforms run incrementally
+while entity roll-up retains its generation-gated full rebuild contract.
 Each disposable setting is SIGKILL-interrupted during a real `cidx index`,
 resumed, integrity/foreign keys checked, and compared by canonical semantic
 digest before a separate production-profile change can be considered.
