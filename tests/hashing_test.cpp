@@ -8,7 +8,10 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest/doctest.h"
 
+#include <array>
 #include <cstdio>
+#include <fcntl.h>
+#include <optional>
 #include <string>
 
 #include <sys/stat.h>
@@ -106,4 +109,36 @@ TEST_CASE("sha256 content identity is algorithm-tagged and deterministic") {
   const auto digest = cidx::sha256_of(path);
   REQUIRE(digest.has_value());
   CHECK(*digest == cidx::sha256_hex(std::string("artifact bytes")));
+}
+
+TEST_CASE("sha256 fd prefix is bounded and offset neutral") {
+  const std::string dir = make_temp_dir();
+  const std::string path = dir + "/prefix.db";
+  const std::string content = "artifact bytes";
+  write_file(path, content);
+
+  const int descriptor = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  REQUIRE(descriptor >= 0);
+  REQUIRE(::lseek(descriptor, 4, SEEK_SET) == 4);
+
+  const auto empty = cidx::sha256_of_fd_prefix(descriptor, 0);
+  REQUIRE(empty.has_value());
+  CHECK(empty == std::optional(cidx::sha256_hex(std::string{})));
+  const auto complete = cidx::sha256_of_fd_prefix(descriptor, content.size());
+  REQUIRE(complete.has_value());
+  CHECK(complete == std::optional(cidx::sha256_hex(content)));
+  const auto partial = cidx::sha256_of_fd_prefix(descriptor, 8);
+  REQUIRE(partial.has_value());
+  CHECK(partial == std::optional(cidx::sha256_hex(content.substr(0, 8))));
+  CHECK_FALSE(
+      cidx::sha256_of_fd_prefix(descriptor, content.size() + 1U).has_value());
+  CHECK(::lseek(descriptor, 0, SEEK_CUR) == 4);
+  REQUIRE(::close(descriptor) == 0);
+
+  std::array<int, 2> pipe_descriptors = {-1, -1};
+  REQUIRE(::pipe(pipe_descriptors.data()) == 0);
+  CHECK_FALSE(cidx::sha256_of_fd_prefix(pipe_descriptors[0], 0).has_value());
+  REQUIRE(::close(pipe_descriptors[0]) == 0);
+  REQUIRE(::close(pipe_descriptors[1]) == 0);
+  CHECK_FALSE(cidx::sha256_of_fd_prefix(-1, 0).has_value());
 }

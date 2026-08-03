@@ -11,6 +11,7 @@
 #include <string_view>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <utility>
 
 extern "C" {
 #include "md5/md5.h"   // vendored public-domain RFC 1321 implementation (D4)
@@ -219,6 +220,12 @@ std::string sha256_hex(const std::string &data) {
   return "sha256:" + digest_to_hex_32(context.final());
 }
 
+std::string sha256_hex(const std::span<const std::byte> data) {
+  Sha256 context;
+  context.update(data.data(), data.size());
+  return "sha256:" + digest_to_hex_32(context.final());
+}
+
 std::optional<std::string> sha256_of(const std::string &path) {
   std::error_code ec;
   if (!std::filesystem::is_regular_file(path, ec) || ec) {
@@ -267,6 +274,34 @@ std::optional<std::string> sha256_of_fd(const int fd) {
     }
     context.update(buffer.data(), static_cast<std::size_t>(count));
     offset += static_cast<std::size_t>(count);
+  }
+  return "sha256:" + digest_to_hex_32(context.final());
+}
+
+std::optional<std::string> sha256_of_fd_prefix(const int fd,
+                                               const std::uint64_t byte_count) {
+  struct stat file_stat{};
+  if (fd < 0 || ::fstat(fd, &file_stat) != 0 || !S_ISREG(file_stat.st_mode) ||
+      file_stat.st_size < 0 || std::cmp_less(file_stat.st_size, byte_count)) {
+    return std::nullopt;
+  }
+  Sha256 context;
+  std::array<char, 65536> buffer{};
+  std::uint64_t offset = 0;
+  while (offset < byte_count) {
+    const auto remaining = byte_count - offset;
+    const auto request = static_cast<std::size_t>(
+        std::min<std::uint64_t>(remaining, buffer.size()));
+    const ssize_t count =
+        ::pread(fd, buffer.data(), request, static_cast<off_t>(offset));
+    if (count < 0 && errno == EINTR) {
+      continue;
+    }
+    if (count <= 0) {
+      return std::nullopt;
+    }
+    context.update(buffer.data(), static_cast<std::size_t>(count));
+    offset += static_cast<std::uint64_t>(count);
   }
   return "sha256:" + digest_to_hex_32(context.final());
 }
