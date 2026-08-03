@@ -46,6 +46,13 @@ states:
     terminal: true
     task_types: [feature, story, bug, subtask]
 
+  - slug: cancelled
+    display: Cancelled
+    category: dropped
+    satisfies_dependencies: true
+    terminal: true
+    task_types: [subtask]
+
   - slug: planned
     display: Planned
     category: backlog
@@ -147,6 +154,12 @@ transitions:
     action: refinement.accepted
     to: ready
 
+  # Refinement may be invalidated explicitly when the planned breakdown changes.
+  - task_types: [story]
+    from: ready
+    action: refinement.marked_incomplete
+    to: incomplete
+
   # A blocker thread is not a task transition. The review subsystem emits
   # feedback.resolved only when every blocker was accepted by a reviewer.
   - task_types: [feature, story, subtask]
@@ -171,6 +184,13 @@ transitions:
     action: work.started
     to: in_progress
     gates: [dependencies_clear]
+
+  # Subtasks replaced by parent-owned todos remain in the audit trail but no
+  # longer participate as independently tracked work.
+  - task_types: [subtask]
+    from: ready
+    action: item.cancelled
+    to: cancelled
 
   - task_types: [feature, story, subtask]
     from: needs_work

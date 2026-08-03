@@ -79,6 +79,11 @@ task:
 
 - **Respond with a summary only — never a long, detailed explanation. Give
   details only when the user explicitly asks for them.**
+- **Wiki use is opt-in only.** Do not read, search, ingest, lint, create, update,
+  or otherwise modify anything under `~/workspace/wiki/` unless the user
+  explicitly asks you to use or update the wiki in the current request. Never
+  update wiki pages automatically as a side effect of research, planning,
+  implementation, or answering a question.
 - The byte-identical dual-implementation contract is **retired**: C++ (LibTooling)
   is the sole indexer, and its AST-traversal order legitimately differs from the
   old libclang/Python output, so `index.db` is no longer byte-comparable to

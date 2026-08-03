@@ -86,6 +86,11 @@ layering rules.
 
 - **Respond with a summary only — never a long, detailed explanation. Give
   details only when the user explicitly asks for them.**
+- **Wiki use is opt-in only.** Do not read, search, ingest, lint, create, update,
+  or otherwise modify anything under `~/workspace/wiki/` unless the user
+  explicitly asks you to use or update the wiki in the current request. Never
+  update wiki pages automatically as a side effect of research, planning,
+  implementation, or answering a question.
 - The byte-identical dual-implementation contract is **retired**: C++ (LibTooling)
   is the sole indexer, and its AST-traversal order legitimately differs from the
   old libclang/Python output, so `index.db` is no longer byte-comparable to
@@ -112,6 +117,10 @@ layering rules.
   the diff is comment-only, or compare against the pre-work baseline) and state
   exactly how to make it pass. No hand-waving. Applies to your own runs and any
   delegated ones.
+- **Never create a teammate (subagent, spawned agent, background worker, or
+  multi-agent workflow) unless the user explicitly asks for one.** Do the work
+  inline in the current session by default; if you believe delegation is needed,
+  say so and wait for the user to approve it.
 - Git: agents may create worktrees and feature branches; keep each scoped to a
   single task and never remove a worktree or branch that may hold another
   contributor's work.

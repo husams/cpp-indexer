@@ -358,11 +358,8 @@ generations. Row objects preserve `select` field order.
 ## Compatibility
 
 This is a read/query-layer addition: no schema bump. Existing `GraphQuery` /
-`EntityQuery` surfaces remain compatibility adapters. Their declarative entity
-operations lower to canonical `QueryPlan` inputs and execute through the same
-read-only executor; callback filters, case-insensitive name matching, and
-edge-evidence expansion retain their legacy compatibility behavior for one
-release window. CXQ exposes canonical logical slot and evidence identities.
+`EntityQuery` surfaces remain compatibility adapters over the same physical
+tables, while CXQ exposes canonical logical slot and evidence identities.
 Evidence and site expansion are explicit and budgeted; truncated results remain
 marked `truncated: true`. `path()`, `rank()`, `reverse_type_use()`, and the
 `explain()` budgets/execution-shape/input-relations extension (CXQ-004) ship in
