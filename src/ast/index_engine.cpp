@@ -879,7 +879,14 @@ private:
             "controlled writer returned an invalid header route";
         return false;
       }
-      pending->file_id = applied.file_ids.at(transient_handle.value_or(0));
+      const auto file_id = applied.file_ids.find(*transient_handle);
+      if (file_id == applied.file_ids.end()) {
+        state_.out->parse_failed = true;
+        state_.out->error =
+            "controlled writer omitted a planned header file identity";
+        return false;
+      }
+      pending->file_id = file_id->second;
     }
     return true;
   }
