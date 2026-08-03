@@ -1250,9 +1250,15 @@ class GraphQuery:
         result = Executor(Storage.from_connection(self._c, self.db_path)).run(plan)
         return [tuple(row) for row in result.rows]
 
+    #: Callable signature families, in the order `signature_slots` returns
+    #: them. The `has_signature_slot` relation is the wider typed view and
+    #: also carries `template_parameter` and `template_argument` rows; those
+    #: belong to the template views, not to a callable's signature.
+    _SIGNATURE_SLOT_ORDER = {"return": 0, "parameter": 1}
+
     def _adapter_signature_slot_rows(self, sym_id: int) -> list[tuple]:
         """Select all signature slots, including order and result fields."""
-        from .queryplan import Executor, codebase, eq, nodes, order_by
+        from .queryplan import Executor, codebase, eq, nodes
         from .queryplan import out as plan_out, select as plan_select, start
         from .storage import Storage
 
@@ -1266,12 +1272,23 @@ class GraphQuery:
             start(codebase()) | nodes(eq("id", sym_id))
             | plan_out("has_signature_slot")
             | plan_select(fields)
-            | order_by(["position", "pack_index", "slot_kind"])
         ).plan
         result = Executor(Storage.from_connection(self._c, self.db_path)).run(plan)
         if result.truncated:
             raise _AdapterPlanTruncated("signature slot plan was truncated")
-        return [tuple(row) for row in result.rows]
+        rows = [
+            tuple(row) for row in result.rows
+            if row[0] in self._SIGNATURE_SLOT_ORDER
+        ]
+        # The return slot carries the -1 position sentinel, which the typed
+        # view projects as NULL; `order_by` ranks NULL last, so sort on the
+        # family first and treat a missing ordinal as the sentinel again.
+        rows.sort(key=lambda row: (
+            self._SIGNATURE_SLOT_ORDER[row[0]],
+            -1 if row[1] is None else row[1],
+            -1 if row[2] is None else row[2],
+        ))
+        return rows
 
     def _adapter_rows(self, plan, fields: Sequence[str], *, order: Sequence[str] = (),
                       limit: int = 0) -> list[tuple]:
