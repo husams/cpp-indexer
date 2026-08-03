@@ -5,7 +5,7 @@ The Toolbox is intentionally not part of the build or CI dependency surface.
 
 | Dependency | Pin | Verification |
 | --- | --- | --- |
-| TLA+ tools | release `1.8.0`, `tla2tools.jar` | SHA-256 `cc4803dce2a8ffaf0f5920a9dc39df4b5ee34ab4cb53fb58ac557277a7e516b3` |
+| TLA+ tools | release `1.8.0`, `tla2tools.jar` | SHA-256 `e22f8ffb4bacdea0a871f444dd94fe5fb0d8013b3388ae39e82e26f852c735d5` |
 | Java runtime | major version `17` | `spec/tla/tools/check.sh` rejects any other major version |
 | TLC workers | `1` | avoids small-model traversal/diameter nondeterminism |
 | TLC fingerprint polynomial | `0` | fixed by the checker |
