@@ -17,6 +17,7 @@ import tempfile
 import pytest
 
 from indexer.storage import SCHEMA_VERSION, Storage
+from indexer.utils import repo_name
 
 
 # -- storage layer -----------------------------------------------------------
@@ -269,6 +270,11 @@ def test_remote_url_tolerates_duplicate_config_keys(tmp_path):
 # -- backfill migration script -----------------------------------------------
 
 _LAB_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+# The repository NAME is not the checkout directory name: `repo_name` prefers
+# the origin-remote basename and falls back to the MAIN working tree, so a git
+# worktree or a clone into a differently-named directory still groups under the
+# repository's own name. Resolve it the way the product does.
+_LAB_REPO_NAME = repo_name(_LAB_ROOT)
 
 
 def test_backfill_groups_by_git_name_and_skips_non_git():
@@ -287,8 +293,7 @@ def test_backfill_groups_by_git_name_and_skips_non_git():
         assert stats["ungrouped"] == 1
         assert stats["repositories"] == 1  # only the git repo
 
-        repo_name = os.path.basename(_LAB_ROOT)
-        git_repo = db.get_repository_by_name(repo_name)
+        git_repo = db.get_repository_by_name(_LAB_REPO_NAME)
         assert git_repo is not None
         members = {c.name for c in db.components_for_repository(git_repo.id)}
         assert members == {"libclang-lab", "proj"}
@@ -367,7 +372,7 @@ def _cidx(cache, *args):
 @pytest.mark.skipif(not os.path.exists(_CDB), reason="manifests CDB absent")
 def test_cli_import_groups_and_switch_rebases(tmp_path):
     cache = str(tmp_path / "cache")
-    repo_name = os.path.basename(_LAB_ROOT)
+    repo_name = _LAB_REPO_NAME
 
     out = _cidx(cache, "import", "--db", _CDB)
     assert out.returncode == 0, out.stderr
