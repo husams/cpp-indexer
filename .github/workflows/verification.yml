@@ -565,7 +565,7 @@ jobs:
         run: |
           apt-get update
           apt-get install \
-            --no-install-recommends -y ca-certificates curl gnupg
+            --no-install-recommends -y ca-certificates curl git gnupg
           curl --fail --location --silent --show-error \
             https://apt.llvm.org/llvm-snapshot.gpg.key --output /tmp/llvm-snapshot.gpg.key
           test "$(gpg --show-keys --with-colons /tmp/llvm-snapshot.gpg.key \
