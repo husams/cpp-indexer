@@ -49,8 +49,28 @@ constexpr auto kTimingNames = std::to_array<std::string_view>({
     "transforms",
     "verification",
     "identity_reconciliation",
+    "tu_fact_cache.replay",
+    "tu_fact_cache.extraction_rebuild",
     "sqlite_prepare",
     "sqlite_vdbe",
+});
+
+constexpr auto kTuCacheCounterNames = std::to_array<std::string_view>({
+    "tu_fact_cache.hit",
+    "tu_fact_cache.miss",
+    "tu_fact_cache.stale",
+    "tu_fact_cache.corrupt",
+    "tu_fact_cache.incompatible",
+    "tu_fact_cache.incomplete_evidence",
+    "tu_fact_cache.parser_calls_avoided",
+    "tu_fact_cache.replay_bytes",
+    "tu_fact_cache.cache_size_bytes",
+    "tu_fact_cache.evictions",
+    "tu_fact_cache.fallbacks",
+    "tu_dependency.affected_configurations",
+    "tu_dependency.proven_unaffected_configurations",
+    "tu_dependency.visited_nodes",
+    "tu_dependency.visited_edges",
 });
 
 auto json_string(std::string_view value) -> std::string {
@@ -154,6 +174,9 @@ struct Session::Impl {
   explicit Impl(std::string path) : output_path(std::move(path)) {
     for (const std::string_view name : kTimingNames) {
       timings.emplace(name, 0.0);
+    }
+    for (const std::string_view name : kTuCacheCounterNames) {
+      counters.emplace(name, 0);
     }
   }
 
@@ -339,6 +362,8 @@ void write_profile(Session::Impl &impl) {
   for (const auto &[name, value] : impl.counters) {
     if (name.starts_with("index_session.") ||
         name.starts_with("front_end_reuse.") ||
+        name.starts_with("tu_fact_cache.") ||
+        name.starts_with("tu_dependency.") ||
         name.starts_with("transform.") ||
         name.starts_with("fact_batch_writer.")) {
       output << "      " << json_string(name) << ": " << value << ",\n";

@@ -13,6 +13,7 @@ by both indexing engines, and the resolve pass. ~5.5k LOC.
 | `sqlite.hpp` / `sqlite.cpp` | a thin RAII wrapper over libsqlite3 (`Db`, `Stmt`) |
 | `fact_batch_writer.hpp` / `fact_batch_writer.cpp` | the sole production one-TU FactBatch publication path |
 | `artifacts.hpp` / `artifacts.cpp` | manifest-governed sidecar publication, validation, read-only attachment, leases, pins, and recovery |
+| `tu_fact_cache.*` / `tu_dependency_planner.*` | optional S-100 batch sidecars, stable failure classification, and exact path-based reverse invalidation |
 | `records.hpp` | plain-data row structs — no clang types leak here |
 
 ## Classes
@@ -199,6 +200,12 @@ partial, truncated, or untrusted artifacts are surfaced as diagnostics rather
 than empty complete results. Leases and replay pins protect stale artifacts
 from cleanup. Backup/export callers use `export_plan()` to list every current
 artifact and report intentionally partial packages.
+TU cache sidecars use the same lifecycle. They store the S-100 payload and
+path-based dependency edges together, including generated or unowned sources
+that have no core `file` row. The reverse planner is configuration-qualified
+and returns a conservative all-TU set whenever evidence is incomplete,
+unresolved, stale, corrupt, or unavailable. See [TU FactBatch
+cache](../tu-fact-cache.md) and [ADR-016](../adr/ADR-016-tu-fact-cache-storage.md).
 The single-file versus manifest-plus-sidecar disk, latency, open/attach, and
 complexity comparison is owned by the HSE-75 benchmark work; this policy keeps
 those layouts interchangeable without changing authoritative graph semantics.

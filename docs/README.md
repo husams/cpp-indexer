@@ -26,6 +26,7 @@ per component plus a few cross-cutting pages. Start with the
 | [Data flow](data-flow.md) | end-to-end pipeline, the index sequence, the per-file interleave, the resolve pass |
 | [Immutable FactBatch](fact-batch.md) | natural identities, typed partitions, bounded emitters, canonicalization, and transactional replay |
 | [FactBatch artifact v1](fact-batch-artifact-v1.md) | canonical wire framing, compatibility, digest integrity, defensive decode, and bounded spill/transfer |
+| [TU FactBatch cache](tu-fact-cache.md) | content identity, transitive dependency invalidation, optional sidecar lifecycle, diagnostics, and recovery |
 | [Build & platforms](build.md) | CMake, macOS/RHEL, the Clang C++ API link model |
 | [Glossary](glossary.md) | USR, Layer-0/1, driver introspection, stub, multi_def |
 | [Query DSL guide](query-dsl.md) | using the CXQ QueryPlan pipeline DSL from C++ and Python, with runnable samples |

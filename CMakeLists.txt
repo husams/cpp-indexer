@@ -167,6 +167,8 @@ add_library(cidx_core STATIC
   src/storage/storage.cpp
   src/storage/transforms.cpp
   src/storage/artifacts.cpp
+  src/storage/tu_dependency_planner.cpp
+  src/storage/tu_fact_cache.cpp
   src/storage/storage_definitions.cpp
   src/storage/storage_entity_rollup.cpp
   src/storage/storage_files.cpp
@@ -410,6 +412,7 @@ if(NOT LLVM_ENABLE_RTTI)
 endif()
 target_sources(cidx_core PRIVATE $<TARGET_OBJECTS:cidx_compiledb>)
 target_sources(cidx_core PRIVATE src/workspace/context.cpp)
+target_sources(cidx_core PRIVATE src/workspace/tu_fact_cache_identity.cpp)
 
 # cidx indexes via the Clang C++ API only (monolithic shared libs:
 # clang-cpp + libLLVM). No libclang.

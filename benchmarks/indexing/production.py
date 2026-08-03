@@ -79,6 +79,36 @@ ATTRIBUTION_EXPERIMENTS = {
             "summary.timings.workspace_snapshot_configuration",
         ],
     },
+    "tu-fact-cache-invalidation": {
+        "comparison": [
+            "baseline:32:forward:unchanged-warm",
+            "baseline:32:forward:one-source",
+            "fan-in:32:forward:low-fan-in-header",
+            "fan-in:32:forward:high-fan-in-header",
+            "baseline:32:forward:configuration-change",
+            "baseline:32:forward:generated-input",
+        ],
+        "profile_fields": [
+            "summary.timings.tu_fact_cache.replay",
+            "summary.timings.tu_fact_cache.extraction_rebuild",
+            "summary.counters.tu_fact_cache.hit",
+            "summary.counters.tu_fact_cache.miss",
+            "summary.counters.tu_fact_cache.stale",
+            "summary.counters.tu_fact_cache.corrupt",
+            "summary.counters.tu_fact_cache.incompatible",
+            "summary.counters.tu_fact_cache.incomplete_evidence",
+            "summary.counters.tu_fact_cache.parser_calls_avoided",
+            "summary.counters.tu_fact_cache.replay_bytes",
+            "summary.counters.tu_fact_cache.cache_size_bytes",
+            "summary.counters.tu_fact_cache.evictions",
+            "summary.counters.tu_fact_cache.fallbacks",
+            "summary.counters.tu_dependency.affected_configurations",
+            "summary.counters.tu_dependency.proven_unaffected_configurations",
+            "summary.counters.tu_dependency.visited_nodes",
+            "summary.counters.tu_dependency.visited_edges",
+        ],
+        "consumer": "HSE-111",
+    },
     "database-growth-lookups-writes": {
         "comparison": [
             "baseline:1000:forward:cold",
@@ -147,6 +177,21 @@ REQUIRED_PROFILE_COUNTERS = frozenset(
         "fact_batch_writer.rows_updated",
         "fact_batch_writer.rows_ignored",
         "fact_batch_writer.rows_deleted",
+        "tu_fact_cache.hit",
+        "tu_fact_cache.miss",
+        "tu_fact_cache.stale",
+        "tu_fact_cache.corrupt",
+        "tu_fact_cache.incompatible",
+        "tu_fact_cache.incomplete_evidence",
+        "tu_fact_cache.parser_calls_avoided",
+        "tu_fact_cache.replay_bytes",
+        "tu_fact_cache.cache_size_bytes",
+        "tu_fact_cache.evictions",
+        "tu_fact_cache.fallbacks",
+        "tu_dependency.affected_configurations",
+        "tu_dependency.proven_unaffected_configurations",
+        "tu_dependency.visited_nodes",
+        "tu_dependency.visited_edges",
     }
 )
 REQUIRED_TRANSLATION_UNIT_FIELDS = frozenset(
@@ -1395,6 +1440,7 @@ def attribution_summary(
         return aggregates[case]["stages"][stage]["profile_summary"]
 
     baseline_small = f"baseline:{representative_files}:forward"
+    fan_in_small = f"fan-in:{representative_files}:forward"
     baseline_scale = f"baseline:{scale_files}:forward"
     baseline_scale_reverse = f"baseline:{scale_files}:reverse"
     applicability_cases = [
@@ -1413,6 +1459,16 @@ def attribution_summary(
                 "configuration-change",
                 "generated-input",
             )
+        },
+        "tu_fact_cache_invalidation": {
+            "unchanged-warm": profile(baseline_small, "unchanged-warm"),
+            "one-source": profile(baseline_small, "one-source"),
+            "low-fan-in-header": profile(fan_in_small, "low-fan-in-header"),
+            "high-fan-in-header": profile(fan_in_small, "high-fan-in-header"),
+            "configuration-change": profile(
+                baseline_small, "configuration-change"
+            ),
+            "generated-input": profile(baseline_small, "generated-input"),
         },
         "database_growth_order": {
             "forward": profile(baseline_scale, "cold"),

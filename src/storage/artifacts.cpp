@@ -449,6 +449,11 @@ bool supported_contract(const ArtifactSpec &spec) {
            spec.producer_version.starts_with("cidx-proof ") &&
            spec.engine_version.starts_with("cidx ");
   }
+  if (spec.kind == "tu-fact-cache") {
+    return spec.artifact_schema == "cidx-tu-fact-cache/v1" &&
+           spec.producer_version.starts_with("cidx-tu-fact-cache ") &&
+           spec.engine_version.starts_with("cidx ");
+  }
   if (spec.kind.starts_with("extension:")) {
     return spec.artifact_schema == "cidx-extension/v1" &&
            spec.producer_version.starts_with("cidx-extension ") &&
@@ -467,6 +472,9 @@ std::vector<std::string_view> required_relations(const ArtifactSpec &spec) {
   }
   if (spec.artifact_schema == "cidx-proof/v1") {
     return {"proof"};
+  }
+  if (spec.artifact_schema == "cidx-tu-fact-cache/v1") {
+    return {"tu_dependency", "tu_fact_cache", "tu_replay_context"};
   }
   if (spec.artifact_schema == "cidx-extension/v1") {
     return {"extension"};
@@ -1129,6 +1137,12 @@ ArtifactStore::attach_current(std::string_view logical_id) {
   storage_.attached_artifact_names_.insert(name);
   return std::unique_ptr<ArtifactAttachment>(
       new ArtifactAttachment(attachment_lifetime_, name, previous_query_only));
+}
+
+void ArtifactStore::read_current(std::string_view logical_id,
+                                 const SidecarReader &reader) {
+  auto attachment = attach_current(logical_id);
+  reader(storage_.raw_db(), attachment->name());
 }
 
 void ArtifactStore::release_attachment(std::string_view name,
