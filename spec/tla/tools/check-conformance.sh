@@ -17,7 +17,7 @@ ROOT="${CIDX_REPO_ROOT:+$CIDX_REPO_ROOT/spec/tla}"
 ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 TOOLS_VERSION="1.8.0"
 TOOLS_URL="https://github.com/tlaplus/tlaplus/releases/download/v${TOOLS_VERSION}/tla2tools.jar"
-TOOLS_SHA256="cc4803dce2a8ffaf0f5920a9dc39df4b5ee34ab4cb53fb58ac557277a7e516b3"
+TOOLS_SHA256="e22f8ffb4bacdea0a871f444dd94fe5fb0d8013b3388ae39e82e26f852c735d5"
 
 die() {
   echo "TLA_TOOLCHAIN_STATUS=FAIL reason=$1" >&2

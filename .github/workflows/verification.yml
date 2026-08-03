@@ -603,6 +603,8 @@ jobs:
           -DCMAKE_CXX_COMPILER=g++-13
           -DLLVM_DIR=/usr/lib/llvm-22/lib/cmake/llvm
           -DClang_DIR=/usr/lib/llvm-22/lib/cmake/clang
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
       - name: Install Backlog test runtime
         env:
           BACKLOG_PLUGIN_REVISION: 40739f8b6ce7615705ee3eb7bf0dcb986ed6adb2
