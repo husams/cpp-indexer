@@ -234,9 +234,20 @@ const seenSemanticOutputs = new Map();
 const temporary = await mkdtemp(join(tmpdir(), 'cidx-explorer-qualification-'));
 try {
   const cppDb = resolve(root, 'index.db');
-  const cppQualificationDb = join(temporary, 'cpp-indexer.db');
+  const cppQualificationCache = join(temporary, 'cpp-indexer-cache');
+  await mkdir(cppQualificationCache, {recursive: true});
+  const cppQualificationDb = join(cppQualificationCache, 'index.db');
   await copyFile(cppDb, cppQualificationDb);
   await relocateTrackedWorkspacePaths(cppQualificationDb);
+  const [{pending_files: pendingFiles}] = await sqliteJson(cppQualificationDb,
+    'SELECT COUNT(*) AS pending_files FROM file WHERE indexed = 0');
+  if (Number(pendingFiles) !== 0) {
+    throw new Error(`cpp-indexer qualification input has ${pendingFiles} pending files`);
+  }
+  // Tracked source bytes were verified above. Refresh only the temporary
+  // checkout identity so generated platform headers do not make it stale.
+  await execute(['index'],
+    {env: {...process.env, INDEXER_CACHE: cppQualificationCache}});
   workspaceDbs.set('cpp-indexer', cppQualificationDb);
   const banking = manifest.workspaces.find((workspace) => workspace.name === 'banking');
   if (!banking) throw new Error('banking workspace is missing');
