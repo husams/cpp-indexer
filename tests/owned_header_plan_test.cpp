@@ -1,7 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest/doctest.h"
 
-#include "application/controlled_header_writer.hpp"
+#include "ast/controlled_header_writer.hpp"
 #include "ast/fact_extraction.hpp"
 #include "ast/owned_header_plan.hpp"
 #include "ast/storage_symbol_sink.hpp"
@@ -180,8 +180,15 @@ TEST_CASE("controlled lifecycle mutation rolls back with the complete TU") {
 
   storage::SqliteStoragePorts sqlite(storage);
   auto transaction = sqlite.unit_of_work().begin();
-  application::ControlledHeaderWriter writer(sqlite.source_write(),
-                                             sqlite.symbol_write());
+  ast::ControlledHeaderWriter writer(
+      [&sqlite](const ast::PlannedFileRoute &route) {
+        return sqlite.source_write().add_file_path(
+            route.path, route.snapshot.mtime, route.snapshot.md5,
+            route.compile_options, route.driver);
+      },
+      [&sqlite](std::int64_t file_id) {
+        sqlite.symbol_write().delete_symbols_for_file(file_id);
+      });
   const auto applied =
       writer.apply(plan, main, "generation-9",
                    [](const std::string &, const ast::PlannedSourceSnapshot &) {
@@ -209,8 +216,15 @@ TEST_CASE("stale plans are rejected before lifecycle mutation") {
                  main_id),
        candidate(ast::PlannedFileRole::owned_header, main, header, 1)});
   storage::SqliteStoragePorts sqlite(storage);
-  application::ControlledHeaderWriter writer(sqlite.source_write(),
-                                             sqlite.symbol_write());
+  ast::ControlledHeaderWriter writer(
+      [&sqlite](const ast::PlannedFileRoute &route) {
+        return sqlite.source_write().add_file_path(
+            route.path, route.snapshot.mtime, route.snapshot.md5,
+            route.compile_options, route.driver);
+      },
+      [&sqlite](std::int64_t file_id) {
+        sqlite.symbol_write().delete_symbols_for_file(file_id);
+      });
 
   const auto generation_rejected =
       writer.apply(plan, main, "generation-12",
@@ -219,7 +233,7 @@ TEST_CASE("stale plans are rejected before lifecycle mutation") {
                    });
   REQUIRE(!generation_rejected.ok());
   CHECK(generation_rejected.rejection->kind ==
-        application::HeaderPlanRejectionKind::generation_mismatch);
+        ast::HeaderPlanRejectionKind::generation_mismatch);
   CHECK(!storage.get_file(header).has_value());
   CHECK(storage.symbols_in_file(main_id).size() == 1);
 
@@ -230,7 +244,7 @@ TEST_CASE("stale plans are rejected before lifecycle mutation") {
       });
   REQUIRE(!source_rejected.ok());
   CHECK(source_rejected.rejection->kind ==
-        application::HeaderPlanRejectionKind::stale_source);
+        ast::HeaderPlanRejectionKind::stale_source);
   CHECK(source_rejected.rejection->path == header);
   CHECK(!storage.get_file(header).has_value());
   CHECK(storage.symbols_in_file(main_id).size() == 1);

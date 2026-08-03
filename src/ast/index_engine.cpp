@@ -1,7 +1,7 @@
 #include "ast/index_engine.hpp"
 #include "ast/front_end_reuse.hpp"
 
-#include "application/controlled_header_writer.hpp"
+#include "ast/controlled_header_writer.hpp"
 #include "ast/declaration_edge_visitor.hpp"
 #include "ast/display_name_rewrite.hpp"
 #include "ast/function_definition_visitor.hpp"
@@ -831,22 +831,28 @@ private:
   apply_owned_header_route_plan(const OwnedHeaderRoutePlan &plan,
                                 double &persistence_seconds) {
     const profile::ScopedAccumulator persistence(persistence_seconds);
-    application::ControlledHeaderWriter writer(state_.ports->source_write,
-                                               state_.ports->symbols_write);
-    const application::ControlledHeaderWriteResult applied = writer.apply(
+    ControlledHeaderWriter writer(
+        [this](const PlannedFileRoute &route) {
+          return state_.ports->source_write.add_file_path(
+              route.path, route.snapshot.mtime, route.snapshot.md5,
+              route.compile_options, route.driver);
+        },
+        [this](std::int64_t file_id) {
+          state_.ports->symbols_write.delete_symbols_for_file(file_id);
+        });
+    const ControlledHeaderWriteResult applied = writer.apply(
         plan, translation_unit_route_key(), route_generation(),
         [](const std::string &path, const PlannedSourceSnapshot &snapshot) {
           return SourceSnapshot{.mtime = snapshot.mtime, .md5 = snapshot.md5}
               .matches(path);
         });
     if (!applied.ok()) {
-      const application::HeaderPlanRejection rejection =
-          applied.rejection.value_or(application::HeaderPlanRejection{
-              .kind = application::HeaderPlanRejectionKind::invalid_route,
+      const HeaderPlanRejection rejection =
+          applied.rejection.value_or(HeaderPlanRejection{
+              .kind = HeaderPlanRejectionKind::invalid_route,
               .path = {},
               .detail = "controlled writer rejected a route without a reason"});
-      if (rejection.kind ==
-          application::HeaderPlanRejectionKind::stale_source) {
+      if (rejection.kind == HeaderPlanRejectionKind::stale_source) {
         state_.out->source_changed = true;
       } else {
         state_.out->parse_failed = true;
@@ -857,6 +863,9 @@ private:
       return false;
     }
     for (const PlannedFileRoute &route : plan.routes()) {
+      if (route.translation_unit != translation_unit_route_key()) {
+        continue;
+      }
       if (route.role != PlannedFileRole::owned_header) {
         continue;
       }

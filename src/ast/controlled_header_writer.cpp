@@ -1,17 +1,16 @@
-#include "application/controlled_header_writer.hpp"
-
-#include "storage/ports.hpp"
+#include "ast/controlled_header_writer.hpp"
 
 #include <utility>
 
-namespace cidx::application {
+namespace cidx::ast {
 
 ControlledHeaderWriter::ControlledHeaderWriter(
-    storage::SourceStoreWritePort &source, storage::SymbolWritePort &symbols)
-    : source_(&source), symbols_(&symbols) {}
+    PlannedFileRowWriter write_file_row, PlannedSymbolCleanup cleanup_symbols)
+    : write_file_row_(std::move(write_file_row)),
+      cleanup_symbols_(std::move(cleanup_symbols)) {}
 
 auto ControlledHeaderWriter::apply(
-    const ast::OwnedHeaderRoutePlan &plan, std::string_view translation_unit,
+    const OwnedHeaderRoutePlan &plan, std::string_view translation_unit,
     std::string_view expected_generation,
     const PlannedSourceValidator &source_is_current)
     -> ControlledHeaderWriteResult {
@@ -23,7 +22,7 @@ auto ControlledHeaderWriter::apply(
                 .detail = "owned-header plan generation is stale"}};
   }
 
-  for (const ast::PlannedFileRoute &route : plan.routes()) {
+  for (const PlannedFileRoute &route : plan.routes()) {
     if (route.translation_unit != translation_unit) {
       continue;
     }
@@ -35,7 +34,7 @@ auto ControlledHeaderWriter::apply(
               .path = route.path,
               .detail = "planned source snapshot changed before publication"}};
     }
-    if (route.role == ast::PlannedFileRole::translation_unit &&
+    if (route.role == PlannedFileRole::translation_unit &&
         !route.existing_file_id.has_value()) {
       return {.file_ids = {},
               .rejection = HeaderPlanRejection{
@@ -46,18 +45,15 @@ auto ControlledHeaderWriter::apply(
   }
 
   ControlledHeaderWriteResult result;
-  for (const ast::PlannedFileRoute &route : plan.routes()) {
+  for (const PlannedFileRoute &route : plan.routes()) {
     if (route.translation_unit != translation_unit) {
       continue;
     }
-    const std::int64_t file_id =
-        route.existing_file_id
-            ? *route.existing_file_id
-            : source_->add_file_path(route.path, route.snapshot.mtime,
-                                     route.snapshot.md5, route.compile_options,
-                                     route.driver);
+    const std::int64_t file_id = route.existing_file_id
+                                     ? *route.existing_file_id
+                                     : write_file_row_(route);
     if (route.cleanup_symbols) {
-      symbols_->delete_symbols_for_file(file_id);
+      cleanup_symbols_(file_id);
     }
     if (route.extraction.transient_file_handle) {
       result.file_ids.emplace(*route.extraction.transient_file_handle, file_id);
@@ -66,4 +62,4 @@ auto ControlledHeaderWriter::apply(
   return result;
 }
 
-} // namespace cidx::application
+} // namespace cidx::ast
