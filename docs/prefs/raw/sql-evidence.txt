@@ -1,0 +1,42 @@
+SQL-level evidence for the lookup_symbol hotspot
+database: cold single-TU index of src/query/exec.cpp (2729 symbols, 1773 type_node, 6121 edge)
+
+--- indexes on symbol ---
+CREATE INDEX idx_symbol_spelling ON symbol(spelling)
+CREATE INDEX idx_symbol_qual     ON symbol(qual_name)
+CREATE INDEX idx_symbol_spelling_nc ON symbol(spelling COLLATE NOCASE)
+CREATE INDEX idx_symbol_qual_nc     ON symbol(qual_name COLLATE NOCASE)
+CREATE INDEX idx_symbol_file     ON symbol(file_id)
+CREATE INDEX idx_symbol_parent   ON symbol(parent_usr)
+CREATE INDEX idx_symbol_parent_id ON symbol(parent_id)
+CREATE INDEX idx_symbol_kind     ON symbol(kind)
+CREATE INDEX idx_symbol_usr      ON symbol(usr)
+CREATE INDEX idx_symbol_scope    ON symbol(semantic_universe_id)
+CREATE UNIQUE INDEX idx_symbol_identity
+    ON symbol(semantic_universe_id, identity_key) WHERE identity_key <> ''
+
+--- rows per semantic_universe_id ---
+2|2729
+
+--- EXPLAIN QUERY PLAN: query as shipped (storage_symbols.cpp:311) ---
+QUERY PLAN
+`--SEARCH symbol USING INDEX idx_symbol_scope (semantic_universe_id=?)
+
+--- EXPLAIN QUERY PLAN: with AND identity_key <> '' ---
+QUERY PLAN
+`--SEARCH symbol USING COVERING INDEX idx_symbol_identity (semantic_universe_id=? AND identity_key=?)
+
+--- sqlite_stat1 present? (ANALYZE) ---
+(none)
+
+--- micro-benchmark, 20000 randomized identity_key lookups, same connection ---
+  as shipped              10.475s / 20000 lookups =   523.7 us per lookup
+  + identity_key<>''       0.206s / 20000 lookups =    10.3 us per lookup
+
+--- repeated: 5 x 5000 lookups, alternating, under HEAVY host load (other sessions at 555% + 95% CPU) ---
+  as shipped        us/lookup: 554.6, 521.7, 503.6, 501.8, 526.8  median 521.7
+  + identity_key<>''us/lookup: 9.2, 8.9, 10.5, 8.9, 11.5  median 9.2
+  speedup (median): 56.5x
+
+  NOTE: an earlier 20000-lookup pass under LIGHT load measured 232.8 us -> 5.8 us = 40.1x.
+        Absolute numbers move with host load; the ratio stays in the 40-50x band.

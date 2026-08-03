@@ -1,0 +1,350 @@
+cidx index src/query/exec.cpp -- /usr/bin/sample, 1 ms, RelWithDebInfo, macOS 26.1 arm64
+main-thread samples: 11198   wall: 19.091s   (sec = pct * wall)
+
+====================================================================================================
+A. SELF (leaf) SAMPLES, grouped by binary image
+====================================================================================================
+   8867   82.12%   15.68s  libsqlite3.dylib
+   1234   11.43%    2.18s  libsystem_platform.dylib
+    407    3.77%    0.72s  libsystem_kernel.dylib
+    205    1.90%    0.36s  libsystem_malloc.dylib
+     26    0.24%    0.05s  cidx
+     19    0.18%    0.03s  libclang-cpp.dylib
+     16    0.15%    0.03s  libsystem_trace.dylib
+     12    0.11%    0.02s  libsystem_c.dylib
+      7    0.06%    0.01s  libLLVM.dylib
+      5    0.05%    0.01s  libc++.1.dylib
+  10798  100.00%   19.09s  TOTAL leaf samples
+
+====================================================================================================
+B. SELF (leaf) SAMPLES per function, verbatim `sample` ranking (>=5 samples)
+====================================================================================================
+        sqlite3VdbeExec  (in libsqlite3.dylib)        5325
+        _platform_memmove  (in libsystem_platform.dylib)        562
+        sqlite3VdbeRecordCompareWithSkip  (in libsqlite3.dylib)        528
+        getCellInfo  (in libsqlite3.dylib)        409
+        sqlite3BtreeNext  (in libsqlite3.dylib)        378
+        _platform_memcmp  (in libsystem_platform.dylib)        352
+        sqlite3BtreeTableMoveto  (in libsqlite3.dylib)        313
+        _platform_memset  (in libsystem_platform.dylib)        295
+        btreeParseCellPtr  (in libsqlite3.dylib)        243
+        _kernelrpc_mach_vm_deallocate_trap  (in libsystem_kernel.dylib)        215
+        btreeParseCellPtrIndex  (in libsqlite3.dylib)        188
+        sqlite3VdbeSerialGet  (in libsqlite3.dylib)        182
+        sqlite3VdbeIdxRowid  (in libsqlite3.dylib)        139
+        sqlite3MemCompare  (in libsqlite3.dylib)        120
+        sqlite3VdbeFinishMoveto  (in libsqlite3.dylib)        77
+        vdbeCompareMemString  (in libsqlite3.dylib)        74
+        _xzm_free  (in libsystem_malloc.dylib)        64
+        binCollFunc  (in libsqlite3.dylib)        62
+        _kernelrpc_mach_vm_allocate_trap  (in libsystem_kernel.dylib)        61
+        sqlite3BtreeIndexMoveto  (in libsqlite3.dylib)        61
+        DYLD-STUB$$memcpy  (in libsqlite3.dylib)        59
+        mach_vm_reclaim_update_kernel_accounting_trap  (in libsystem_kernel.dylib)        58
+        vdbeRecordCompareInt  (in libsqlite3.dylib)        54
+        purgeableCacheFetch  (in libsqlite3.dylib)        51
+        sqlite3PcacheRelease  (in libsqlite3.dylib)        51
+        getPageNormal  (in libsqlite3.dylib)        48
+        btreeNext  (in libsqlite3.dylib)        42
+        purgeableCachePagePin  (in libsqlite3.dylib)        36
+        getAndInitPage  (in libsqlite3.dylib)        35
+        _xzm_xzone_malloc_tiny  (in libsystem_malloc.dylib)        31
+        vdbeRecordCompareString  (in libsqlite3.dylib)        28
+        sqlite3VdbeRecordUnpack  (in libsqlite3.dylib)        26
+        applyAffinity  (in libsqlite3.dylib)        25
+        mach_continuous_time  (in libsystem_kernel.dylib)        25
+        purgeableCacheDestroy  (in libsqlite3.dylib)        24
+        releaseMemArray  (in libsqlite3.dylib)        23
+        DYLD-STUB$$memcmp  (in libsqlite3.dylib)        22
+        _xzm_xzone_malloc  (in libsystem_malloc.dylib)        22
+        mach_absolute_time  (in libsystem_kernel.dylib)        21
+        <deduplicated_symbol>  (in libsystem_malloc.dylib)        18
+        __bzero  (in libsystem_platform.dylib)        18
+        xzm_malloc_zone_size  (in libsystem_malloc.dylib)        18
+        moveToChild  (in libsqlite3.dylib)        17
+        checkProfileCallback  (in libsqlite3.dylib)        16
+        sqlite3VdbeMemGrow  (in libsqlite3.dylib)        16
+        stat  (in libsystem_kernel.dylib)        16
+        sqlite3MallocTyped  (in libsqlite3.dylib)        15
+        malloc_zone_free  (in libsystem_malloc.dylib)        14
+        purgeableCacheTruncate  (in libsqlite3.dylib)        14
+        vdbeSorterSort  (in libsqlite3.dylib)        14
+        sqlite3BtreeInsert  (in libsqlite3.dylib)        13
+        sqlite3DbFreeNN  (in libsqlite3.dylib)        13
+        _free  (in libsystem_malloc.dylib)        12
+        malloc_type_zone_malloc  (in libsystem_malloc.dylib)        11
+        btreeReleaseAllCursorPages  (in libsqlite3.dylib)        10
+        sqlite3VdbeFreeCursorNN  (in libsqlite3.dylib)        10
+        std::__murmur2_or_cityhash<unsigned long, 64ul>::operator()[abi:ne200100](void const*, unsigned long) const  (in cidx)        10
+        balance  (in libsqlite3.dylib)        9
+        moveToRoot  (in libsqlite3.dylib)        9
+        os_log_type_enabled  (in libsystem_trace.dylib)        9
+        freeSpace  (in libsqlite3.dylib)        8
+        malloc_default_zone  (in libsystem_malloc.dylib)        8
+        sqlite3BtreeCursor  (in libsqlite3.dylib)        8
+        sqlite3VdbeMemMakeWriteable  (in libsqlite3.dylib)        8
+        _os_trace_prefs_and_mode_refresh_slow  (in libsystem_trace.dylib)        7
+        _platform_strncmp$VARIANT$Base  (in libsystem_platform.dylib)        7
+        clang::SourceManager::getFileCharacteristic(clang::SourceLocation) const  (in libclang-cpp.dylib)        7
+        clang::SourceManager::getFileID(unsigned int) const  (in libclang-cpp.dylib)        7
+        llvm::raw_svector_ostream::write_impl(char const*, unsigned long)  (in libLLVM.dylib)        7
+        malloc_size  (in libsystem_malloc.dylib)        7
+        nocaseCollatingFunc  (in libsqlite3.dylib)        7
+        sqlite3MemMallocTyped  (in libsqlite3.dylib)        7
+        body  (in cidx)        6
+        clock_gettime  (in libsystem_c.dylib)        6
+        clock_gettime_nsec_np  (in libsystem_c.dylib)        6
+        mach_timebase_info  (in libsystem_kernel.dylib)        6
+        purgeableCacheUnpin  (in libsqlite3.dylib)        6
+        sqlite3BtreeOpen  (in libsqlite3.dylib)        6
+        sqlite3VdbeHalt  (in libsqlite3.dylib)        6
+        sqlite3_clear_bindings  (in libsqlite3.dylib)        6
+        sqlite3_step  (in libsqlite3.dylib)        6
+        btreeBeginTrans  (in libsqlite3.dylib)        5
+        cidx::ast::TypeInterner::build(clang::QualType, int)  (in cidx)        5
+        clang::SourceManager::getLineNumber(clang::SourceLocation, bool*) const  (in libclang-cpp.dylib)        5
+        guarded_pwrite_np  (in libsystem_kernel.dylib)        5
+        memjrnlWrite  (in libsqlite3.dylib)        5
+        newDatabase  (in libsqlite3.dylib)        5
+        sqlite3DbMallocRawNNTyped  (in libsqlite3.dylib)        5
+        std::basic_string<char>::append(char const*, unsigned long)  (in libc++.1.dylib)        5
+        std::vector<std::basic_string<char>>::push_back[abi:ne200100](std::basic_string<char>&&)  (in cidx)        5
+
+====================================================================================================
+C. INCLUSIVE SAMPLES per frame (recursion-collapsed), all frames >= 20 samples
+====================================================================================================
+  11198  100.00%   19.09s  Thread_89483320   DispatchQueue_1: com.apple.main-thread  (serial)   []
+  11198  100.00%   19.09s  start   []
+  11198  100.00%   19.09s  main   [main.cpp:66]
+  11198  100.00%   19.09s  cidx::cli::run_application_request(std::variant<cidx::application::IndexRequest, cidx::application::QueryRequest, cidx::application::AnalysisRequest, cidx::application::WorkspaceRequest, cidx::application::AstInspectionRequest, cidx::application::DiffRequest, cidx::application::IncludeRequest, cidx::application::RefactoringRequest, cidx::application::ProofRequest> const&, cidx::cli::Context&)   [application_adapter.cpp:708]
+  11197   99.99%   19.09s  cidx::application::ApplicationService::execute(std::variant<cidx::application::IndexRequest, cidx::application::QueryRequest, cidx::application::AnalysisRequest, cidx::application::WorkspaceRequest, cidx::application::AstInspectionRequest, cidx::application::DiffRequest, cidx::application::IncludeRequest, cidx::application::RefactoringRequest, cidx::application::ProofRequest> const&, cidx::application::ApplicationContext&) const   [services.cpp:799]
+  11197   99.99%   19.09s  cidx::application::StorageApplicationOperations::execute(cidx::application::IndexRequest const&, cidx::application::ApplicationContext&)   [services.cpp:270]
+  11173   99.78%   19.05s  cidx::ast::run_index_one(cidx::Storage&, cidx::ast::IndexSession&, cidx::File const&, std::basic_string<char> const&, bool, cidx::ast::IndexFailurePoint, bool)   [index_engine.cpp:2051]
+  10705   95.60%   18.25s  cidx::SqliteStmt::step()   [sqlite.cpp:172]
+  10664   95.23%   18.18s  sqlite3_step   []
+  10498   93.75%   17.90s  sqlite3VdbeExec   []
+   9894   88.36%   16.87s  clang::tooling::ClangTool::run(clang::tooling::ToolAction*)   []
+   9894   88.36%   16.87s  clang::tooling::ToolInvocation::run()   []
+   9894   88.36%   16.87s  clang::tooling::ToolInvocation::runInvocation(char const*, clang::driver::Compilation*, std::shared_ptr<clang::CompilerInvocation>, std::shared_ptr<clang::PCHContainerOperations>)   []
+   9894   88.36%   16.87s  clang::tooling::FrontendActionFactory::runInvocation(std::shared_ptr<clang::CompilerInvocation>, clang::FileManager*, std::shared_ptr<clang::PCHContainerOperations>, clang::DiagnosticConsumer*)   []
+   9893   88.35%   16.87s  clang::CompilerInstance::ExecuteAction(clang::FrontendAction&)   []
+   9884   88.27%   16.85s  clang::FrontendAction::Execute()   []
+   9884   88.27%   16.85s  clang::ParseAST(clang::Sema&, bool, bool)   []
+   9884   88.27%   16.85s  cidx::ast::(anonymous namespace)::IndexASTConsumer::HandleTranslationUnit(clang::ASTContext&)   [index_engine.cpp:1201]
+   9883   88.26%   16.85s  cidx::ast::(anonymous namespace)::TranslationUnitIndexer::run()   [index_engine.cpp:243]
+   9883   88.26%   16.85s  cidx::ast::ExtractionPassRegistry::run(cidx::ast::IndexingPlan const&, cidx::ast::FrontendSession*) const   [pass_registry.cpp:586]
+   7248   64.73%   12.36s  std::__function::__func<cidx::ast::(anonymous namespace)::TranslationUnitIndexer::register_main_passes(cidx::ast::ExtractionPassRegistry&)::'lambda2'(cidx::ast::PassExecutionContext&), void (cidx::ast::PassExecutionContext&)>::operator()(cidx::ast::PassExecutionContext&)   [function.h:319]
+   7248   64.73%   12.36s  cidx::ast::FunctionDefinitionVisitor::run_statement_pass(cidx::ast::StatementFactPorts&, cidx::ast::PassMetrics*, cidx::ast::DefinitionScopeEmitter*)   [function_definition_visitor.cpp:67]
+   7241   64.66%   12.34s  cidx::ast::StatementEdgeVisitor::walk(clang::FunctionDecl const*)   [statement_edge_visitor.cpp:101]
+   7241   64.66%   12.34s  clang::RecursiveASTVisitor<cidx::ast::StatementEdgeVisitor>::TraverseStmt(clang::Stmt*, llvm::SmallVectorImpl<llvm::PointerIntPair<clang::Stmt*, 1u, bool, llvm::PointerLikeTypeTraits<clang::Stmt*>, llvm::PointerIntPairInfo<clang::Stmt*, 1u, llvm::PointerLikeTypeTraits<clang::Stmt*>>>>*)   [RecursiveASTVisitor.h:695]
+   6988   62.40%   11.91s  cidx::ast::StorageEdgeSink::lookup_symbol_id(std::basic_string<char> const&, std::optional<std::basic_string<char>> const&)   [storage_edge_sink.cpp:83]
+   6978   62.31%   11.90s  cidx::SqliteStorageService::lookup_symbol(std::basic_string<char> const&, std::optional<long long> const&, std::optional<std::basic_string<char>> const&, std::optional<std::basic_string<char>> const&)   [storage_symbols.cpp:329]
+   6880   61.44%   11.73s  cidx::SqliteStorageService::lookup_symbol(std::basic_string<char> const&, std::optional<long long> const&, std::optional<std::basic_string<char>> const&, std::optional<std::basic_string<char>> const&)::$_0::operator()(std::basic_string<char> const&) const   [storage_symbols.cpp:316]
+   5452   48.69%    9.29s  ???    load address 0x102940000 + 0x2dbbc   []
+   5315   47.46%    9.06s  cidx::ast::CallEdgeEmitter::emit_resolved_call(clang::Expr const*, clang::FunctionDecl const*, bool, clang::NamedDecl const*)   [call_edge_emitter.cpp:200]
+   5129   45.80%    8.74s  cidx::ast::CallEdgeEmitter::mint_resolved_target(clang::Expr const*, clang::FunctionDecl const*)   [call_edge_emitter.cpp:139]
+   4512   40.29%    7.69s  cidx::ast::BudgetedStatementFactPorts::lookup_symbol_id(std::basic_string<char> const&, std::optional<std::basic_string<char>> const&)   [pass_registry.cpp:155]
+   4495   40.14%    7.66s  cidx::ast::StatementEdgeVisitor::TraverseIfStmt(clang::IfStmt*)   [statement_edge_visitor.cpp:109]
+   4099   36.60%    6.99s  ???    load address 0x102940000 + 0x329bc   []
+   4097   36.59%    6.98s  cidx::ast::StatementEdgeVisitor::emit_call(clang::CallExpr const*)   [statement_edge_visitor.cpp:168]
+   2704   24.15%    4.61s  cidx::SqliteStmt::step_done()   [sqlite.cpp:194]
+   2148   19.18%    3.66s  cidx::ast::(anonymous namespace)::emit_owner_promotion(cidx::ast::DeclarationIdentityResolver&, cidx::ast::RelationFactEmitter&, cidx::ast::MintBuilder&, cidx::ast::TemplateArgumentEncoder const&, long long, clang::CXXMethodDecl const*)   [instantiation_edges.cpp:126]
+   1944   17.36%    3.31s  std::__function::__func<cidx::ast::(anonymous namespace)::TranslationUnitIndexer::register_header_association(cidx::ast::ExtractionPassRegistry&)::'lambda'(cidx::ast::PassExecutionContext&), void (cidx::ast::PassExecutionContext&)>::operator()(cidx::ast::PassExecutionContext&)   [function.h:319]
+   1944   17.36%    3.31s  cidx::ast::RoutedRootEventBuffer::replay_namespaces(cidx::ast::NamespaceUseVisitor&) const   [routed_root_events.cpp:404]
+   1925   17.19%    3.28s  cidx::ast::BudgetedNamespacePassPorts::lookup_symbol_id(std::basic_string<char> const&, std::optional<std::basic_string<char>> const&)   [pass_registry.cpp:355]
+   1774   15.84%    3.02s  cidx::ast::emit_callable_template_identity(cidx::ast::DeclarationIdentityResolver&, cidx::ast::RelationFactEmitter&, cidx::ast::PresentationIntentEmitter*, cidx::ast::MintBuilder&, cidx::ast::TemplateArgumentEncoder const&, long long, clang::FunctionDecl const*, cidx::ast::CallableTemplateInfo const&, std::vector<clang::QualType> const&)   [instantiation_edges.cpp:182]
+   1705   15.23%    2.91s  clang::RecursiveASTVisitor<cidx::ast::StatementEdgeVisitor>::TraverseDeclRefExpr(clang::DeclRefExpr*, llvm::SmallVectorImpl<llvm::PointerIntPair<clang::Stmt*, 1u, bool, llvm::PointerLikeTypeTraits<clang::Stmt*>, llvm::PointerIntPairInfo<clang::Stmt*, 1u, llvm::PointerLikeTypeTraits<clang::Stmt*>>>>*)   [RecursiveASTVisitor.h:2610]
+   1705   15.23%    2.91s  cidx::ast::StatementEdgeVisitor::VisitDeclRefExpr(clang::DeclRefExpr*)   [statement_edge_visitor.cpp:421]
+   1522   13.59%    2.59s  clang::RecursiveASTVisitor<cidx::ast::StatementEdgeVisitor>::TraverseDeclStmt(clang::DeclStmt*, llvm::SmallVectorImpl<llvm::PointerIntPair<clang::Stmt*, 1u, bool, llvm::PointerLikeTypeTraits<clang::Stmt*>, llvm::PointerIntPairInfo<clang::Stmt*, 1u, llvm::PointerLikeTypeTraits<clang::Stmt*>>>>*)   [RecursiveASTVisitor.h:2541]
+   1522   13.59%    2.59s  clang::RecursiveASTVisitor<cidx::ast::StatementEdgeVisitor>::TraverseDecl(clang::Decl*)   [DeclNodes.inc:296]
+   1514   13.52%    2.58s  cidx::ast::StatementEdgeVisitor::TraverseVarDecl(clang::VarDecl*)   [statement_edge_visitor.cpp:140]
+   1407   12.56%    2.40s  ???    load address 0x102940000 + 0x2dee4   []
+   1368   12.22%    2.33s  cidx::ast::TemplateArgumentEncoder::emit(long long, long long, clang::TemplateArgument const&, clang::QualType) const   [template_argument_encoder.cpp:135]
+   1340   11.97%    2.28s  cidx::ast::TemplateArgumentEncoder::encode(long long, long long, clang::TemplateArgument const&, clang::QualType) const   [template_argument_encoder.cpp:49]
+   1263   11.28%    2.15s  cidx::Transaction::commit()   [storage.cpp:95]
+   1260   11.25%    2.15s  cidx::ast::DeclarationEdgeVisitor::emit_signature_types(clang::FunctionDecl const*, long long)   [declaration_edge_visitor.cpp:416]
+   1258   11.23%    2.14s  cidx::SqliteStorageService::reconcile_pending_symbol_identities()   [storage.cpp:664]
+   1245   11.12%    2.12s  cidx::ast::TypeInterner::intern(clang::QualType)   [type_graph.cpp:73]
+   1243   11.10%    2.12s  cidx::ast::TypeInterner::build(clang::QualType, int)   [type_graph.cpp:254]
+   1222   10.91%    2.08s  clang::RecursiveASTVisitor<cidx::ast::StatementEdgeVisitor>::TraverseCXXConstructExpr(clang::CXXConstructExpr*, llvm::SmallVectorImpl<llvm::PointerIntPair<clang::Stmt*, 1u, bool, llvm::PointerLikeTypeTraits<clang::Stmt*>, llvm::PointerIntPairInfo<clang::Stmt*, 1u, llvm::PointerLikeTypeTraits<clang::Stmt*>>>>*)   [RecursiveASTVisitor.h:2889]
+   1161   10.37%    1.98s  cidx::ast::TypeInterner::emit_node(clang::QualType, cidx::ast::TypeNodeRecord, int)   [type_graph.cpp:101]
+   1129   10.08%    1.92s  cidx::ast::NamespaceUseVisitor::emit_ns_use(clang::NamedDecl const*, clang::SourceLocation)   [namespace_use_visitor.cpp:138]
+   1128   10.07%    1.92s  cidx::ast::NamespaceUseVisitor::visit_nested_name_specifier(clang::NestedNameSpecifierLoc)   [namespace_use_visitor.cpp:0]
+   1118    9.98%    1.91s  cidx::ast::StatementEdgeVisitor::TraverseForStmt(clang::ForStmt*)   [statement_edge_visitor.cpp:114]
+   1099    9.81%    1.87s  cidx::ast::StorageEdgeSink::intern_type_node(cidx::ast::TypeNodeRecord const&)   [storage_edge_sink.cpp:347]
+   1099    9.81%    1.87s  cidx::SqliteStorageService::intern_type_node(cidx::TypeNode const&)   [storage_types.cpp:74]
+   1094    9.77%    1.87s  cidx::ast::StorageEdgeSink::mint_symbol(cidx::ast::MintRequest const&)   [storage_edge_sink.cpp:141]
+   1092    9.75%    1.86s  cidx::ast::BudgetedStatementFactPorts::mint_symbol(cidx::ast::MintRequest const&)   [pass_registry.cpp:160]
+   1072    9.57%    1.83s  cidx::storage::SqliteSymbolStoreAdapter::mint_symbol_id(cidx::SymbolIdentityRecord const&)   [sqlite_adapters.cpp:0]
+   1072    9.57%    1.83s  cidx::SqliteStorageService::mint_symbol_id(std::basic_string<char> const&, std::basic_string<char> const&, std::basic_string<char> const&, std::basic_string<char> const&, std::basic_string<char> const&, std::optional<long long> const&, std::optional<long long> const&, std::optional<long long> const&, std::optional<std::basic_string<char>> const&, bool, bool, std::optional<std::basic_string<char>> const&, std::optional<long long> const&, std::optional<std::basic_string<char>> const&, std::optional<std::basic_string<char>> const&, std::optional<std::basic_string<char>> const&)   [storage_symbols.cpp:699]
+   1053    9.40%    1.80s  cidx::ast::BudgetedStatementFactPorts::intern_type_node(cidx::ast::TypeNodeRecord const&)   [pass_registry.cpp:0]
+   1025    9.15%    1.75s  sqlite3BtreeTableMoveto   []
+   1020    9.11%    1.74s  sqlite3VdbeFinishMoveto   []
+    815    7.28%    1.39s  cidx::ast::NamespaceUseVisitor::begin_decl(clang::Decl*)   [namespace_use_visitor.cpp:70]
+    815    7.28%    1.39s  cidx::ast::NamespaceUseVisitor::scope_symbol_id(clang::Decl const*)   [namespace_use_visitor.cpp:104]
+    813    7.26%    1.39s  cidx::SqliteStorageService::reconcile_type_identity(long long, std::basic_string_view<char>)   [storage.cpp:806]
+    629    5.62%    1.07s  std::__function::__func<cidx::ast::(anonymous namespace)::TranslationUnitIndexer::register_header_lifecycle(cidx::ast::ExtractionPassRegistry&)::'lambda0'(cidx::ast::PassExecutionContext&), void (cidx::ast::PassExecutionContext&)>::operator()(cidx::ast::PassExecutionContext&)   [function.h:319]
+    629    5.62%    1.07s  cidx::ast::RoutedRootEventBuffer::replay_declarations(cidx::ast::DeclarationEdgeVisitor&) const   [routed_root_events.cpp:328]
+    574    5.13%    0.98s  cidx::ast::DeclarationEdgeVisitor::signature_parameter_base(clang::ParmVarDecl const*, unsigned int)   [declaration_edge_visitor.cpp:336]
+    562    5.02%    0.96s  _platform_memmove   []
+    556    4.97%    0.95s  sqlite3VdbeRecordCompareWithSkip   []
+    551    4.92%    0.94s  cidx::ast::BudgetedDeclarationPassPorts::lookup_symbol_id(std::basic_string<char> const&, std::optional<std::basic_string<char>> const&)   [pass_registry.cpp:255]
+    499    4.46%    0.85s  sqlite3BtreeNext   []
+    473    4.22%    0.81s  cidx::ast::StatementEdgeVisitor::TraverseSwitchStmt(clang::SwitchStmt*)   [statement_edge_visitor.cpp:129]
+    461    4.12%    0.79s  sqlite3VdbeHalt   []
+    434    3.88%    0.74s  getPageNormal   []
+    427    3.81%    0.73s  cidx::ast::DeclarationEdgeVisitor::VisitCXXMethodDecl(clang::CXXMethodDecl*)   [declaration_edge_visitor.cpp:825]
+    409    3.65%    0.70s  getCellInfo   []
+    396    3.54%    0.68s  binCollFunc   []
+    393    3.51%    0.67s  cidx::ast::emit_type_use(cidx::ast::DeclarationIdentityResolver&, cidx::ast::RelationFactEmitter&, long long, clang::QualType, long long, cidx::ast::ExpansionLoc const&, int, long long)   [type_use.cpp:73]
+    386    3.45%    0.66s  cidx::ast::StatementEdgeVisitor::TraverseWhileStmt(clang::WhileStmt*)   [statement_edge_visitor.cpp:119]
+    386    3.45%    0.66s  cidx::ast::DeclarationEdgeVisitor::emit_signature_uses(clang::FunctionDecl const*)   [declaration_edge_visitor.cpp:287]
+    371    3.31%    0.63s  purgeableCacheFetch   []
+    352    3.14%    0.60s  _platform_memcmp   []
+    348    3.11%    0.59s  sqlite3VdbeIdxRowid   []
+    347    3.10%    0.59s  sqlite3VdbeFreeCursorNN   []
+    319    2.85%    0.54s  sqlite3BtreeClose   []
+    314    2.80%    0.54s  btreeBeginTrans   []
+    299    2.67%    0.51s  cidx::ast::StatementEdgeVisitor::TraverseConditionalOperator(clang::ConditionalOperator*)   [statement_edge_visitor.cpp:135]
+    297    2.65%    0.51s  cidx::ast::NamespaceUseVisitor::VisitTypeLoc(clang::TypeLoc)   [namespace_use_visitor.cpp:219]
+    295    2.63%    0.50s  sqlite3PagerClose   []
+    295    2.63%    0.50s  _platform_memset   []
+    257    2.30%    0.44s  sqlite3BtreeIndexMoveto   []
+    252    2.25%    0.43s  purgeableCacheDestroy   []
+    243    2.17%    0.41s  btreeParseCellPtr   []
+    216    1.93%    0.37s  mach_vm_deallocate   []
+    215    1.92%    0.37s  _kernelrpc_mach_vm_deallocate_trap   []
+    188    1.68%    0.32s  btreeParseCellPtrIndex   []
+    182    1.63%    0.31s  sqlite3VdbeSerialGet   []
+    144    1.29%    0.25s  getAndInitPage   []
+    130    1.16%    0.22s  sqlite3BtreeInsert   []
+    129    1.15%    0.22s  cidx::ast::DeclarationEdgeVisitor::VisitFieldDecl(clang::FieldDecl*)   [declaration_edge_visitor.cpp:643]
+    127    1.13%    0.22s  moveToChild   []
+    120    1.07%    0.20s  sqlite3MemCompare   []
+    119    1.06%    0.20s  sqlite3MemMallocTyped   []
+    119    1.06%    0.20s  cidx::ast::StatementEdgeVisitor::emit_local_var(clang::VarDecl const*)   [statement_edge_visitor.cpp:535]
+    114    1.02%    0.19s  ???    load address 0x102940000 + 0x2de94   []
+    111    0.99%    0.19s  _xzm_free   []
+    110    0.98%    0.19s  cidx::ast::DeclarationEdgeVisitor::emit_lookup_edge(std::basic_string<char> const&, std::basic_string<char> const&, int, std::basic_string<char> const&, std::basic_string<char> const&)   [declaration_edge_visitor.cpp:471]
+    109    0.97%    0.19s  sqlite3VdbeMemGrow   []
+    104    0.93%    0.18s  vdbeSorterSort   []
+    100    0.89%    0.17s  sqlite3BtreeDelete   []
+     92    0.82%    0.16s  cidx::SqliteStorageService::add_type_edge(long long, long long, long long, long long)   [storage_types.cpp:128]
+     91    0.81%    0.16s  cidx::ast::BudgetedStatementFactPorts::add_type_edge(long long, long long, long long, long long)   [pass_registry.cpp:0]
+     90    0.80%    0.15s  cidx::ast::CallEdgeEmitter::emit_call_site(clang::Expr const*, long long, clang::FunctionDecl const*)   [call_edge_emitter.cpp:159]
+     88    0.79%    0.15s  cidx::ast::CallEdgeEmitter::emit_call_args(clang::Expr const*, clang::CallExpr const*, clang::CXXConstructExpr const*, long long)   [call_edge_emitter.cpp:258]
+     88    0.79%    0.15s  subjournalPageIfRequired   []
+     86    0.77%    0.15s  memjrnlWrite   []
+     81    0.72%    0.14s  btreeNext   []
+     75    0.67%    0.13s  cidx::ast::BudgetedStatementFactPorts::add_call_arg(cidx::ast::CallArgRecord const&)   [pass_registry.cpp:0]
+     75    0.67%    0.13s  cidx::ast::StorageEdgeSink::add_call_arg(cidx::ast::CallArgRecord const&)   [storage_edge_sink.cpp:226]
+     74    0.66%    0.13s  cidx::ast::StorageEdgeSink::add_edge_site(cidx::ast::EdgeSiteRecord const&)   [storage_edge_sink.cpp:211]
+     74    0.66%    0.13s  vdbeCompareMemString   []
+     73    0.65%    0.12s  cidx::SqliteStorageService::add_edge_site(cidx::EdgeSite const&)   [storage_symbols.cpp:833]
+     72    0.64%    0.12s  cidx::SqliteStorageService::add_call_arg(cidx::CallArg const&)   [storage_symbols.cpp:925]
+     71    0.63%    0.12s  cidx::ast::BudgetedStatementFactPorts::add_edge_site(cidx::ast::EdgeSiteRecord const&)   [pass_registry.cpp:0]
+     69    0.62%    0.12s  cidx::ast::usr_for_decl(clang::Decl const*)   [usr.cpp:10]
+     69    0.62%    0.12s  cidx::ast::StorageEdgeSink::add_edge(cidx::ast::EdgeRecord const&)   [storage_edge_sink.cpp:173]
+     68    0.61%    0.12s  cidx::SqliteStorageService::add_edge(cidx::Edge const&)   [storage_symbols.cpp:727]
+     66    0.59%    0.11s  cidx::ast::MintBuilder::build(clang::NamedDecl const*) const   [mint_builder.cpp:57]
+     66    0.59%    0.11s  cidx::SqliteStmt::~SqliteStmt()   [sqlite.cpp:96]
+     63    0.56%    0.11s  cidx::SqliteDb::prepare(std::basic_string_view<char>)   [sqlite.cpp:358]
+     63    0.56%    0.11s  sqlite3VdbeMemMakeWriteable   []
+     62    0.55%    0.11s  clang::index::generateUSRForDecl(clang::Decl const*, llvm::SmallVectorImpl<char>&, clang::LangOptions const&)   []
+     62    0.55%    0.11s  mach_vm_reclaim_update_kernel_accounting   []
+     61    0.54%    0.10s  vm_allocate   []
+     61    0.54%    0.10s  mach_vm_allocate   []
+     61    0.54%    0.10s  _kernelrpc_mach_vm_allocate_trap   []
+     61    0.54%    0.10s  vdbeCloseStatement   []
+     60    0.54%    0.10s  sqlite3BtreeSavepoint   []
+     59    0.53%    0.10s  sqlite3PagerSavepoint   []
+     59    0.53%    0.10s  dbMallocRawFinishTyped   []
+     59    0.53%    0.10s  DYLD-STUB$$memcpy   []
+     59    0.53%    0.10s  cidx::SqliteStorageService::lookup_symbols_by_usr(std::basic_string<char> const&, std::optional<long long> const&)   [storage_symbols.cpp:403]
+     58    0.52%    0.10s  mach_vm_reclaim_update_kernel_accounting_trap   []
+     57    0.51%    0.10s  cidx::ast::StorageEdgeSink::replace_parameters(long long, std::vector<cidx::ast::ParameterRecord> const&)   [storage_edge_sink.cpp:376]
+     57    0.51%    0.10s  cidx::SqliteStorageService::replace_parameters(long long, std::vector<cidx::Parameter> const&)   [storage_types.cpp:142]
+     56    0.50%    0.10s  vdbeMemAddTerminator   []
+     55    0.49%    0.09s  cidx::SqliteDb::release_statement(std::basic_string<char> const&, sqlite3_stmt*)   [sqlite.cpp:312]
+     54    0.48%    0.09s  vdbeRecordCompareInt   []
+     52    0.46%    0.09s  cidx::ast::BudgetedStatementFactPorts::replace_parameters(long long, std::vector<cidx::ast::ParameterRecord> const&)   [pass_registry.cpp:0]
+     52    0.46%    0.09s  cidx::ast::BudgetedStatementFactPorts::add_edge(cidx::ast::EdgeRecord const&)   [pass_registry.cpp:0]
+     51    0.46%    0.09s  sqlite3PcacheRelease   []
+     51    0.46%    0.09s  memjrnlTruncate   []
+     51    0.46%    0.09s  xzm_segment_group_free_chunk   []
+     50    0.45%    0.09s  sqlite3_reset   []
+     49    0.44%    0.08s  cidx::SqliteStorageService::get_file(std::basic_string<char> const&)   [storage_files.cpp:232]
+     49    0.44%    0.08s  vdbeRecordCompareString   []
+     49    0.44%    0.08s  cidx::ast::EdgeEmissionContext::emit_type_name_use(clang::TypeSourceInfo const*, bool)   [edge_emission_context.cpp:107]
+     49    0.44%    0.08s  clang::RecursiveASTVisitor<cidx::ast::StatementEdgeVisitor>::TraverseCXXRewrittenBinaryOperator(clang::CXXRewrittenBinaryOperator*, llvm::SmallVectorImpl<llvm::PointerIntPair<clang::Stmt*, 1u, bool, llvm::PointerLikeTypeTraits<clang::Stmt*>, llvm::PointerIntPairInfo<clang::Stmt*, 1u, llvm::PointerLikeTypeTraits<clang::Stmt*>>>>*)   [RecursiveASTVisitor.h:3038]
+     48    0.43%    0.08s  releaseMemArray   []
+     47    0.42%    0.08s  checkProfileCallback   []
+     46    0.41%    0.08s  cidx::ast::BudgetedDeclarationPassPorts::intern_type_node(cidx::ast::TypeNodeRecord const&)   [pass_registry.cpp:0]
+     44    0.39%    0.08s  cidx::ast::BudgetedStatementFactPorts::file_id_for_path(std::basic_string<char> const&)   [pass_registry.cpp:166]
+     44    0.39%    0.08s  cidx::ast::StorageEdgeSink::file_id_for_path(std::basic_string<char> const&)   [storage_edge_sink.cpp:386]
+     44    0.39%    0.08s  cidx::pathutil::normpath(std::basic_string<char> const&)   [pathutil.cpp:61]
+     44    0.39%    0.08s  cidx::ast::DeclarationEdgeVisitor::VisitNamedDecl(clang::NamedDecl*)   [declaration_edge_visitor.cpp:489]
+     44    0.39%    0.08s  cidx::ast::DeclarationEdgeVisitor::emit_contains_edge(clang::NamedDecl const*)   [declaration_edge_visitor.cpp:508]
+     43    0.38%    0.07s  cidx::SqliteStorageService::split_path(std::basic_string<char> const&)   [storage_files.cpp:200]
+     43    0.38%    0.07s  vdbeSorterCompare   []
+     42    0.38%    0.07s  _xzm_malloc_large_huge   []
+     41    0.37%    0.07s  cidx::ast::EdgeEmissionContext::emit_site_edge_at(clang::SourceLocation, long long, int)   [edge_emission_context.cpp:78]
+     41    0.37%    0.07s  xzm_segment_group_alloc_chunk   []
+     41    0.37%    0.07s  _xzm_segment_group_find_and_allocate_chunk   []
+     40    0.36%    0.07s  sqlite3BtreeOpen   []
+     39    0.35%    0.07s  ???    load address 0x102940000 + 0x328bc   []
+     39    0.35%    0.07s  sqlite3VdbeRecordUnpack   []
+     38    0.34%    0.06s  purgeableCachePagePin   []
+     38    0.34%    0.06s  std::chrono::steady_clock::now()   []
+     37    0.33%    0.06s  _xzm_segment_group_span_mark_smaller   []
+     37    0.33%    0.06s  cidx::SqliteStorageService::associate_facts_for_file(long long, long long, std::vector<long long> const&, std::vector<long long> const&, std::vector<long long> const&)   [storage_applicability.cpp:152]
+     36    0.32%    0.06s  allocateCursor   []
+     35    0.31%    0.06s  cidx::ast::StatementEdgeVisitor::emit_construction_form(clang::CXXConstructExpr const*, clang::CXXConstructorDecl const*)   [statement_edge_visitor.cpp:365]
+     35    0.31%    0.06s  clock_gettime_nsec_np   []
+     34    0.30%    0.06s  moveToRoot   []
+     34    0.30%    0.06s  std::basic_string<char>::append(char const*, unsigned long)   []
+     34    0.30%    0.06s  clock_gettime   []
+     33    0.29%    0.06s  cidx::SqliteStorageService::component_for_path(std::basic_string<char> const&)   [storage_repo.cpp:544]
+     32    0.29%    0.05s  (anonymous namespace)::USRGenerator::VisitTagDecl(clang::TagDecl const*)   []
+     31    0.28%    0.05s  _xzm_xzone_malloc_tiny   []
+     31    0.28%    0.05s  clang::RecursiveASTVisitor<cidx::ast::StatementEdgeVisitor>::TraverseCXXTemporaryObjectExpr(clang::CXXTemporaryObjectExpr*, llvm::SmallVectorImpl<llvm::PointerIntPair<clang::Stmt*, 1u, bool, llvm::PointerLikeTypeTraits<clang::Stmt*>, llvm::PointerIntPairInfo<clang::Stmt*, 1u, llvm::PointerLikeTypeTraits<clang::Stmt*>>>>*)   [RecursiveASTVisitor.h:2835]
+     30    0.27%    0.05s  std::basic_string<char>::__grow_by_and_replace(unsigned long, unsigned long, unsigned long, unsigned long, unsigned long, unsigned long, char const*)   []
+     29    0.26%    0.05s  (anonymous namespace)::USRGenerator::VisitType(clang::QualType)   []
+     29    0.26%    0.05s  sqlite3MemSize   []
+     28    0.25%    0.05s  cidx::ast::BudgetedStatementFactPorts::add_template_arg(cidx::ast::TemplateArgRecord const&)   [pass_registry.cpp:0]
+     28    0.25%    0.05s  cidx::ast::StorageEdgeSink::add_template_arg(cidx::ast::TemplateArgRecord const&)   [storage_edge_sink.cpp:333]
+     28    0.25%    0.05s  sqlite3BtreeCreateTable   []
+     28    0.25%    0.05s  cidx::pathutil::(anonymous namespace)::split_components(std::basic_string<char> const&)   [pathutil.cpp:25]
+     27    0.24%    0.05s  cidx::SqliteStorageService::add_template_arg(cidx::TemplateArg const&)   [storage_symbols.cpp:955]
+     27    0.24%    0.05s  cidx::ast::DeclarationEdgeVisitor::VisitFunctionDecl(clang::FunctionDecl*)   [declaration_edge_visitor.cpp:1117]
+     26    0.23%    0.04s  cidx::SqliteStorageService::component_abs_base(cidx::Component const&)   [storage_repo.cpp:435]
+     26    0.23%    0.04s  cidx::SqliteStorageService::portable_source_identity_for_path(std::basic_string<char> const&)   [storage_repo.cpp:167]
+     26    0.23%    0.04s  _xzm_segment_group_segment_span_free_coalesce   []
+     25    0.22%    0.04s  (anonymous namespace)::USRGenerator::VisitFunctionDecl(clang::FunctionDecl const*)   []
+     25    0.22%    0.04s  clang::RecursiveASTVisitor<cidx::ast::StatementEdgeVisitor>::TraverseMemberExpr(clang::MemberExpr*, llvm::SmallVectorImpl<llvm::PointerIntPair<clang::Stmt*, 1u, bool, llvm::PointerLikeTypeTraits<clang::Stmt*>, llvm::PointerIntPairInfo<clang::Stmt*, 1u, llvm::PointerLikeTypeTraits<clang::Stmt*>>>>*)   [RecursiveASTVisitor.h:2626]
+     25    0.22%    0.04s  (anonymous namespace)::TypePrinter::print(clang::Type const*, clang::Qualifiers, llvm::raw_ostream&, llvm::StringRef)   []
+     25    0.22%    0.04s  _xzm_segment_group_span_mark_used   []
+     25    0.22%    0.04s  mach_continuous_time   []
+     25    0.22%    0.04s  applyAffinity   []
+     24    0.21%    0.04s  cidx::SqliteStorageService::active_clone_root(std::optional<long long> const&)   [storage_repo.cpp:424]
+     24    0.21%    0.04s  clang::QualType::getAsStringInternal(clang::Type const*, clang::Qualifiers, std::basic_string<char>&, clang::PrintingPolicy const&)   []
+     24    0.21%    0.04s  _xzm_reclaim_mark_used   []
+     24    0.21%    0.04s  _xzm_segment_group_span_mark_free   []
+     24    0.21%    0.04s  _xzm_reclaim_mark_free   []
+     24    0.21%    0.04s  operator new(unsigned long)   []
+     24    0.21%    0.04s  os_log_type_enabled   []
+     24    0.21%    0.04s  btreeReleaseAllCursorPages   []
+     23    0.21%    0.04s  cidx::ast::StatementEdgeVisitor::VisitMemberExpr(clang::MemberExpr*)   [statement_edge_visitor.cpp:491]
+     23    0.21%    0.04s  std::vector<std::basic_string<char>>::push_back[abi:ne200100](std::basic_string<char>&&)   [vector.h:454]
+     23    0.21%    0.04s  std::__function::__func<cidx::ast::(anonymous namespace)::TranslationUnitIndexer::register_header_association(cidx::ast::ExtractionPassRegistry&)::'lambda0'(cidx::ast::PassExecutionContext&), void (cidx::ast::PassExecutionContext&)>::operator()(cidx::ast::PassExecutionContext&)   [function.h:319]
+     22    0.20%    0.04s  malloc_size   []
+     22    0.20%    0.04s  _os_trace_prefs_and_mode_refresh_slow   []
+     22    0.20%    0.04s  DYLD-STUB$$memcmp   []
+     22    0.20%    0.04s  _xzm_xzone_malloc   []
+     22    0.20%    0.04s  std::__function::__func<cidx::ast::(anonymous namespace)::TranslationUnitIndexer::register_association_and_include_passes(cidx::ast::ExtractionPassRegistry&)::'lambda0'(cidx::ast::PassExecutionContext&), void (cidx::ast::PassExecutionContext&)>::operator()(cidx::ast::PassExecutionContext&)   [function.h:319]
+     21    0.19%    0.04s  allocateBtreePage   []
+     21    0.19%    0.04s  mach_absolute_time   []
+     21    0.19%    0.04s  purgeableCacheTruncate   []
+     21    0.19%    0.04s  cidx::ast::persist_include_facts(cidx::Storage&, cidx::ast::IncludeFacts const&, cidx::IncludeConfig const&)   [include_facts.cpp:506]
+     20    0.18%    0.03s  balance   []
+     20    0.18%    0.03s  cidx::ast::(anonymous namespace)::to_expansion(clang::SourceManager const&, clang::SourceLocation)   [location.cpp:33]
