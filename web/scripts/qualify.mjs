@@ -154,6 +154,38 @@ const relocateTrackedWorkspacePaths = (db) => {
     `WHERE name='cpp-indexer');`);
 };
 
+const stampQualificationIdentity = async (db) => {
+  const files = await sqliteJson(db,
+    "SELECT c.name AS component_name, c.path AS component_path, " +
+    "c.kind AS component_kind, c.version AS component_version, " +
+    "r.name AS repository_name, r.remote_url AS repository_remote, " +
+    "d.path AS directory_path, f.name AS file_name, f.indexed " +
+    "FROM file f JOIN directory d ON d.id=f.directory_id " +
+    "JOIN component c ON c.id=d.component_id " +
+    "LEFT JOIN repository r ON r.id=c.repository_id " +
+    "ORDER BY c.name,c.path,c.kind,COALESCE(c.version,'<null>')," +
+    "COALESCE(r.name,'<null>'),COALESCE(r.remote_url,'<null>'),d.path,f.name");
+  let manifest = '';
+  for (const file of files) {
+    if (file.component_path !== '.' || file.repository_name !== 'cpp-indexer') {
+      throw new Error('cpp-indexer qualification input has an unexpected component root');
+    }
+    if (Number(file.indexed) !== 1) {
+      throw new Error('cpp-indexer qualification input has pending files');
+    }
+    const bytes = await readFile(resolve(root, file.directory_path, file.file_name));
+    const md5 = createHash('md5').update(bytes).digest('hex');
+    const identity = [file.component_name, file.component_path, file.component_kind,
+      file.component_version, file.repository_name, file.repository_remote,
+      file.directory_path, file.file_name]
+      .map((value) => value === null ? '<null>' : String(value)).join('\0');
+    manifest += `${identity}\0${md5}\0${file.indexed ? '1' : '0'}\n`;
+  }
+  const fingerprint = createHash('sha1').update(manifest).digest('hex');
+  await upsertMeta(db, 'source_fingerprint', fingerprint);
+  await upsertMeta(db, 'source_revision', `content-sha1:${fingerprint}`);
+};
+
 const prepareScenarioState = async (db, state) => {
   if (state === 'stale') {
     await upsertMeta(db, 'source_fingerprint', 'qualification-stale');
@@ -239,15 +271,9 @@ try {
   const cppQualificationDb = join(cppQualificationCache, 'index.db');
   await copyFile(cppDb, cppQualificationDb);
   await relocateTrackedWorkspacePaths(cppQualificationDb);
-  const [{pending_files: pendingFiles}] = await sqliteJson(cppQualificationDb,
-    'SELECT COUNT(*) AS pending_files FROM file WHERE indexed = 0');
-  if (Number(pendingFiles) !== 0) {
-    throw new Error(`cpp-indexer qualification input has ${pendingFiles} pending files`);
-  }
   // Tracked source bytes were verified above. Refresh only the temporary
   // checkout identity so generated platform headers do not make it stale.
-  await execute(['index'],
-    {env: {...process.env, INDEXER_CACHE: cppQualificationCache}});
+  await stampQualificationIdentity(cppQualificationDb);
   workspaceDbs.set('cpp-indexer', cppQualificationDb);
   const banking = manifest.workspaces.find((workspace) => workspace.name === 'banking');
   if (!banking) throw new Error('banking workspace is missing');
