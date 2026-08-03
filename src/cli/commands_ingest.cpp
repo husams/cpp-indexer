@@ -473,6 +473,8 @@ int cmd_index(const ParsedArgs &args, Context &ctx) {
       const bool current = all_files_current(db);
       if (!graph_enabled) {
         db.mark_transform_pipeline_pending("graph extraction disabled");
+      } else if (args.defer_transforms) {
+        db.mark_transform_pipeline_pending("derived publication deferred");
       } else if (!current) {
         db.mark_transform_pipeline_pending(
             "index has pending or selected files");

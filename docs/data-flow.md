@@ -23,7 +23,9 @@ flowchart LR
   rows with per-file `compile_options` + `driver`.
 - **Index** — `cmd_index` walks pending files and runs the
   [indexing engine](modules/ast.md) per TU (below).
-- **Resolve** — `cmd_resolve` → `Storage::resolve_pass()` (below).
+- **Resolve** — `cmd_resolve` → `Storage::resolve_pass()` (below). Indexing
+  normally publishes derived facts immediately; `--defer-transforms` leaves
+  the committed Layer-0 generation pending for a later DB-only resolve.
 - **Query** — [`graph`](modules/graph.md), `search`,
   [`analyze`](modules/astgraph.md#cidx-astgraph-vs-cidx-analyze).
 
@@ -55,7 +57,7 @@ sequenceDiagram
     end
     ENG->>DB: index_edges(main file)  [decl walk → body descent → ns-uses]
     CMD->>DB: replace_diagnostics + mark_file_indexed(md5, mtime)
-    Note over CMD,DB: `cidx resolve` runs afterward (see below)
+    Note over CMD,DB: publish derived facts now, or persist pending work with `--defer-transforms`
 ```
 
 `ast::run_index_one` implements steps 4–10; the per-TU stages are the named
@@ -88,8 +90,11 @@ retained as the conformance oracle until controlled planning/publication land.
 
 ## The resolve pass
 
-`cidx resolve` → `Storage::resolve_pass()` (`storage.cpp:4069`) runs pure SQL
-transforms over Layer-0 (no re-parsing) and stamps `meta.graph_resolved_at`:
+`cidx resolve` → `Storage::resolve_pass()` runs pure SQL transforms over
+Layer-0 (no re-parsing) and stamps `meta.graph_resolved_at`. The indexer records
+a trusted, durable union of pre-replacement and committed fact IDs for each TU.
+When a published baseline exists, the first four transforms consume that
+bounded change set; entity projection remains a generation-gated full rebuild:
 
 ```mermaid
 flowchart TD
@@ -114,3 +119,10 @@ flowchart TD
 
 Details of each product are in the [storage](modules/storage.md#the-resolve-pass)
 page.
+
+`--no-graph` and `--defer-transforms` are mutually exclusive. A no-graph run
+records `graph extraction disabled` and cannot be made ready by `cidx resolve`;
+the sources must first be re-indexed with graph extraction. Transform status
+persists execution mode, affected-key and row-work counters, input generation,
+duration, and any full-rebuild fallback reason. The same counters are emitted
+in `--profile-json` output under `transform.<id>.*`.

@@ -56,6 +56,7 @@ struct ParsedArgs {
   std::optional<std::string> usr;          // delete symbol --usr
   bool dry_run = false;                    // delete --dry-run
   bool no_graph = false;                   // index --no-graph
+  bool defer_transforms = false;           // index --defer-transforms
   bool no_front_end_reuse = false;         // index/resolve diagnostic control
   std::optional<std::string> profile_json; // index --profile-json PATH
   std::optional<std::string>

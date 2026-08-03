@@ -258,6 +258,7 @@ AssociationStats SqliteStorageService::associate_facts_for_file(
   }
   stats.attempted += definition_edge_rows + stats.inserted - base_inserted;
   stats.ignored = stats.attempted - stats.inserted;
+  note_transform_changes(file_id, symbol_ids, edge_ids, definition_ids);
   return stats;
 }
 

@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "CLI11.hpp"
+#include "application/requests.hpp"
 #include "util/errors.hpp"
 #include "util/pathutil.hpp"
 
@@ -135,6 +136,8 @@ void build_top_level(CLI::App &app, ParsedArgs &pa) {
                     "root");
   index->add_flag("--no-graph", pa.no_graph,
                   "skip relationship-graph extraction (calls, inherits, ...)");
+  index->add_flag("--defer-transforms", pa.defer_transforms,
+                  "persist extracted facts and defer derived publication");
   index->add_flag("--no-front-end-reuse", pa.no_front_end_reuse,
                   "disable optional front-end reuse (diagnostic; none is "
                   "currently shipped)");
@@ -911,6 +914,12 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
         "Usage: cidx " + pa.command +
         " [OPTIONS]\n"
         "cidx: error: --profile-sqlite-config requires --profile-json\n");
+  }
+  if (pa.command == "index" && pa.no_graph && pa.defer_transforms) {
+    throw UsageError("cidx: error: " +
+                         std::string(application::kIndexTransformFlagConflict) +
+                         "\n",
+                     2);
   }
   return pa;
 }

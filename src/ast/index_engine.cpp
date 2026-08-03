@@ -226,6 +226,7 @@ public:
         tu_(context.getTranslationUnitDecl()) {}
 
   void run() {
+    db_.capture_transform_changes_for_file(state_.rec->id);
     db_.delete_symbols_for_file(state_.rec->id);
     ExtractionPassRegistry registry;
     register_header_passes(registry);
@@ -755,6 +756,7 @@ private:
         routed_file_ids_.emplace(header.path, header.file_id);
         if (header.covered_by_current_config) {
           const profile::ScopedAccumulator persistence(persistence_seconds);
+          db_.capture_transform_changes_for_file(header.file_id);
           db_.delete_symbols_for_file(header.file_id);
         }
       }

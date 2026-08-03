@@ -110,8 +110,11 @@ feeds Layer-0 (`symbol`, `edge`, `edge_site`, `call_arg`, `template_*`,
 
 ## The resolve pass
 
-`cidx resolve` → `resolve_pass()` (`storage.cpp:4069`) runs pure-SQL transforms
-over Layer-0 and stamps `meta.graph_resolved_at`. See the
+`cidx resolve` → `resolve_pass()` runs pure-SQL transforms over Layer-0 and
+stamps `meta.graph_resolved_at`. The edge-count, multi-definition,
+possible-call, and virtual-dispatch passes update only the trusted per-TU
+change closure when a published full baseline exists; entity projection keeps
+its atomic full-rebuild contract. See the
 [data flow](../data-flow.md#the-resolve-pass) diagram; the sub-passes and their
 products:
 

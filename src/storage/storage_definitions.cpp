@@ -27,6 +27,32 @@ namespace cidx {
 
 using namespace detail;
 
+namespace {
+
+void stage_transform_changes(SqliteDb &db, const TransformChangeSet &changes) {
+  db.exec("CREATE TEMP TABLE IF NOT EXISTS cidx_transform_changes ("
+          "kind TEXT NOT NULL, id INTEGER NOT NULL, PRIMARY KEY(kind, id));"
+          "DELETE FROM temp.cidx_transform_changes");
+  auto insert =
+      db.prepare("INSERT OR IGNORE INTO temp.cidx_transform_changes(kind, id) "
+                 "VALUES (?, ?)");
+  const auto stage = [&](std::string_view kind,
+                         const std::vector<std::int64_t> &ids) {
+    for (const std::int64_t id : ids) {
+      insert.bind(1, kind);
+      insert.bind(2, id);
+      insert.step_done();
+      insert.reset();
+    }
+  };
+  stage("file", changes.file_ids);
+  stage("symbol", changes.symbol_ids);
+  stage("edge", changes.edge_ids);
+  stage("definition", changes.definition_ids);
+}
+
+} // namespace
+
 std::vector<int64_t>
 SqliteStorageService::symbol_ids_for_file(int64_t file_id) {
   // Definition site OR declaration site: a class declared in a header and
@@ -169,7 +195,7 @@ void SqliteStorageService::delete_edges_for_file(int64_t file_id) {
   st.step_done();
 }
 
-void SqliteStorageService::rollup_edge_counts() {
+TransformWork SqliteStorageService::rollup_edge_counts() {
   // For calls (1) and uses (7): set count = COUNT(edge_site) so the edge
   // reflects true site count after multi-TU indexing.
   db_.exec("UPDATE edge SET count = ("
@@ -178,9 +204,25 @@ void SqliteStorageService::rollup_edge_counts() {
            "WHERE kind IN (1, 7)"
            "  AND EXISTS (SELECT 1 FROM edge_site WHERE edge_site.edge_id = "
            "edge.id)");
+  return TransformWork{.rows_updated = db_.changes()};
 }
 
-void SqliteStorageService::materialize_dispatch_calls() {
+TransformWork
+SqliteStorageService::rollup_edge_counts(const TransformChangeSet &changes) {
+  stage_transform_changes(db_, changes);
+  auto update = db_.prepare(
+      "UPDATE edge SET count = (SELECT COUNT(*) FROM edge_site "
+      "WHERE edge_site.edge_id = edge.id) WHERE kind IN (1, 7) AND id IN "
+      "(SELECT id FROM temp.cidx_transform_changes WHERE kind = 'edge') "
+      "AND EXISTS (SELECT 1 FROM edge_site WHERE edge_site.edge_id = edge.id)");
+  update.step_done();
+  return TransformWork{
+      .rows_scanned = static_cast<std::int64_t>(changes.edge_ids.size()),
+      .rows_updated = db_.changes(),
+      .affected_keys = static_cast<std::int64_t>(changes.edge_ids.size())};
+}
+
+TransformWork SqliteStorageService::materialize_dispatch_calls() {
   // Materialise virtual-dispatch caller edges (kind 18, 'dispatch_calls').
   // A static 'calls' edge (1) into a virtual method B understates reality: at
   // run time the call can land on any method that overrides B, transitively
@@ -194,6 +236,7 @@ void SqliteStorageService::materialize_dispatch_calls() {
   // deleted and rebuilt each pass. Mirrors
   // indexer/storage.py:materialize_dispatch_calls() byte-identically.
   db_.exec("DELETE FROM edge WHERE kind = 18");
+  const std::int64_t deleted = db_.changes();
   db_.exec("WITH RECURSIVE dispatch(base_id, target_id) AS ("
            "    SELECT dst_id AS base_id, src_id AS target_id"
            "    FROM edge WHERE kind = 6"
@@ -208,6 +251,43 @@ void SqliteStorageService::materialize_dispatch_calls() {
            "JOIN dispatch d ON d.base_id = c.dst_id "
            "WHERE c.kind = 1 "
            "  AND c.src_id != d.target_id");
+  return TransformWork{.rows_inserted = db_.changes(), .rows_deleted = deleted};
+}
+
+TransformWork SqliteStorageService::materialize_dispatch_calls(
+    const TransformChangeSet &changes) {
+  stage_transform_changes(db_, changes);
+  db_.exec(
+      "CREATE TEMP TABLE IF NOT EXISTS cidx_dispatch_callers ("
+      "id INTEGER PRIMARY KEY); DELETE FROM temp.cidx_dispatch_callers; "
+      "INSERT OR IGNORE INTO temp.cidx_dispatch_callers(id) "
+      "WITH RECURSIVE family(id) AS ("
+      "  SELECT id FROM temp.cidx_transform_changes WHERE kind = 'symbol' "
+      "  UNION SELECT e.dst_id FROM edge e JOIN family f ON e.src_id = f.id "
+      "        WHERE e.kind = 6 "
+      "  UNION SELECT e.src_id FROM edge e JOIN family f ON e.dst_id = f.id "
+      "        WHERE e.kind = 6"
+      ") SELECT id FROM temp.cidx_transform_changes WHERE kind = 'symbol' "
+      "UNION SELECT c.src_id FROM edge c JOIN family f ON c.dst_id = f.id "
+      "WHERE c.kind = 1");
+  db_.exec("DELETE FROM edge WHERE kind = 18 AND src_id IN "
+           "(SELECT id FROM temp.cidx_dispatch_callers)");
+  const std::int64_t deleted = db_.changes();
+  db_.exec("WITH RECURSIVE dispatch(base_id, target_id) AS ("
+           "  SELECT dst_id, src_id FROM edge WHERE kind = 6 "
+           "  UNION SELECT d.base_id, o.src_id FROM dispatch d "
+           "        JOIN edge o ON o.dst_id = d.target_id AND o.kind = 6"
+           ") INSERT OR IGNORE INTO edge (src_id, dst_id, kind, count) "
+           "SELECT c.src_id, d.target_id, 18, c.count FROM edge c "
+           "JOIN dispatch d ON d.base_id = c.dst_id "
+           "JOIN temp.cidx_dispatch_callers a ON a.id = c.src_id "
+           "WHERE c.kind = 1 AND c.src_id != d.target_id");
+  auto count = db_.prepare("SELECT COUNT(*) FROM temp.cidx_dispatch_callers");
+  const std::int64_t affected = count.step() ? count.col_int64(0) : 0;
+  return TransformWork{.rows_scanned = affected,
+                       .rows_inserted = db_.changes(),
+                       .rows_deleted = deleted,
+                       .affected_keys = affected};
 }
 
 // -- v27: multi-definition (per-backend redefinition). Mirrors
@@ -318,16 +398,33 @@ void SqliteStorageService::delete_definitions_for_file(int64_t file_id) {
   st.step_done();
 }
 
-void SqliteStorageService::set_multi_def() {
+TransformWork SqliteStorageService::set_multi_def() {
   db_.exec("UPDATE symbol SET multi_def = 0");
+  std::int64_t updated = db_.changes();
   db_.exec(
       "UPDATE symbol SET multi_def = "
       "  (SELECT COUNT(*) FROM definition d WHERE d.symbol_id = symbol.id) "
       "WHERE id IN (SELECT DISTINCT symbol_id FROM definition)");
+  updated += db_.changes();
+  return TransformWork{.rows_updated = updated};
 }
 
-void SqliteStorageService::materialize_possible_calls() {
+TransformWork
+SqliteStorageService::set_multi_def(const TransformChangeSet &changes) {
+  stage_transform_changes(db_, changes);
+  db_.exec(
+      "UPDATE symbol SET multi_def = (SELECT COUNT(*) FROM definition d "
+      "WHERE d.symbol_id = symbol.id) WHERE id IN "
+      "(SELECT id FROM temp.cidx_transform_changes WHERE kind = 'symbol')");
+  return TransformWork{
+      .rows_scanned = static_cast<std::int64_t>(changes.symbol_ids.size()),
+      .rows_updated = db_.changes(),
+      .affected_keys = static_cast<std::int64_t>(changes.symbol_ids.size())};
+}
+
+TransformWork SqliteStorageService::materialize_possible_calls() {
   db_.exec("DELETE FROM possible_call");
+  const std::int64_t deleted = db_.changes();
   db_.exec(
       "INSERT OR IGNORE INTO possible_call (src_def_id, dst_def_id, count) "
       "SELECT de.src_def_id, td.id, SUM(de.count) "
@@ -336,6 +433,41 @@ void SqliteStorageService::materialize_possible_calls() {
       "JOIN definition td ON td.symbol_id = de.dst_id "
       "WHERE de.kind = 1 AND s.multi_def > 1 "
       "GROUP BY de.src_def_id, td.id");
+  return TransformWork{.rows_inserted = db_.changes(), .rows_deleted = deleted};
+}
+
+TransformWork SqliteStorageService::materialize_possible_calls(
+    const TransformChangeSet &changes) {
+  stage_transform_changes(db_, changes);
+  db_.exec(
+      "CREATE TEMP TABLE IF NOT EXISTS cidx_possible_call_sources ("
+      "id INTEGER PRIMARY KEY); DELETE FROM temp.cidx_possible_call_sources; "
+      "INSERT OR IGNORE INTO temp.cidx_possible_call_sources(id) "
+      "SELECT id FROM temp.cidx_transform_changes WHERE kind = 'definition' "
+      "UNION SELECT DISTINCT de.src_def_id FROM def_edge de JOIN "
+      "temp.cidx_transform_changes c ON c.kind = 'symbol' AND c.id = de.dst_id "
+      "WHERE de.kind = 1");
+  db_.exec("DELETE FROM possible_call WHERE src_def_id IN "
+           "(SELECT id FROM temp.cidx_possible_call_sources) OR dst_def_id IN "
+           "(SELECT d.id FROM definition d JOIN temp.cidx_transform_changes c "
+           "ON c.kind = 'symbol' AND c.id = d.symbol_id)");
+  const std::int64_t deleted = db_.changes();
+  db_.exec(
+      "INSERT OR IGNORE INTO possible_call (src_def_id, dst_def_id, count) "
+      "SELECT de.src_def_id, td.id, SUM(de.count) FROM def_edge de "
+      "JOIN symbol s ON s.id = de.dst_id "
+      "JOIN definition td ON td.symbol_id = de.dst_id "
+      "WHERE de.kind = 1 AND s.multi_def > 1 AND (de.src_def_id IN "
+      "(SELECT id FROM temp.cidx_possible_call_sources) OR de.dst_id IN "
+      "(SELECT id FROM temp.cidx_transform_changes WHERE kind = 'symbol')) "
+      "GROUP BY de.src_def_id, td.id");
+  auto count =
+      db_.prepare("SELECT COUNT(*) FROM temp.cidx_possible_call_sources");
+  const std::int64_t affected = count.step() ? count.col_int64(0) : 0;
+  return TransformWork{.rows_scanned = affected,
+                       .rows_inserted = db_.changes(),
+                       .rows_deleted = deleted,
+                       .affected_keys = affected};
 }
 
 std::vector<Edge> SqliteStorageService::cross_repo_edges() {

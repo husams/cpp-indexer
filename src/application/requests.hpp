@@ -13,11 +13,15 @@ namespace cidx::application {
 
 enum class IndexAction : std::uint8_t { update, rebuild, status, explain };
 
+inline constexpr const char *kIndexTransformFlagConflict =
+    "--no-graph and --defer-transforms are mutually exclusive";
+
 struct IndexRequest {
   IndexAction action = IndexAction::update;
   std::vector<std::string> files;
   std::optional<std::string> source;
   bool graph = true;
+  bool defer_transforms = false;
   bool autoderive_labels = true;
   bool no_front_end_reuse = false;
   bool json = false;

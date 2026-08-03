@@ -160,7 +160,7 @@ std::int64_t integer_field(const cidx::json_out::Value &object,
 
 std::optional<std::int64_t>
 optional_integer_field(const cidx::json_out::Value &object,
-                      std::string_view name) {
+                       std::string_view name) {
   const auto *value = object_field(object, name);
   REQUIRE(value != nullptr);
   if (value->t == cidx::json_out::Value::T::Null) {
@@ -170,9 +170,8 @@ optional_integer_field(const cidx::json_out::Value &object,
   return value->i;
 }
 
-std::vector<std::string>
-string_array_field(const cidx::json_out::Value &object,
-                  std::string_view name) {
+std::vector<std::string> string_array_field(const cidx::json_out::Value &object,
+                                            std::string_view name) {
   const auto *value = object_field(object, name);
   REQUIRE(value != nullptr);
   REQUIRE(value->t == cidx::json_out::Value::T::Arr);
@@ -184,12 +183,13 @@ string_array_field(const cidx::json_out::Value &object,
   return result;
 }
 
-bool has_string(const std::vector<std::string> &values, std::string_view needle) {
+bool has_string(const std::vector<std::string> &values,
+                std::string_view needle) {
   return std::find(values.begin(), values.end(), needle) != values.end();
 }
 
-std::vector<std::string> diagnostic_codes(
-    const cidx::protocol::ResultEnvelope &response) {
+std::vector<std::string>
+diagnostic_codes(const cidx::protocol::ResultEnvelope &response) {
   std::vector<std::string> result;
   for (const auto &diagnostic : response.diagnostics) {
     result.push_back(diagnostic.code);
@@ -344,6 +344,27 @@ TEST_CASE("unknown actions and scopes fail explicitly") {
   REQUIRE(invalid_scope.status == cidx::protocol::Status::Error);
   CHECK(invalid_scope.diagnostics.front().code == "invalid_input");
   CHECK(services.calls.empty());
+}
+
+TEST_CASE("typed index parser matches deferred transform validation") {
+  const auto parsed =
+      cidx::cli::parse_application_request({"index", "--defer-transforms"});
+  REQUIRE(
+      std::holds_alternative<cidx::application::CommandRequest>(parsed.value));
+  const auto &request =
+      std::get<cidx::application::CommandRequest>(parsed.value);
+  const auto *index = std::get_if<cidx::application::IndexRequest>(&request);
+  REQUIRE(index != nullptr);
+  CHECK(index->defer_transforms);
+
+  CHECK_THROWS_WITH_AS(
+      [] {
+        const auto ignored = cidx::cli::parse_application_request(
+            {"index", "--no-graph", "--defer-transforms"});
+        (void)ignored;
+      }(),
+      "cidx: error: --no-graph and --defer-transforms are mutually exclusive\n",
+      cidx::UsageError);
 }
 
 TEST_CASE("capability policy rejects writes before the service") {
@@ -859,9 +880,10 @@ TEST_CASE("agent catalog and versioned read-only budget contract") {
   CHECK(response.completeness.truncated);
   CHECK(response.completeness.budget == std::optional<int64_t>{1});
   CHECK(response.status == cidx::protocol::Status::Partial);
-  CHECK(std::any_of(
-      response.diagnostics.begin(), response.diagnostics.end(),
-      [](const auto &diagnostic) { return diagnostic.code == "missing_evidence"; }));
+  CHECK(std::any_of(response.diagnostics.begin(), response.diagnostics.end(),
+                    [](const auto &diagnostic) {
+                      return diagnostic.code == "missing_evidence";
+                    }));
   CHECK(cidx::json_out::dumps_indent2(response.result).find("\"index\"") !=
         std::string::npos);
   const auto encoded = tools.encode_response(request, response);
@@ -873,9 +895,11 @@ TEST_CASE("agent catalog and versioned read-only budget contract") {
   const auto evidence_response = tools.invoke(request, context);
   CHECK(evidence_response.status == cidx::protocol::Status::Unknown);
   CHECK(!evidence_response.completeness.truncated);
-  CHECK(std::any_of(
-      evidence_response.diagnostics.begin(), evidence_response.diagnostics.end(),
-      [](const auto &diagnostic) { return diagnostic.code == "missing_evidence"; }));
+  CHECK(std::any_of(evidence_response.diagnostics.begin(),
+                    evidence_response.diagnostics.end(),
+                    [](const auto &diagnostic) {
+                      return diagnostic.code == "missing_evidence";
+                    }));
 
   const auto decoded = tools.decode_request(
       R"json({"version":1,"tool":"explain","cxq":"codebase()","budget":{"max_results":2}})json");
@@ -892,8 +916,8 @@ TEST_CASE("agent catalog and versioned read-only budget contract") {
 }
 
 TEST_CASE("agent tools share the cross-surface golden fixture matrix") {
-  const auto fixture = cidx::json_read::parse(
-      read_file(CIDX_AGENT_MATRIX_GOLDEN));
+  const auto fixture =
+      cidx::json_read::parse(read_file(CIDX_AGENT_MATRIX_GOLDEN));
   const auto *cases = object_field(fixture, "cases");
   REQUIRE(cases != nullptr);
   REQUIRE(cases->t == cidx::json_out::Value::T::Arr);
@@ -928,7 +952,7 @@ TEST_CASE("agent tools share the cross-surface golden fixture matrix") {
     const std::string tool_name = string_field(golden, "tool");
     cidx::agent::Request request;
     request.tool = tool_name == "explain" ? cidx::agent::Tool::explain
-                                            : cidx::agent::Tool::query;
+                                          : cidx::agent::Tool::query;
     request.query.expression = string_field(golden, "cxq");
     request.budget.max_results = integer_field(golden, "max_results");
     const auto response = cidx::agent::ToolService::invoke(request, context);
@@ -950,7 +974,8 @@ TEST_CASE("agent tools share the cross-surface golden fixture matrix") {
 
     const auto expected_shape = object_field(golden, "expected_shape");
     if (expected_shape->t == cidx::json_out::Value::T::Str) {
-      const auto shape_name = tool_name == "explain" ? "execution_shape" : "shape";
+      const auto shape_name =
+          tool_name == "explain" ? "execution_shape" : "shape";
       CHECK(string_field(*result, shape_name) == expected_shape->s);
     }
     const auto expected_count = object_field(golden, "expected_count");

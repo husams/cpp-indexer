@@ -15,6 +15,8 @@ enum class TransformRunStatus : std::uint8_t {
   stale
 };
 
+enum class TransformExecutionMode : std::uint8_t { full, incremental };
+
 enum class TransformInputKind : std::uint8_t {
   source,
   catalog,
@@ -91,6 +93,34 @@ struct TransformDescriptor {
   std::string input_catalog = "cidx-core";
   std::string output_catalog = "cidx-core";
   TransformImplementationProvider implementation_provider;
+  bool supports_incremental = false;
+};
+
+// Durable extraction-to-publication handoff. Every id is the union of the
+// pre-replacement and committed post-replacement Layer-0 facts for the TUs in
+// this generation. A trusted set is complete for those TUs and may therefore
+// replace global input-identity scans.
+struct TransformChangeSet {
+  std::vector<std::int64_t> file_ids;
+  std::vector<std::int64_t> symbol_ids;
+  std::vector<std::int64_t> edge_ids;
+  std::vector<std::int64_t> definition_ids;
+  std::uint64_t generation = 0;
+  bool trusted = false;
+
+  [[nodiscard]] bool empty() const {
+    return file_ids.empty() && symbol_ids.empty() && edge_ids.empty() &&
+           definition_ids.empty();
+  }
+};
+
+struct TransformWork {
+  std::int64_t rows_scanned = 0;
+  std::int64_t rows_inserted = 0;
+  std::int64_t rows_updated = 0;
+  std::int64_t rows_deleted = 0;
+  std::int64_t affected_keys = 0;
+  std::int64_t input_identity_rows_scanned = 0;
 };
 
 struct TransformRun {
@@ -106,6 +136,9 @@ struct TransformRun {
   TransformApplicability applicability = TransformApplicability::applicable;
   TransformCompleteness completeness = TransformCompleteness::complete;
   std::vector<std::string> changed_inputs;
+  TransformExecutionMode execution_mode = TransformExecutionMode::full;
+  TransformWork work;
+  std::string fallback_reason;
 };
 
 struct TransformReport {
@@ -128,11 +161,13 @@ struct TransformFactSetStatus {
 };
 
 [[nodiscard]] const char *transform_run_status_name(TransformRunStatus status);
+[[nodiscard]] const char *
+transform_execution_mode_name(TransformExecutionMode mode);
 [[nodiscard]] const char *transform_input_kind_name(TransformInputKind kind);
-[[nodiscard]] const char *transform_applicability_name(
-    TransformApplicability applicability);
-[[nodiscard]] const char *transform_completeness_name(
-    TransformCompleteness completeness);
+[[nodiscard]] const char *
+transform_applicability_name(TransformApplicability applicability);
+[[nodiscard]] const char *
+transform_completeness_name(TransformCompleteness completeness);
 
 class TransformRegistry {
 public:

@@ -747,6 +747,19 @@ TEST_CASE("args: index collects FILE... and --source") {
   CHECK(*pa.source == "comp");
 }
 
+TEST_CASE("args: deferred transforms exclude graph-disabled extraction") {
+  const cli::ParsedArgs deferred =
+      cli::parse_args({"index", "a.cpp", "--defer-transforms"});
+  CHECK(deferred.defer_transforms);
+  CHECK_FALSE(deferred.no_graph);
+  const ParseFail conflict =
+      parse_fail({"index", "--no-graph", "--defer-transforms"});
+  CHECK(conflict.code == 2);
+  CHECK(conflict.msg ==
+        "cidx: error: --no-graph and --defer-transforms are mutually "
+        "exclusive\n");
+}
+
 TEST_CASE("args: index accepts profiling paths and documents the opt-in flag") {
   const cli::ParsedArgs parsed = cli::parse_args(
       {"index", "a.cpp", "--profile-json", "/tmp/cidx-profile.json",

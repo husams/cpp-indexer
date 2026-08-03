@@ -136,6 +136,10 @@ void log_parse_failure(Logger *logger, const std::string &path,
 protocol::ResultEnvelope
 StorageApplicationOperations::execute(const IndexRequest &request,
                                       ApplicationContext &context) {
+  if (!request.graph && request.defer_transforms) {
+    return service_error("index", context, "invalid_input",
+                         kIndexTransformFlagConflict);
+  }
   if (request.action == IndexAction::status &&
       context.read_ports().schema != nullptr) {
     const Stats stats = context.read_ports().schema->stats();
@@ -372,6 +376,26 @@ StorageApplicationOperations::execute(const IndexRequest &request,
   }
   if (!incomplete) {
     db.stamp_index_identity();
+  }
+  if (!request.graph) {
+    db.mark_transform_pipeline_pending("graph extraction disabled");
+  } else if (request.defer_transforms) {
+    db.mark_transform_pipeline_pending("derived publication deferred");
+  } else if (incomplete) {
+    db.mark_transform_pipeline_pending("index has pending or selected files");
+  } else {
+    const TransformReport transforms = db.run_transform_pipeline();
+    if (transforms.failed) {
+      result.status = protocol::Status::Error;
+      result.completeness.state = "unknown";
+      result.diagnostics.push_back(protocol::Diagnostic{
+          .code = "backend_error",
+          .severity = "error",
+          .message = "derived transform publication failed",
+          .next_action = std::nullopt});
+    } else {
+      db.stamp_graph_resolved();
+    }
   }
   const IndexIdentity identity = db.index_identity();
   result.identity.index = identity.freshness;

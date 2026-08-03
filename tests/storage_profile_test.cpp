@@ -181,3 +181,23 @@ TEST_CASE("profile records prepared SQL text bytes") {
                             std::istreambuf_iterator<char>());
   CHECK(profile.find("prepared_sql_text_bytes") != std::string::npos);
 }
+
+TEST_CASE("profile separates transform timing and row work") {
+  const std::string directory = make_temp_dir();
+  const std::string profile_path = directory + "/transforms.json";
+  {
+    cidx::profile::Session session(profile_path, std::nullopt);
+    cidx::Storage database(":memory:");
+    REQUIRE(database.run_transform_pipeline().complete);
+    session.finish();
+  }
+  std::ifstream input(profile_path);
+  const std::string profile((std::istreambuf_iterator<char>(input)),
+                            std::istreambuf_iterator<char>());
+  CHECK(profile.find("transform.edge-site-count-rollup") != std::string::npos);
+  CHECK(profile.find("rows_scanned") != std::string::npos);
+  CHECK(profile.find("rows_inserted") != std::string::npos);
+  CHECK(profile.find("rows_updated") != std::string::npos);
+  CHECK(profile.find("rows_deleted") != std::string::npos);
+  CHECK(profile.find("affected_keys") != std::string::npos);
+}
