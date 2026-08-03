@@ -18,6 +18,8 @@
 
 namespace cidx::ast {
 
+class FactBatchArtifactCodec;
+
 enum class FactFamily : std::uint8_t {
   symbols,
   declaration_sites,
@@ -97,6 +99,7 @@ private:
     std::string producer;
     std::uint32_t producer_version = 1;
     FactCompleteness completeness = FactCompleteness::complete;
+    bool canonical = false;
     FactRecords records;
     std::vector<FileFactPartition> partitions;
     std::map<std::int64_t, std::string> symbol_keys;
@@ -107,9 +110,11 @@ private:
   };
 
   explicit FactBatch(std::shared_ptr<const Data> data);
+  [[nodiscard]] auto has_canonical_layout() const -> bool;
   std::shared_ptr<const Data> data_;
 
   friend class FactBatchRecorder;
+  friend class FactBatchArtifactCodec;
 };
 
 struct FactBatchOperationCounters {
