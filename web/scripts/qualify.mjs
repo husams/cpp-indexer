@@ -18,6 +18,11 @@ const sqliteJson = async (db, sql) => {
   return JSON.parse(stdout || '[]');
 };
 
+const trackedFiles = async () => {
+  const {stdout} = await run('git', ['ls-files', '-z'], {cwd: root});
+  return new Set(stdout.split('\0').filter(Boolean));
+};
+
 const sourceFingerprint = async (paths) => {
   const {stdout} = await run('git', ['ls-files', '--', ...paths], {cwd: root});
   const digest = createHash('sha256');
@@ -157,17 +162,21 @@ const relocateTrackedWorkspacePaths = (db) => {
 };
 
 const stampQualificationIdentity = async (db) => {
+  const tracked = await trackedFiles();
   const files = await sqliteJson(db,
-    "SELECT c.name AS component_name, c.path AS component_path, " +
+    "SELECT f.id AS file_id, c.name AS component_name, c.path AS component_path, " +
     "c.kind AS component_kind, c.version AS component_version, " +
     "r.name AS repository_name, r.remote_url AS repository_remote, " +
-    "d.path AS directory_path, f.name AS file_name, f.indexed " +
+    "d.path AS directory_path, f.name AS file_name, f.compile_options, f.driver, " +
+    "f.indexed " +
     "FROM file f JOIN directory d ON d.id=f.directory_id " +
     "JOIN component c ON c.id=d.component_id " +
     "LEFT JOIN repository r ON r.id=c.repository_id " +
     "ORDER BY c.name,c.path,c.kind,COALESCE(c.version,'<null>')," +
     "COALESCE(r.name,'<null>'),COALESCE(r.remote_url,'<null>'),d.path,f.name");
   let manifest = '';
+  let configManifest = '';
+  const generatedFileIds = [];
   for (const file of files) {
     if (file.component_path !== '.' ||
         file.repository_name !== 'cpp-indexer-self-host') {
@@ -176,17 +185,39 @@ const stampQualificationIdentity = async (db) => {
     if (Number(file.indexed) !== 1) {
       throw new Error('cpp-indexer qualification input has pending files');
     }
-    const bytes = await readFile(resolve(root, file.directory_path, file.file_name));
+    const path = file.directory_path === '.' ? file.file_name :
+      `${file.directory_path}/${file.file_name}`;
+    if (!tracked.has(path)) {
+      if (!path.startsWith('build/generated/')) {
+        throw new Error(`cpp-indexer qualification input is not Git-tracked: ${path}`);
+      }
+      if (!Number.isSafeInteger(Number(file.file_id))) {
+        throw new Error(`cpp-indexer qualification input has an invalid file id: ${path}`);
+      }
+      generatedFileIds.push(Number(file.file_id));
+      console.warn(`cpp-indexer qualification omits untracked generated input: ${path}`);
+      continue;
+    }
+    const bytes = await readFile(resolve(root, path));
     const md5 = createHash('md5').update(bytes).digest('hex');
     const identity = [file.component_name, file.component_path, file.component_kind,
       file.component_version, file.repository_name, file.repository_remote,
       file.directory_path, file.file_name]
       .map((value) => value === null ? '<null>' : String(value)).join('\0');
     manifest += `${identity}\0${md5}\0${file.indexed ? '1' : '0'}\n`;
+    const compileOptions = file.compile_options === null ? '<null>' : file.compile_options;
+    const driver = file.driver === null ? '<null>' : file.driver;
+    configManifest += `${identity}\0${compileOptions}\0${driver}\n`;
+  }
+  if (generatedFileIds.length > 0) {
+    await sqlite(db, `PRAGMA foreign_keys=ON; DELETE FROM file WHERE id IN (` +
+      `${generatedFileIds.join(',')});`);
   }
   const fingerprint = createHash('sha1').update(manifest).digest('hex');
+  const configFingerprint = createHash('sha1').update(configManifest).digest('hex');
   await upsertMeta(db, 'source_fingerprint', fingerprint);
   await upsertMeta(db, 'source_revision', `content-sha1:${fingerprint}`);
+  await upsertMeta(db, 'index_config_fingerprint', configFingerprint);
 };
 
 const prepareScenarioState = async (db, state) => {
