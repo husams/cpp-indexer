@@ -82,6 +82,11 @@ struct Fixture {
     REQUIRE(route.partitions.size() == 2);
     const auto &main = route.partitions[route.main_partition];
     const auto &header = route.partitions[1];
+    const std::int64_t main_handle = main.transient_file_handle.value_or(-1);
+    const std::int64_t header_handle =
+        header.transient_file_handle.value_or(-1);
+    REQUIRE(main_handle >= 0);
+    REQUIRE(header_handle >= 0);
     recorder.set_partition(main.partition, main.transient_file_handle);
     recorder.emit(symbol(main.partition, "usr-main", "main"));
     const std::int64_t main_symbol =
@@ -104,7 +109,7 @@ struct Fixture {
     const std::int64_t relation = recorder.add_edge(
         {.src_id = main_symbol, .dst_id = header_symbol, .kind = 1});
     recorder.add_edge_site({.edge_id = relation,
-                            .file_id = *main.transient_file_handle,
+                            .file_id = main_handle,
                             .line = 4,
                             .col = 3,
                             .recv_src_kind = "local",
@@ -113,7 +118,9 @@ struct Fixture {
         {.type_key = "type:int", .spelling = "int", .kind = 1});
     recorder.add_symbol_type(main_symbol, 1, type);
     static_cast<void>(recorder.get_or_create_definition(
-        main_symbol, *main.transient_file_handle, 1, 1, 1, 8, std::nullopt));
+        main_symbol, main_handle, 1, 1, 1, 8, std::nullopt));
+    static_cast<void>(recorder.get_or_create_definition(
+        header_symbol, header_handle, 1, 1, 1, 8, std::nullopt));
     recorder.emit(
         ast::DiagnosticFactRecord{.partition = main.partition,
                                   .severity = ast::DiagnosticSeverity::warning,
@@ -179,7 +186,7 @@ TEST_CASE("FactBatchWriter publishes the golden phase contract set-wise") {
   CHECK(result.symbol_ids.size() == 3);
   CHECK(result.relation_ids.size() == 1);
   CHECK(result.type_ids.size() == 1);
-  CHECK(result.definition_ids.size() == 1);
+  CHECK(result.definition_ids.size() == 2);
   CHECK(fixture.storage.lookup_symbols_by_usr("usr-main").size() == 1);
   const auto external = fixture.storage.lookup_symbols_by_usr("usr-external");
   REQUIRE(external.size() == 1);
@@ -331,18 +338,48 @@ TEST_CASE("FactBatchWriter captures incremental transform invalidation") {
   INFO(initial.error.value_or(""));
   REQUIRE(initial.ok());
   REQUIRE(fixture.storage.run_transform_pipeline().complete);
-  CHECK(fixture.storage.pending_transform_changes().empty());
+  const auto clean_changes = fixture.storage.pending_transform_changes();
+  CHECK(clean_changes.empty());
+
+  const auto header_file =
+      fixture.storage.get_file("/tmp/cidx-s073-writer/header.hpp");
+  REQUIRE(header_file.has_value());
+  std::int64_t header_file_id = -1;
+  if (header_file) {
+    header_file_id = header_file->id;
+  }
+  REQUIRE(header_file_id >= 0);
+  auto header_symbol = fixture.storage.raw_db().prepare(
+      "SELECT id FROM symbol WHERE usr='usr-header'");
+  REQUIRE(header_symbol.step());
+  const std::int64_t header_symbol_id = header_symbol.col_int64(0);
+  auto header_edge = fixture.storage.raw_db().prepare(
+      "SELECT id FROM edge WHERE src_id=? OR dst_id=? ORDER BY id LIMIT 1");
+  header_edge.bind(1, header_symbol_id);
+  header_edge.bind(2, header_symbol_id);
+  REQUIRE(header_edge.step());
+  const std::int64_t header_edge_id = header_edge.col_int64(0);
+  auto header_definition = fixture.storage.raw_db().prepare(
+      "SELECT id FROM definition WHERE file_id=? ORDER BY id LIMIT 1");
+  header_definition.bind(1, header_file_id);
+  REQUIRE(header_definition.step());
+  const std::int64_t header_definition_id = header_definition.col_int64(0);
 
   const auto replacement = writer.apply(batch, fixture.context());
   INFO(replacement.error.value_or(""));
   REQUIRE(replacement.ok());
   const auto changes = fixture.storage.pending_transform_changes();
-  CHECK(changes.generation > 0);
+  CHECK(changes.generation > clean_changes.generation);
   CHECK(std::ranges::find(changes.file_ids, fixture.main_file) !=
         changes.file_ids.end());
-  CHECK_FALSE(changes.symbol_ids.empty());
-  CHECK_FALSE(changes.edge_ids.empty());
-  CHECK_FALSE(changes.definition_ids.empty());
+  CHECK(std::ranges::find(changes.file_ids, header_file_id) !=
+        changes.file_ids.end());
+  CHECK(std::ranges::find(changes.symbol_ids, header_symbol_id) !=
+        changes.symbol_ids.end());
+  CHECK(std::ranges::find(changes.edge_ids, header_edge_id) !=
+        changes.edge_ids.end());
+  CHECK(std::ranges::find(changes.definition_ids, header_definition_id) !=
+        changes.definition_ids.end());
 }
 
 } // namespace

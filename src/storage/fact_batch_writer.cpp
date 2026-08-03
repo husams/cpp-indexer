@@ -2167,13 +2167,18 @@ auto FactBatchWriter::apply(const ast::FactBatch &batch,
     }
 
     // Capture the previous persistent identities before any lifecycle cleanup
-    // or upsert mutates them. Incremental transforms consume this change set
-    // after publication; newly created routes are excluded because they have
-    // no prior persistent facts to invalidate.
+    // or upsert mutates them. Incremental transforms consume this change set.
+    // Owned-header candidates do not carry existing_file_id, so use the file
+    // id resolved above for every route whose prior facts will be cleaned.
     for (const ast::PlannedFileRoute &route : context.route_plan.routes()) {
       if (route.translation_unit == context.translation_unit &&
-          route.cleanup_symbols && route.existing_file_id) {
-        storage_.capture_transform_changes_for_file(*route.existing_file_id);
+          route.cleanup_symbols) {
+        if (!route.extraction.transient_file_handle) {
+          throw StorageError("publication route has no transient file handle");
+        }
+        const std::int64_t file_id = route.existing_file_id.value_or(
+            result.file_ids.at(*route.extraction.transient_file_handle));
+        storage_.capture_transform_changes_for_file(file_id);
       }
     }
 
