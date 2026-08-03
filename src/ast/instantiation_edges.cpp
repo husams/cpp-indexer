@@ -107,6 +107,14 @@ void emit_owner_promotion(DeclarationIdentityResolver &identity,
   if (owner == nullptr) {
     return;
   }
+  const std::string owner_usr = usr_for_decl(owner);
+  if (!owner_usr.empty()) {
+    if (auto method = mint.build(m)) {
+      method->parent_usr = owner_usr;
+      method->is_instantiation = is_template_instantiation(m);
+      static_cast<void>(identity.mint_symbol(*method));
+    }
+  }
   const auto *ospec =
       llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(owner);
   if (ospec == nullptr) {
@@ -179,15 +187,9 @@ void emit_callable_template_identity(
   const std::string prim_usr = usr_for_decl(info.primary);
   const std::string fd_usr = usr_for_decl(fd);
   if (!prim_usr.empty() && prim_usr != fd_usr) {
-    std::optional<std::int64_t> prim = identity.lookup_symbol_id(
-        prim_usr,
-        expansion_loc(mint.context(), info.primary->getLocation()).file);
-    if (!prim) {
-      if (const auto request = mint.build(info.primary)) {
-        prim = identity.mint_symbol(*request);
-      }
-    }
-    if (prim) {
+    if (const auto prim = identity.lookup_symbol_id(
+            prim_usr,
+            expansion_loc(mint.context(), info.primary->getLocation()).file)) {
       EdgeRecord e;
       e.src_id = dst_id;
       e.dst_id = *prim;

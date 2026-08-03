@@ -72,6 +72,23 @@ The production comparison harness accepts `--baseline-cidx` for paired
 pre-writer/candidate trials. S-073 does not change PRAGMAs or recovery policy,
 and it retains both binary/NOCASE spelling and qualified-name index pairs.
 
+TEMP staging and observed per-family outcome accounting add a fixed cost on
+very small cold translation units. Qualification therefore reports cold and
+hot one-file/four-file shapes separately from the 16-file scale shape: the
+small cold shapes may regress modestly while hot per-TU publication and scale
+must remain within the story's measured gates. This is an explicit throughput
+tradeoff for atomic set-based publication and truthful insert/update/ignore
+telemetry, not an unmeasured change.
+
+`ast::ExtractedFactPublication` is the stable application-neutral seam used by
+the live writer and by future TU-cache serialization/replay. It carries the
+canonical batch and frozen route/configuration context without exposing this
+module's report types. A cached artifact must also validate the persistent
+symbol-identity state described by the
+[FactBatch compatibility contract](../fact-batch.md#identity-and-partitioning);
+on mismatch the caller re-extracts, and every successful publication still
+passes through `FactBatchWriter`.
+
 ### `sqlite.hpp`
 
 A minimal wrapper: `Db` (open/exec/prepare), prepared `Stmt` with

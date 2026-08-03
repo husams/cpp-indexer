@@ -13,7 +13,6 @@ set(CIDX_DEFAULT_TESTS
   storage_profile_test
   sqlite_reuse_test
   storage_ports_test
-  storage_sink_test
   storage_artifact_test
   graph_storage_test
   graph_query_test
@@ -28,7 +27,6 @@ set(CIDX_DEFAULT_TESTS
   workspace_context_test
   ast_pass_test
   fact_batch_pipeline_test
-  fact_batch_storage_replay_test
   fact_batch_writer_contract_test
   fact_batch_complexity_test
   owned_header_plan_test

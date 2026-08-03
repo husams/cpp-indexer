@@ -291,6 +291,15 @@ private:
       -> std::string;
   [[nodiscard]] static auto name_kind_key(std::string_view name,
                                           std::string_view kind) -> std::string;
+  [[nodiscard]] auto source_independent_symbol_id(std::string_view usr)
+      -> std::optional<std::int64_t>;
+  void enrich_minted_symbol(std::int64_t symbol_id, const MintRequest &request);
+  void add_mint_declaration(const std::vector<std::size_t> &positions,
+                            const MintRequest &request);
+  [[nodiscard]] auto
+  create_minted_symbol(const MintRequest &request,
+                       const std::optional<std::string> &source)
+      -> std::int64_t;
   [[nodiscard]] static auto edge_key(const EdgeRecord &edge) -> std::string;
   [[nodiscard]] auto build_batch(bool canonical) const -> FactBatch;
   void append_symbol_records(FactBatch::Data &data, Memberships &memberships,

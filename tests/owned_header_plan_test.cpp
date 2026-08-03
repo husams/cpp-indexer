@@ -1,19 +1,13 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest/doctest.h"
 
-#include "ast/controlled_header_writer.hpp"
 #include "ast/fact_extraction.hpp"
 #include "ast/owned_header_plan.hpp"
-#include "ast/storage_symbol_sink.hpp"
-#include "storage/sqlite_adapters.hpp"
-#include "storage/storage.hpp"
 
-#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
-#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -66,58 +60,6 @@ auto descriptor() -> ast::ExtractionPassDescriptor {
           .budget = {.declared = true}};
 }
 
-class TemporaryDatabase {
-public:
-  TemporaryDatabase()
-      : path_(
-            std::filesystem::temp_directory_path() /
-            ("cidx-s099-plan-" +
-             std::to_string(
-                 std::chrono::steady_clock::now().time_since_epoch().count()) +
-             ".db")),
-        storage_(path_.string()) {
-    static_cast<void>(storage_.add_component("s099", "/tmp/cidx-s099", "repo"));
-  }
-
-  ~TemporaryDatabase() {
-    std::error_code ignored;
-    static_cast<void>(std::filesystem::remove(path_, ignored));
-  }
-
-  TemporaryDatabase(const TemporaryDatabase &) = delete;
-  TemporaryDatabase &operator=(const TemporaryDatabase &) = delete;
-
-  [[nodiscard]] auto storage() -> Storage & { return storage_; }
-
-private:
-  std::filesystem::path path_;
-  Storage storage_;
-};
-
-void seed_symbol(Storage &storage, std::int64_t file_id) {
-  storage::SqliteStoragePorts sqlite(storage);
-  storage::AstStoragePorts ports{.workspace = sqlite.workspace_catalog_read(),
-                                 .source = sqlite.source_read(),
-                                 .source_write = sqlite.source_write(),
-                                 .symbols_read = sqlite.symbol_read(),
-                                 .symbols_write = sqlite.symbol_write(),
-                                 .types_write = sqlite.type_write(),
-                                 .facts_write = sqlite.fact_write(),
-                                 .definitions_write = sqlite.definition_write(),
-                                 .unit_of_work = sqlite.unit_of_work()};
-  ast::StorageSymbolSink sink(ports);
-  auto transaction = ports.unit_of_work.begin();
-  sink.set_current_file_id(file_id);
-  ast::SymbolRecord record;
-  record.file = "/tmp/cidx-s099/main.cpp";
-  record.usr = "s099-main";
-  record.spelling = "main";
-  record.kind = 8;
-  record.kind_name = "function";
-  sink.emit(record);
-  transaction->commit();
-}
-
 } // namespace
 
 TEST_CASE("shared headers receive one deterministic pre-dispatch owner") {
@@ -160,92 +102,4 @@ TEST_CASE("shared headers receive one deterministic pre-dispatch owner") {
       ast::extract_serial_fact_batch({}, registry, extraction, route);
   REQUIRE(result.ok());
   REQUIRE(result.batch.has_value());
-}
-
-TEST_CASE("controlled lifecycle mutation rolls back with the complete TU") {
-  TemporaryDatabase database;
-  Storage &storage = database.storage();
-  const std::string main = "/tmp/cidx-s099/main.cpp";
-  const std::string header = "/tmp/cidx-s099/header.hpp";
-  const std::int64_t main_id = storage.add_file_path(main);
-  seed_symbol(storage, main_id);
-  REQUIRE(storage.symbols_in_file(main_id).size() == 1);
-  REQUIRE(!storage.get_file(header).has_value());
-
-  const ast::OwnedHeaderRoutePlan plan = ast::plan_owned_header_routes(
-      "generation-9",
-      {candidate(ast::PlannedFileRole::translation_unit, main, main, 0,
-                 main_id),
-       candidate(ast::PlannedFileRole::owned_header, main, header, 1)});
-
-  storage::SqliteStoragePorts sqlite(storage);
-  auto transaction = sqlite.unit_of_work().begin();
-  ast::ControlledHeaderWriter writer(
-      [&sqlite](const ast::PlannedFileRoute &route) {
-        return sqlite.source_write().add_file_path(
-            route.path, route.snapshot.mtime, route.snapshot.md5,
-            route.compile_options, route.driver);
-      },
-      [&sqlite](std::int64_t file_id) {
-        sqlite.symbol_write().delete_symbols_for_file(file_id);
-      });
-  const auto applied =
-      writer.apply(plan, main, "generation-9",
-                   [](const std::string &, const ast::PlannedSourceSnapshot &) {
-                     return true;
-                   });
-  REQUIRE(applied.ok());
-  CHECK(storage.get_file(header).has_value());
-  CHECK(storage.symbols_in_file(main_id).empty());
-  transaction->rollback();
-
-  CHECK(!storage.get_file(header).has_value());
-  CHECK(storage.symbols_in_file(main_id).size() == 1);
-}
-
-TEST_CASE("stale plans are rejected before lifecycle mutation") {
-  TemporaryDatabase database;
-  Storage &storage = database.storage();
-  const std::string main = "/tmp/cidx-s099/main.cpp";
-  const std::string header = "/tmp/cidx-s099/header.hpp";
-  const std::int64_t main_id = storage.add_file_path(main);
-  seed_symbol(storage, main_id);
-  const ast::OwnedHeaderRoutePlan plan = ast::plan_owned_header_routes(
-      "generation-11",
-      {candidate(ast::PlannedFileRole::translation_unit, main, main, 0,
-                 main_id),
-       candidate(ast::PlannedFileRole::owned_header, main, header, 1)});
-  storage::SqliteStoragePorts sqlite(storage);
-  ast::ControlledHeaderWriter writer(
-      [&sqlite](const ast::PlannedFileRoute &route) {
-        return sqlite.source_write().add_file_path(
-            route.path, route.snapshot.mtime, route.snapshot.md5,
-            route.compile_options, route.driver);
-      },
-      [&sqlite](std::int64_t file_id) {
-        sqlite.symbol_write().delete_symbols_for_file(file_id);
-      });
-
-  const auto generation_rejected =
-      writer.apply(plan, main, "generation-12",
-                   [](const std::string &, const ast::PlannedSourceSnapshot &) {
-                     return true;
-                   });
-  REQUIRE(!generation_rejected.ok());
-  CHECK(generation_rejected.rejection->kind ==
-        ast::HeaderPlanRejectionKind::generation_mismatch);
-  CHECK(!storage.get_file(header).has_value());
-  CHECK(storage.symbols_in_file(main_id).size() == 1);
-
-  const auto source_rejected = writer.apply(
-      plan, main, "generation-11",
-      [&header](const std::string &path, const ast::PlannedSourceSnapshot &) {
-        return path != header;
-      });
-  REQUIRE(!source_rejected.ok());
-  CHECK(source_rejected.rejection->kind ==
-        ast::HeaderPlanRejectionKind::stale_source);
-  CHECK(source_rejected.rejection->path == header);
-  CHECK(!storage.get_file(header).has_value());
-  CHECK(storage.symbols_in_file(main_id).size() == 1);
 }

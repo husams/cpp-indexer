@@ -3,8 +3,10 @@
 [← docs index](README.md) · related: [AST engine](modules/ast.md) ·
 [data flow](data-flow.md)
 
-`ast::FactBatch` is the immutable, database-independent output boundary for one
-serial translation-unit extraction. `FactBatchRecorder` is the mutable builder;
+`ast::FactBatch` is the immutable, storage-API-independent output boundary for
+one serial translation-unit extraction. It contains portable natural identities
+and no database row IDs or writer report types. `FactBatchRecorder` is the
+mutable builder;
 `snapshot()` and `canonical_batch()` publish read-only shared state, so later
 builder operations cannot alter an already published batch.
 
@@ -68,6 +70,17 @@ renumbered first-seen/conflict ordinals for internal consistency. Because the
 legacy sequence originates in extraction order, a decoder cannot independently
 derive it from the remaining record fields; the content digest protects the
 sequence in transit but is not an authenticity claim about its producer.
+
+Production extraction may consult the current persistent symbol-identity view
+when a referenced external symbol is absent from the in-memory batch. The
+resolved symbol is copied into the batch as a portable `SymbolRecord`; no
+storage-local identifier crosses the boundary. Consequently, a cached batch is
+replay-compatible only with the semantic universe, translation unit,
+configuration, extractor/pass/schema versions, and persistent identity state
+against which it was extracted. A cache producer must record an identity-state
+generation or equivalent digest, and a consumer must treat a missing or
+mismatched value as a cache miss and re-extract. It must never blindly publish
+the artifact into a different identity state.
 
 ## Typed fact coverage
 
@@ -150,6 +163,16 @@ of the same mixed-partition workload.
 registered pass ports to one recorder, and returns either one finalized batch
 or a typed failure. A parse, budget, pass, or pre-publication failure exposes no
 partial batch and has no storage port to mutate.
+
+After successful production extraction, `ast::ExtractedFactPublication` is the
+application-neutral handoff for live publication and TU-cache serialization. It
+owns the canonical `FactBatch` together with the frozen `OwnedHeaderRoutePlan`,
+translation-unit identity, expected route generation, normalized configuration
+row identity, and reconstructable configuration. Cache code may serialize the
+batch and this publication context at that seam, but live or replayed batches
+still enter persistent storage only through `storage::FactBatchWriter`. The AST
+handoff deliberately exposes neither writer results nor storage report types;
+the application layer rebuilds the source validator immediately before apply.
 
 `application::replay_fact_batch` applies partitions in the exact legacy file
 order `(component.path, directory.path, file.name)`

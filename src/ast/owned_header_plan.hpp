@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -50,6 +51,9 @@ struct PlannedFileRoute {
   bool cleanup_symbols = false;
   FactRoutePartition extraction;
 };
+
+using PlannedSourceValidator =
+    std::function<bool(const std::string &, const PlannedSourceSnapshot &)>;
 
 class OwnedHeaderRoutePlan {
 public:

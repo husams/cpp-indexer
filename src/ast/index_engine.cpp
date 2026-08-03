@@ -249,6 +249,14 @@ public:
               symbol->file_id
                   ? db_.file_abs_path(*symbol->file_id).value_or("")
                   : identity_source.value_or(symbol->decl_path.value_or(""));
+          // A previous publication of the TU being replaced is stale input,
+          // not an external identity oracle. Its authored declaration will be
+          // emitted by this extraction and must remain authoritative (notably
+          // when an instantiation becomes an explicit specialization).
+          if (file == state_.path ||
+              (identity_source && *identity_source == state_.path)) {
+            return std::nullopt;
+          }
           return SymbolRecord{
               .file = file,
               .usr = symbol->usr,
@@ -738,7 +746,12 @@ private:
           }
           const std::size_t collapsed =
               state_.includes.includes.size() - unique_edges.size();
+          // Preserve the historical include-pass accounting contract: one
+          // duplicate represents the TU include collector itself and each
+          // collapsed edge represents its raw and normalized observations.
           execution.metrics.note_duplicate(1 + (2 * collapsed));
+          // A non-empty include set contributes the legacy collector envelope
+          // in addition to the concrete include and macro records.
           execution.metrics.note_emitted(
               recorded + (state_.includes.includes.empty() ? 0 : 1));
           execution.metrics.note_fact_family(

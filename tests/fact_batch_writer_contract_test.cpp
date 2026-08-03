@@ -6,6 +6,7 @@
 #include "storage/fact_batch_writer.hpp"
 #include "storage/storage.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <string>
@@ -221,6 +222,127 @@ TEST_CASE("FactBatchWriter rolls back every main-table effect and retries") {
   CHECK(retried.ok());
   CHECK(fixture.storage.lookup_symbols_by_usr("usr-main").size() == 1);
   CHECK(fixture.storage.edge_count() == 1);
+}
+
+TEST_CASE("FactBatchWriter preserves monotonic instantiation identity facts") {
+  Fixture fixture;
+  const auto route =
+      fixture.plan.serial_route("/tmp/cidx-s073-writer/main.cpp");
+  REQUIRE(route.partitions.size() == 2);
+  const auto &main = route.partitions[route.main_partition];
+  ast::FactBatchRecorder recorder("fact-batch-instantiation-test");
+  recorder.set_partition(main.partition, main.transient_file_handle);
+  ast::SymbolRecord instantiated =
+      symbol(main.partition, "usr-instantiation", "instantiation");
+  instantiated.is_instantiation = true;
+  recorder.emit(instantiated);
+  instantiated.is_instantiation = false;
+  instantiated.line = 0;
+  instantiated.col = 0;
+  instantiated.end_line = 0;
+  instantiated.end_col = 0;
+  instantiated.is_definition = false;
+  instantiated.resolved = false;
+  recorder.emit(instantiated);
+
+  storage::FactBatchWriter writer(fixture.storage);
+  const auto result =
+      writer.apply(recorder.canonical_batch(), fixture.context());
+  INFO(result.error.value_or(""));
+  REQUIRE(result.ok());
+  auto stored = fixture.storage.raw_db().prepare(
+      "SELECT is_instantiation FROM symbol WHERE usr='usr-instantiation'");
+  REQUIRE(stored.step());
+  CHECK(stored.col_int64(0) == 1);
+}
+
+TEST_CASE("FactBatchWriter lets authored definitions classify specialization") {
+  Fixture fixture;
+  const auto route =
+      fixture.plan.serial_route("/tmp/cidx-s073-writer/main.cpp");
+  REQUIRE(route.partitions.size() == 2);
+  const auto &main = route.partitions[route.main_partition];
+  ast::FactBatchRecorder recorder("fact-batch-specialization-test");
+  recorder.set_partition(main.partition, main.transient_file_handle);
+  ast::SymbolRecord stub =
+      symbol(main.partition, "usr-specialization", "specialization");
+  stub.line = 0;
+  stub.col = 0;
+  stub.end_line = 0;
+  stub.end_col = 0;
+  stub.is_definition = false;
+  stub.resolved = false;
+  stub.is_instantiation = true;
+  stub.template_form = "explicit-instantiation";
+  recorder.emit(stub);
+  ast::SymbolRecord authored = stub;
+  authored.line = 1;
+  authored.col = 1;
+  authored.end_line = 1;
+  authored.end_col = 8;
+  authored.is_definition = true;
+  authored.resolved = true;
+  authored.is_instantiation = false;
+  authored.template_form = "explicit-specialization";
+  recorder.emit(authored);
+  recorder.emit(stub);
+
+  storage::FactBatchWriter writer(fixture.storage);
+  const auto result =
+      writer.apply(recorder.canonical_batch(), fixture.context());
+  INFO(result.error.value_or(""));
+  REQUIRE(result.ok());
+  auto stored = fixture.storage.raw_db().prepare(
+      "SELECT is_instantiation FROM symbol WHERE usr='usr-specialization'");
+  REQUIRE(stored.step());
+  CHECK(stored.col_int64(0) == 0);
+}
+
+TEST_CASE(
+    "FactBatchWriter reports observed insert update and ignore outcomes") {
+  Fixture fixture;
+  storage::FactBatchWriter writer(fixture.storage);
+  const ast::FactBatch batch = fixture.batch();
+  const auto first = writer.apply(batch, fixture.context());
+  INFO(first.error.value_or(""));
+  REQUIRE(first.ok());
+  const auto second = writer.apply(batch, fixture.context());
+  INFO(second.error.value_or(""));
+  REQUIRE(second.ok());
+
+  for (const auto &[family, rows] : second.report.families) {
+    CAPTURE(static_cast<int>(family));
+    CHECK(rows.inserted + rows.updated + rows.ignored == rows.staged);
+  }
+  CHECK(second.report.families.at(ast::FactFamily::symbols).updated > 0);
+  CHECK(second.report.families.at(ast::FactFamily::types).updated > 0);
+  CHECK(second.report.families.at(ast::FactFamily::definitions).updated > 0);
+  CHECK(second.report.families.at(ast::FactFamily::relations).updated > 0);
+  CHECK(second.report.families.at(ast::FactFamily::symbol_types).updated > 0);
+  CHECK(second.report.families.at(ast::FactFamily::edge_sites).ignored > 0);
+  CHECK(second.report.families.at(ast::FactFamily::diagnostics).ignored > 0);
+}
+
+TEST_CASE("FactBatchWriter captures incremental transform invalidation") {
+  Fixture fixture;
+  storage::FactBatchWriter writer(fixture.storage);
+  const ast::FactBatch batch = fixture.batch();
+  const auto initial = writer.apply(batch, fixture.context());
+  INFO(initial.error.value_or(""));
+  REQUIRE(initial.ok());
+  REQUIRE(fixture.storage.run_transform_pipeline().complete);
+  CHECK(fixture.storage.pending_transform_changes().empty());
+
+  const auto replacement = writer.apply(batch, fixture.context());
+  INFO(replacement.error.value_or(""));
+  REQUIRE(replacement.ok());
+  const auto changes = fixture.storage.pending_transform_changes();
+  CHECK(changes.generation > 0);
+  CHECK(std::ranges::find(changes.file_ids, fixture.main_file) !=
+        changes.file_ids.end());
+  CHECK_FALSE(changes.symbol_ids.empty());
+  CHECK_FALSE(changes.edge_ids.empty());
+  CHECK_FALSE(changes.definition_ids.empty());
 }
 
 } // namespace

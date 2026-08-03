@@ -75,6 +75,48 @@ auto execute(SqliteDb &database, FactBatchWriterReport &report,
   return database.changes();
 }
 
+struct WritePopulation {
+  std::uint64_t unique = 0;
+  std::uint64_t existing = 0;
+};
+
+auto query_write_population(SqliteDb &database, FactBatchWriterReport &report,
+                            std::string_view sql) -> WritePopulation {
+  auto statement = prepare_statement(database, report, sql);
+  WritePopulation population;
+  if (statement.step()) {
+    population.unique = static_cast<std::uint64_t>(
+        std::max<std::int64_t>(0, statement.col_int64(0)));
+    population.existing = static_cast<std::uint64_t>(
+        std::max<std::int64_t>(0, statement.col_int64(1)));
+  }
+  statement.step_done();
+  note_statement_stats(report, statement);
+  ++report.statement_executions;
+  return population;
+}
+
+void record_upsert_outcome(FactBatchWriterRows &rows,
+                           const WritePopulation &population,
+                           std::int64_t changes) {
+  const auto affected =
+      static_cast<std::uint64_t>(std::max<std::int64_t>(0, changes));
+  const std::uint64_t new_keys = population.unique >= population.existing
+                                     ? population.unique - population.existing
+                                     : 0;
+  const std::uint64_t inserted = std::min(new_keys, affected);
+  rows.inserted += inserted;
+  rows.updated += affected - inserted;
+  rows.ignored += rows.staged >= affected ? rows.staged - affected : 0;
+}
+
+void record_insert_outcome(FactBatchWriterRows &rows, std::int64_t changes) {
+  const auto affected =
+      static_cast<std::uint64_t>(std::max<std::int64_t>(0, changes));
+  rows.inserted += affected;
+  rows.ignored += rows.staged >= affected ? rows.staged - affected : 0;
+}
+
 auto universe_id_for(cidx::SqliteStorageService &storage, std::string_view key)
     -> std::int64_t {
   const auto universe = storage.get_semantic_universe_by_key(std::string(key));
@@ -900,7 +942,19 @@ void apply_symbols(SqliteDb &database, FactBatchWriterResult &result,
       "is_definition=MAX(excluded.is_definition,symbol.is_definition),"
       "is_pure=MAX(excluded.is_pure,symbol.is_pure),"
       "is_static=MAX(excluded.is_static,symbol.is_static),"
-      "is_instantiation=excluded.is_instantiation,"
+      "is_instantiation=CASE "
+      "WHEN excluded.template_form='explicit-specialization' THEN 0 "
+      "WHEN symbol.template_form='explicit-specialization' AND "
+      "excluded.file_id IS NOT NULL AND excluded.template_form="
+      "'explicit-instantiation' THEN excluded.is_instantiation "
+      "WHEN symbol.template_form='explicit-specialization' THEN 0 "
+      "WHEN excluded.is_definition>symbol.is_definition THEN excluded.is_"
+      "instantiation "
+      "WHEN excluded.is_definition<symbol.is_definition THEN symbol.is_"
+      "instantiation "
+      "WHEN excluded.resolved>symbol.resolved THEN excluded.is_instantiation "
+      "WHEN excluded.resolved<symbol.resolved THEN symbol.is_instantiation "
+      "ELSE MAX(excluded.is_instantiation,symbol.is_instantiation) END,"
       "is_named_instance=MAX(symbol.is_named_instance,excluded.is_named_"
       "instance),"
       "linkage=COALESCE(excluded.linkage,symbol.linkage),"
@@ -1032,6 +1086,13 @@ void apply_lifecycle_cleanup(SqliteDb &database, FactBatchWriterResult &result,
 
 void apply_types(SqliteDb &database, FactBatchWriterResult &result,
                  std::int64_t token) {
+  const std::string token_text = std::to_string(token);
+  const WritePopulation population = query_write_population(
+      database, result.report,
+      "SELECT COUNT(*),COALESCE(SUM(EXISTS(SELECT 1 FROM type_node n WHERE "
+      "n.type_key=c.type_key)),0) FROM (SELECT DISTINCT type_key FROM "
+      "temp.cidx_batch_type WHERE batch=" +
+          token_text + ") c");
   auto insert = prepare_statement(
       database, result.report,
       "INSERT INTO type_node(type_key,spelling,kind,is_const,is_volatile,"
@@ -1044,6 +1105,7 @@ void apply_types(SqliteDb &database, FactBatchWriterResult &result,
       "extent=COALESCE(excluded.extent,type_node.extent)");
   insert.bind(1, token);
   insert.step_done();
+  const std::int64_t changes = database.changes();
   note_statement_stats(result.report, insert);
   ++result.report.statement_executions;
 
@@ -1075,12 +1137,26 @@ void apply_types(SqliteDb &database, FactBatchWriterResult &result,
   note_statement_stats(result.report, canonical);
   ++result.report.statement_executions;
 
-  auto &rows = result.report.families[ast::FactFamily::types];
-  rows.inserted += rows.staged;
+  record_upsert_outcome(result.report.families[ast::FactFamily::types],
+                        population, changes);
 }
 
 void apply_definitions(SqliteDb &database, FactBatchWriterResult &result,
                        std::int64_t token) {
+  const std::string token_text = std::to_string(token);
+  const WritePopulation population = query_write_population(
+      database, result.report,
+      "SELECT COUNT(*),COALESCE(SUM(EXISTS(SELECT 1 FROM definition current "
+      "WHERE current.component_id=c.component_id AND current.file_id=c.file_id "
+      "AND current.symbol_id=c.symbol_id)),0) FROM (SELECT DISTINCT "
+      "d.component_id AS component_id,fm.file_id AS file_id,sm.symbol_id AS "
+      "symbol_id FROM temp.cidx_batch_definition b JOIN "
+      "temp.cidx_batch_symbol_map sm ON sm.batch=b.batch AND "
+      "sm.handle=b.symbol_handle JOIN temp.cidx_batch_file_map fm ON "
+      "fm.batch=b.batch AND fm.handle=b.file_handle JOIN file f ON "
+      "f.id=fm.file_id JOIN directory d ON d.id=f.directory_id WHERE "
+      "b.batch=" +
+          token_text + ") c");
   auto insert = prepare_statement(
       database, result.report,
       "INSERT INTO "
@@ -1101,6 +1177,7 @@ void apply_definitions(SqliteDb &database, FactBatchWriterResult &result,
       "end_col=excluded.end_col,init_text=excluded.init_text");
   insert.bind(1, token);
   insert.step_done();
+  const std::int64_t changes = database.changes();
   note_statement_stats(result.report, insert);
   ++result.report.statement_executions;
 
@@ -1122,12 +1199,23 @@ void apply_definitions(SqliteDb &database, FactBatchWriterResult &result,
   map.step_done();
   note_statement_stats(result.report, map);
   ++result.report.statement_executions;
-  result.report.families[ast::FactFamily::definitions].inserted +=
-      result.report.families[ast::FactFamily::definitions].staged;
+  record_upsert_outcome(result.report.families[ast::FactFamily::definitions],
+                        population, changes);
 }
 
 void apply_relations(SqliteDb &database, FactBatchWriterResult &result,
                      std::int64_t token) {
+  const std::string token_text = std::to_string(token);
+  const WritePopulation population = query_write_population(
+      database, result.report,
+      "SELECT COUNT(*),COALESCE(SUM(EXISTS(SELECT 1 FROM edge current WHERE "
+      "current.src_id=c.src_id AND current.dst_id=c.dst_id AND "
+      "current.kind=c.kind)),0) FROM (SELECT DISTINCT src.symbol_id AS src_id,"
+      "dst.symbol_id AS dst_id,r.kind AS kind FROM temp.cidx_batch_relation r "
+      "JOIN temp.cidx_batch_symbol_map src ON src.batch=r.batch AND "
+      "src.handle=r.src_handle JOIN temp.cidx_batch_symbol_map dst ON "
+      "dst.batch=r.batch AND dst.handle=r.dst_handle WHERE r.batch=" +
+          token_text + ") c");
   auto insert = prepare_statement(
       database, result.report,
       "INSERT INTO "
@@ -1148,6 +1236,7 @@ void apply_relations(SqliteDb &database, FactBatchWriterResult &result,
       "is_virtual=COALESCE(excluded.is_virtual,edge.is_virtual)");
   insert.bind(1, token);
   insert.step_done();
+  const std::int64_t changes = database.changes();
   note_statement_stats(result.report, insert);
   ++result.report.statement_executions;
   auto map = prepare_statement(
@@ -1182,8 +1271,8 @@ void apply_relations(SqliteDb &database, FactBatchWriterResult &result,
   }
   note_statement_stats(result.report, unresolved);
   ++result.report.statement_executions;
-  result.report.families[ast::FactFamily::relations].inserted +=
-      result.report.families[ast::FactFamily::relations].staged;
+  record_upsert_outcome(result.report.families[ast::FactFamily::relations],
+                        population, changes);
 }
 
 void apply_auxiliary(SqliteDb &database, FactBatchWriterResult &result,
@@ -1191,7 +1280,19 @@ void apply_auxiliary(SqliteDb &database, FactBatchWriterResult &result,
   const auto family = [](ast::FactFamily value) {
     return std::to_string(std::to_underlying(value));
   };
-  static_cast<void>(execute(
+  const std::string token_text = std::to_string(token);
+  const std::string type_edges = family(ast::FactFamily::type_edges);
+  const WritePopulation type_edge_population = query_write_population(
+      database, result.report,
+      "SELECT COUNT(*),COALESCE(SUM(EXISTS(SELECT 1 FROM type_edge current "
+      "WHERE current.src_id=c.src_id AND current.kind=c.kind AND "
+      "current.position=c.position)),0) FROM (SELECT DISTINCT src.type_id AS "
+      "src_id,a.i1 AS kind,a.i2 AS position FROM temp.cidx_batch_aux a JOIN "
+      "temp.cidx_batch_type_map src ON src.batch=a.batch AND "
+      "src.handle=a.i0 JOIN temp.cidx_batch_type_map dst ON "
+      "dst.batch=a.batch AND dst.handle=a.i3 WHERE a.family=" +
+          type_edges + " AND a.batch=" + token_text + ") c");
+  const std::int64_t type_edge_changes = execute(
       database, result.report,
       "INSERT OR REPLACE INTO type_edge(src_id,kind,position,dst_id) "
       "SELECT src.type_id,a.i1,a.i2,dst.type_id FROM temp.cidx_batch_aux a "
@@ -1200,9 +1301,21 @@ void apply_auxiliary(SqliteDb &database, FactBatchWriterResult &result,
       "JOIN temp.cidx_batch_type_map dst ON dst.batch=a.batch AND "
       "dst.handle=a.i3 "
       "WHERE a.family=" +
-          family(ast::FactFamily::type_edges) +
-          " AND a.batch=" + std::to_string(token)));
-  static_cast<void>(execute(
+          type_edges + " AND a.batch=" + token_text);
+  record_upsert_outcome(result.report.families[ast::FactFamily::type_edges],
+                        type_edge_population, type_edge_changes);
+
+  const std::string symbol_types = family(ast::FactFamily::symbol_types);
+  const WritePopulation symbol_type_population = query_write_population(
+      database, result.report,
+      "SELECT COUNT(*),COALESCE(SUM(EXISTS(SELECT 1 FROM symbol_type current "
+      "WHERE current.symbol_id=c.symbol_id AND current.kind=c.kind)),0) FROM "
+      "(SELECT DISTINCT sm.symbol_id AS symbol_id,a.i1 AS kind FROM "
+      "temp.cidx_batch_aux a JOIN temp.cidx_batch_symbol_map sm ON "
+      "sm.batch=a.batch AND sm.handle=a.i0 JOIN temp.cidx_batch_type_map tm ON "
+      "tm.batch=a.batch AND tm.handle=a.i2 WHERE a.family=" +
+          symbol_types + " AND a.batch=" + token_text + ") c");
+  const std::int64_t symbol_type_changes = execute(
       database, result.report,
       "INSERT OR REPLACE INTO symbol_type(symbol_id,kind,type_id) "
       "SELECT sm.symbol_id,a.i1,tm.type_id FROM temp.cidx_batch_aux a "
@@ -1210,9 +1323,24 @@ void apply_auxiliary(SqliteDb &database, FactBatchWriterResult &result,
       "sm.handle=a.i0 "
       "JOIN temp.cidx_batch_type_map tm ON tm.batch=a.batch AND tm.handle=a.i2 "
       "WHERE a.family=" +
-          family(ast::FactFamily::symbol_types) +
-          " AND a.batch=" + std::to_string(token)));
-  static_cast<void>(execute(
+          symbol_types + " AND a.batch=" + token_text);
+  record_upsert_outcome(result.report.families[ast::FactFamily::symbol_types],
+                        symbol_type_population, symbol_type_changes);
+
+  const std::string declaration_sites =
+      family(ast::FactFamily::declaration_sites);
+  const WritePopulation declaration_site_population = query_write_population(
+      database, result.report,
+      "SELECT COUNT(*),COALESCE(SUM(EXISTS(SELECT 1 FROM decl_site current "
+      "WHERE current.symbol_id=c.symbol_id AND current.file_id=c.file_id AND "
+      "current.line IS c.line AND current.col IS c.col)),0) FROM (SELECT "
+      "DISTINCT sm.symbol_id AS symbol_id,fm.file_id AS file_id,a.i1 AS line,"
+      "a.i2 AS col FROM temp.cidx_batch_aux a JOIN "
+      "temp.cidx_batch_symbol_map sm ON sm.batch=a.batch AND sm.handle=a.i0 "
+      "JOIN temp.cidx_batch_file_map fm ON fm.batch=a.batch AND "
+      "fm.handle=a.file_handle WHERE a.family=" +
+          declaration_sites + " AND a.batch=" + token_text + ") c");
+  const std::int64_t declaration_site_changes = execute(
       database, result.report,
       "INSERT OR REPLACE INTO "
       "decl_site(symbol_id,file_id,line,col,end_line,end_col,is_definition) "
@@ -1223,9 +1351,23 @@ void apply_auxiliary(SqliteDb &database, FactBatchWriterResult &result,
       "JOIN temp.cidx_batch_file_map fm ON fm.batch=a.batch AND "
       "fm.handle=a.file_handle "
       "WHERE a.family=" +
-          family(ast::FactFamily::declaration_sites) +
-          " AND a.batch=" + std::to_string(token)));
-  static_cast<void>(execute(
+          declaration_sites + " AND a.batch=" + token_text);
+  record_upsert_outcome(
+      result.report.families[ast::FactFamily::declaration_sites],
+      declaration_site_population, declaration_site_changes);
+
+  const std::string template_parameters =
+      family(ast::FactFamily::template_parameters);
+  const WritePopulation template_parameter_population = query_write_population(
+      database, result.report,
+      "SELECT COUNT(*),COALESCE(SUM(EXISTS(SELECT 1 FROM template_param "
+      "current WHERE current.owner_id=c.owner_id AND "
+      "current.position=c.position)),0) FROM (SELECT DISTINCT owner.symbol_id "
+      "AS owner_id,a.i1 AS position FROM temp.cidx_batch_aux a JOIN "
+      "temp.cidx_batch_symbol_map owner ON owner.batch=a.batch AND "
+      "owner.handle=a.i0 WHERE a.family=" +
+          template_parameters + " AND a.batch=" + token_text + ") c");
+  const std::int64_t template_parameter_changes = execute(
       database, result.report,
       "INSERT OR REPLACE INTO "
       "template_param(owner_id,position,param_kind,name,default_txt,"
@@ -1242,9 +1384,23 @@ void apply_auxiliary(SqliteDb &database, FactBatchWriterResult &result,
       "LEFT JOIN temp.cidx_batch_symbol_map dr ON dr.batch=a.batch AND "
       "dr.handle=a.i5 "
       "WHERE a.family=" +
-          family(ast::FactFamily::template_parameters) +
-          " AND a.batch=" + std::to_string(token)));
-  static_cast<void>(execute(
+          template_parameters + " AND a.batch=" + token_text);
+  record_upsert_outcome(
+      result.report.families[ast::FactFamily::template_parameters],
+      template_parameter_population, template_parameter_changes);
+
+  const std::string template_arguments =
+      family(ast::FactFamily::template_arguments);
+  const WritePopulation template_argument_population = query_write_population(
+      database, result.report,
+      "SELECT COUNT(*),COALESCE(SUM(EXISTS(SELECT 1 FROM template_arg current "
+      "WHERE current.owner_id=c.owner_id AND current.position=c.position AND "
+      "current.pack_index=c.pack_index)),0) FROM (SELECT DISTINCT "
+      "owner.symbol_id AS owner_id,a.i1 AS position,a.i2 AS pack_index FROM "
+      "temp.cidx_batch_aux a JOIN temp.cidx_batch_symbol_map owner ON "
+      "owner.batch=a.batch AND owner.handle=a.i0 WHERE a.family=" +
+          template_arguments + " AND a.batch=" + token_text + ") c");
+  const std::int64_t template_argument_changes = execute(
       database, result.report,
       "INSERT OR REPLACE INTO "
       "template_arg(owner_id,position,pack_index,arg_kind,ref_id,literal,type_"
@@ -1258,16 +1414,19 @@ void apply_auxiliary(SqliteDb &database, FactBatchWriterResult &result,
       "LEFT JOIN temp.cidx_batch_type_map t ON t.batch=a.batch AND "
       "t.handle=a.i5 "
       "WHERE a.family=" +
-          family(ast::FactFamily::template_arguments) +
-          " AND a.batch=" + std::to_string(token)));
+          template_arguments + " AND a.batch=" + token_text);
+  record_upsert_outcome(
+      result.report.families[ast::FactFamily::template_arguments],
+      template_argument_population, template_argument_changes);
+
+  const std::string parameters = family(ast::FactFamily::parameters);
   static_cast<void>(execute(
       database, result.report,
       "DELETE FROM parameter WHERE owner_id IN (SELECT DISTINCT sm.symbol_id "
       "FROM temp.cidx_batch_aux a JOIN temp.cidx_batch_symbol_map sm "
       "ON sm.batch=a.batch AND sm.handle=a.i0 WHERE a.family=" +
-          family(ast::FactFamily::parameters) +
-          " AND a.batch=" + std::to_string(token) + ")"));
-  static_cast<void>(execute(
+          parameters + " AND a.batch=" + token_text + ")"));
+  const std::int64_t parameter_changes = execute(
       database, result.report,
       "INSERT INTO "
       "parameter(owner_id,position,pack_index,name,type_id,declared_type_id,"
@@ -1286,9 +1445,23 @@ void apply_auxiliary(SqliteDb &database, FactBatchWriterResult &result,
       "LEFT JOIN temp.cidx_batch_file_map pf ON pf.batch=a.batch AND "
       "pf.handle=a.i6 "
       "WHERE a.family=" +
-          family(ast::FactFamily::parameters) +
-          " AND a.batch=" + std::to_string(token)));
-  static_cast<void>(execute(
+          parameters + " AND a.batch=" + token_text);
+  record_insert_outcome(result.report.families[ast::FactFamily::parameters],
+                        parameter_changes);
+
+  const std::string definition_edges =
+      family(ast::FactFamily::definition_edges);
+  const WritePopulation definition_edge_population = query_write_population(
+      database, result.report,
+      "SELECT COUNT(*),COALESCE(SUM(EXISTS(SELECT 1 FROM def_edge current "
+      "WHERE current.src_def_id=c.src_def_id AND current.dst_id=c.dst_id AND "
+      "current.kind=c.kind)),0) FROM (SELECT DISTINCT dm.definition_id AS "
+      "src_def_id,sm.symbol_id AS dst_id,a.i2 AS kind FROM "
+      "temp.cidx_batch_aux a JOIN temp.cidx_batch_definition_map dm ON "
+      "dm.batch=a.batch AND dm.handle=a.i0 JOIN temp.cidx_batch_symbol_map sm "
+      "ON sm.batch=a.batch AND sm.handle=a.i1 WHERE a.family=" +
+          definition_edges + " AND a.batch=" + token_text + ") c");
+  const std::int64_t definition_edge_changes = execute(
       database, result.report,
       "INSERT INTO def_edge(src_def_id,dst_id,kind,count) "
       "SELECT dm.definition_id,sm.symbol_id,a.i2,COALESCE((SELECT MAX(r.count) "
@@ -1304,10 +1477,14 @@ void apply_auxiliary(SqliteDb &database, FactBatchWriterResult &result,
       "JOIN temp.cidx_batch_symbol_map sm ON sm.batch=a.batch AND "
       "sm.handle=a.i1 "
       "WHERE a.family=" +
-          family(ast::FactFamily::definition_edges) +
-          " AND a.batch=" + std::to_string(token) +
+          definition_edges + " AND a.batch=" + token_text +
           " ON CONFLICT(src_def_id,dst_id,kind) DO UPDATE SET "
-          "count=excluded.count"));
+          "count=excluded.count");
+  record_upsert_outcome(
+      result.report.families[ast::FactFamily::definition_edges],
+      definition_edge_population, definition_edge_changes);
+
+  const std::string diagnostics = family(ast::FactFamily::diagnostics);
   static_cast<void>(execute(database, result.report,
                             "DELETE FROM diagnostic AS d WHERE d.file_id IN "
                             "(SELECT file_id FROM temp.cidx_batch_file_map "
@@ -1318,27 +1495,26 @@ void apply_auxiliary(SqliteDb &database, FactBatchWriterResult &result,
                                 "temp.cidx_batch_file_map fm ON "
                                 "fm.batch=a.batch AND fm.handle=a.file_handle "
                                 "WHERE a.family=" +
-                                family(ast::FactFamily::diagnostics) +
-                                " AND a.batch=" + std::to_string(token) +
+                                diagnostics + " AND a.batch=" + token_text +
                                 " AND fm.file_id=d.file_id AND a.i0=d.severity "
                                 "AND a.t0=d.spelling AND a.t1 IS d.file_path "
                                 "AND a.i1 IS d.line AND a.i2 IS d.col)"));
-  static_cast<void>(execute(
+  const std::int64_t diagnostic_changes = execute(
       database, result.report,
       "INSERT INTO diagnostic(file_id,severity,spelling,file_path,line,col) "
       "SELECT fm.file_id,a.i0,a.t0,a.t1,a.i1,a.i2 FROM temp.cidx_batch_aux a "
       "JOIN temp.cidx_batch_file_map fm ON fm.batch=a.batch AND "
       "fm.handle=a.file_handle "
       "WHERE a.family=" +
-          family(ast::FactFamily::diagnostics) +
-          " AND a.batch=" + std::to_string(token) +
+          diagnostics + " AND a.batch=" + token_text +
           " AND NOT EXISTS(SELECT 1 FROM diagnostic d WHERE "
           "d.file_id=fm.file_id AND d.severity=a.i0 AND d.spelling=a.t0 AND "
-          "d.file_path IS a.t1 AND d.line IS a.i1 AND d.col IS a.i2)"));
+          "d.file_path IS a.t1 AND d.line IS a.i1 AND d.col IS a.i2)");
+  record_insert_outcome(result.report.families[ast::FactFamily::diagnostics],
+                        diagnostic_changes);
 
   const std::string edge_sites = family(ast::FactFamily::edge_sites);
   const std::string call_args = family(ast::FactFamily::call_arguments);
-  const std::string token_text = std::to_string(token);
   static_cast<void>(execute(
       database, result.report,
       "INSERT INTO "
@@ -1369,7 +1545,7 @@ void apply_auxiliary(SqliteDb &database, FactBatchWriterResult &result,
                   "AND NOT EXISTS(SELECT 1 FROM symbol s WHERE s.usr=x.text) "
                   "ON CONFLICT(identity_kind,identity_text) DO UPDATE SET "
                   "resolution_status=0"));
-  static_cast<void>(execute(
+  const std::int64_t edge_site_changes = execute(
       database, result.report,
       "INSERT OR IGNORE INTO "
       "edge_site(edge_id,file_id,line,col,conditional,args_sig,"
@@ -1394,8 +1570,10 @@ void apply_auxiliary(SqliteDb &database, FactBatchWriterResult &result,
       "rm.handle=a.i0 "
       "JOIN temp.cidx_batch_file_map fm ON fm.batch=a.batch AND fm.handle=a.i1 "
       "WHERE a.family=" +
-          edge_sites + " AND a.batch=" + token_text));
-  static_cast<void>(execute(
+          edge_sites + " AND a.batch=" + token_text);
+  record_insert_outcome(result.report.families[ast::FactFamily::edge_sites],
+                        edge_site_changes);
+  const std::int64_t call_arg_changes = execute(
       database, result.report,
       "INSERT OR IGNORE INTO "
       "call_arg(edge_id,file_id,line,col,position,src_kind,"
@@ -1423,17 +1601,9 @@ void apply_auxiliary(SqliteDb &database, FactBatchWriterResult &result,
       "rm.handle=a.i0 "
       "JOIN temp.cidx_batch_file_map fm ON fm.batch=a.batch AND fm.handle=a.i1 "
       "WHERE a.family=" +
-          call_args + " AND a.batch=" + token_text));
-
-  for (const ast::FactFamily applied :
-       {ast::FactFamily::declaration_sites, ast::FactFamily::edge_sites,
-        ast::FactFamily::call_arguments, ast::FactFamily::template_parameters,
-        ast::FactFamily::template_arguments, ast::FactFamily::type_edges,
-        ast::FactFamily::parameters, ast::FactFamily::symbol_types,
-        ast::FactFamily::definition_edges, ast::FactFamily::diagnostics}) {
-    result.report.families[applied].inserted +=
-        result.report.families[applied].staged;
-  }
+          call_args + " AND a.batch=" + token_text);
+  record_insert_outcome(result.report.families[ast::FactFamily::call_arguments],
+                        call_arg_changes);
 }
 
 void publish_includes(SqliteDb &database, FactBatchWriterResult &result,
@@ -1683,6 +1853,9 @@ void publish_applicability(SqliteDb &database, FactBatchWriterResult &result,
                             "AND fm.planned=1 "
                             "WHERE d.batch=" +
                             token_text);
+  // Diagnostics are TU-owned. A single-route publication is the complete TU
+  // replacement; a multi-route owned-header publication must not associate
+  // those TU diagnostics with each independently versioned header route.
   const bool publish_diagnostics = context.route_plan.routes().size() == 1;
   if (publish_diagnostics) {
     publish("diagnostic",
@@ -1991,6 +2164,17 @@ auto FactBatchWriter::apply(const ast::FactBatch &batch,
       result.file_ids.emplace(
           batch_handle,
           result.file_ids.at(*route->extraction.transient_file_handle));
+    }
+
+    // Capture the previous persistent identities before any lifecycle cleanup
+    // or upsert mutates them. Incremental transforms consume this change set
+    // after publication; newly created routes are excluded because they have
+    // no prior persistent facts to invalidate.
+    for (const ast::PlannedFileRoute &route : context.route_plan.routes()) {
+      if (route.translation_unit == context.translation_unit &&
+          route.cleanup_symbols && route.existing_file_id) {
+        storage_.capture_transform_changes_for_file(*route.existing_file_id);
+      }
     }
 
     SqliteDb &database = storage_.raw_db();

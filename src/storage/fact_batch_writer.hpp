@@ -1,7 +1,6 @@
 // Deterministic, set-based publication of one immutable translation-unit batch.
 #pragma once
 
-#include "ast/controlled_header_writer.hpp"
 #include "ast/fact_batch.hpp"
 #include "ast/owned_header_plan.hpp"
 #include "storage/records.hpp"

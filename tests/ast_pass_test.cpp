@@ -1598,6 +1598,48 @@ TEST_CASE("symbol lookup indexes isolate universes and repeated declarations") {
   CHECK(recorder.lookup_symbol_id("shared-usr") == workspace_exact);
 }
 
+TEST_CASE("symbol lookup reuses only source-independent scoped identities") {
+  FactBatchRecorder recorder("lookup-source-fallback-test");
+  const FactPartitionKey partition =
+      fact_partition("main.cpp", "workspace", "debug", "src/main.cpp");
+  recorder.set_partition(partition);
+
+  SymbolRecord external;
+  external.file = partition.file.portable_path();
+  external.usr = "external-usr";
+  external.spelling = "external";
+  external.kind = 8;
+  external.linkage = "external";
+  external.identity_source = "src/declaration.hpp";
+  recorder.emit(external);
+  const auto exact =
+      recorder.lookup_symbol_id("external-usr", "src/declaration.hpp");
+  REQUIRE(exact);
+  CHECK(recorder.lookup_symbol_id("external-usr", "src/use.cpp") == exact);
+  CHECK(recorder.mint_symbol({.usr = "external-usr",
+                              .spelling = "external",
+                              .kind_name = "function",
+                              .is_instantiation = true,
+                              .identity_source = "src/declaration.hpp",
+                              .linkage = "external",
+                              .parent_usr = "owner-usr"}) == *exact);
+
+  SymbolRecord internal = external;
+  internal.usr = "internal-usr";
+  internal.spelling = "internal";
+  internal.linkage = "internal";
+  recorder.emit(internal);
+  CHECK_FALSE(recorder.lookup_symbol_id("internal-usr", "src/use.cpp"));
+
+  const FactBatch batch = recorder.canonical_batch();
+  const auto enriched = std::ranges::find_if(
+      batch.records().symbols,
+      [](const SymbolRecord &record) { return record.usr == "external-usr"; });
+  REQUIRE(enriched != batch.records().symbols.end());
+  CHECK(enriched->is_instantiation);
+  CHECK(enriched->parent_usr == "owner-usr");
+}
+
 TEST_CASE("mutation and aggregation operations touch only keyed buckets") {
   FactBatchRecorder recorder("complexity-test");
   recorder.set_partition(
