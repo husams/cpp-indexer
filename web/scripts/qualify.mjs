@@ -149,9 +149,11 @@ const upsertMeta = (db, key, value) =>
 
 const relocateTrackedWorkspacePaths = (db) => {
   const escapedRoot = root.replaceAll("'", "''");
-  return sqlite(db, `UPDATE clone SET path='${escapedRoot}' WHERE ` +
-    `repository_id=(SELECT id FROM repository ` +
-    `WHERE name='cpp-indexer-self-host');`);
+  return sqlite(db, `DELETE FROM clone WHERE repository_id=(` +
+    `SELECT id FROM repository WHERE name='cpp-indexer-self-host') AND id != (` +
+    `SELECT active_clone_id FROM repository WHERE name='cpp-indexer-self-host'); ` +
+    `UPDATE clone SET path='${escapedRoot}' WHERE id=(` +
+    `SELECT active_clone_id FROM repository WHERE name='cpp-indexer-self-host');`);
 };
 
 const prepareScenarioState = async (db, state) => {

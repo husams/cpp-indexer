@@ -284,8 +284,10 @@ add_library(cidx_ast OBJECT
   src/ast/call_template_args.cpp src/ast/display_name_rewrite.cpp
   src/ast/receiver_provenance.cpp src/ast/instantiation_edges.cpp
   src/ast/namespace_use_visitor.cpp src/ast/routed_root_events.cpp
-  src/ast/fact_identity.cpp src/ast/fact_batch.cpp
-  src/ast/fact_batch_artifact.cpp src/ast/fact_extraction.cpp
+  src/ast/fact_identity.cpp src/ast/fact_batch.cpp src/ast/fact_extraction.cpp
+  src/ast/controlled_header_writer.cpp
+  src/ast/owned_header_plan.cpp
+  src/ast/fact_batch_artifact.cpp
   src/ast/indexing_plan.cpp src/ast/pass_registry.cpp
   src/ast/index_engine.cpp
   src/ast/include_facts.cpp

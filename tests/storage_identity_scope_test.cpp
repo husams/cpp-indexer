@@ -329,10 +329,15 @@ TEST_CASE("v39 isolates unrelated universes and merges declared sharing") {
     CHECK(banking_symbol->identity_key != composed_symbol->identity_key);
   }
 
-  cidx::storage::AstStoragePorts ports{
-      db.workspace_catalog_read(), db.source_read(), db.symbol_read(),
-      db.symbol_write(),           db.type_write(),  db.fact_write(),
-      db.definition_write(),       db.unit_of_work()};
+  cidx::storage::AstStoragePorts ports{db.workspace_catalog_read(),
+                                       db.source_read(),
+                                       db.source_write(),
+                                       db.symbol_read(),
+                                       db.symbol_write(),
+                                       db.type_write(),
+                                       db.fact_write(),
+                                       db.definition_write(),
+                                       db.unit_of_work()};
   cidx::ast::StorageEdgeSink sink(ports);
   sink.set_current_file_id(banking_file);
   check_condition(sink.lookup_symbol_id("c:@N@collision") == banking_id);
@@ -440,10 +445,15 @@ TEST_CASE("v39 carries translation-unit identity through header sinks") {
   record.is_definition = true;
   record.resolved = true;
 
-  cidx::storage::AstStoragePorts ports{
-      db.workspace_catalog_read(), db.source_read(), db.symbol_read(),
-      db.symbol_write(),           db.type_write(),  db.fact_write(),
-      db.definition_write(),       db.unit_of_work()};
+  cidx::storage::AstStoragePorts ports{db.workspace_catalog_read(),
+                                       db.source_read(),
+                                       db.source_write(),
+                                       db.symbol_read(),
+                                       db.symbol_write(),
+                                       db.type_write(),
+                                       db.fact_write(),
+                                       db.definition_write(),
+                                       db.unit_of_work()};
   cidx::ast::StorageSymbolSink symbols(ports);
   symbols.set_current_file_id(tu_a);
   symbols.set_identity_translation_unit_config_id(config_a_id, tu_a);

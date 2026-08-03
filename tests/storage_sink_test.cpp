@@ -93,6 +93,7 @@ struct SinkFixture {
   cidx::storage::AstStoragePorts ports{
       .workspace = sqlite_ports.workspace_catalog_read(),
       .source = sqlite_ports.source_read(),
+      .source_write = sqlite_ports.source_write(),
       .symbols_read = symbol_read,
       .symbols_write = sqlite_ports.symbol_write(),
       .types_write = sqlite_ports.type_write(),
