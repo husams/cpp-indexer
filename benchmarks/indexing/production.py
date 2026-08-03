@@ -2188,8 +2188,28 @@ def main() -> int:
         "attribution_experiments": ATTRIBUTION_EXPERIMENTS,
         "individual_trials": {},
         "aggregates": {},
-        "sqlite_matrix": {},
-        "disabled_profiling_overhead": None,
+        "sqlite_matrix": (
+            {
+                "status": "skipped",
+                "reason": (
+                    "--skip-sqlite-matrix was selected; no SQLite runtime "
+                    "configuration experiment is claimed by this run."
+                ),
+            }
+            if args.skip_sqlite_matrix
+            else {}
+        ),
+        "disabled_profiling_overhead": (
+            None
+            if uninstrumented is not None
+            else {
+                "status": "skipped",
+                "reason": (
+                    "No otherwise-equivalent uninstrumented executable was "
+                    "provided; disabled-overhead qualification is not claimed."
+                ),
+            }
+        ),
         "commit_ab": {"cases": {}, "parity_failures": []},
         "parity_failures": [],
         "front_end_reuse": qualification_contract(

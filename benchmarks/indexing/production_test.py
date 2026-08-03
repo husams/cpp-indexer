@@ -160,6 +160,7 @@ def _main_shaped_report(*, trials: int = 3, disabled: bool = False) -> dict:
     report["attribution_experiments"] = production.ATTRIBUTION_EXPERIMENTS
     report["sqlite_matrix"] = {}
     report["disabled_profiling_overhead"] = None
+    report["commit_ab"] = {"cases": {}, "parity_failures": []}
     report["attribution_results"] = {}
     return report
 
