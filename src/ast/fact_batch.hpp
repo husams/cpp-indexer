@@ -5,6 +5,7 @@
 #include "ast/fact_identity.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -80,6 +81,7 @@ public:
   [[nodiscard]] auto producer() const -> const std::string &;
   [[nodiscard]] auto producer_version() const -> std::uint32_t;
   [[nodiscard]] auto completeness() const -> FactCompleteness;
+  [[nodiscard]] auto is_canonical() const -> bool;
   [[nodiscard]] auto records() const -> const FactRecords &;
   [[nodiscard]] auto partitions() const
       -> const std::vector<FileFactPartition> &;
@@ -171,11 +173,16 @@ class FactBatchRecorder final : public SymbolFactEmitter,
                                 public PresentationNormalizer,
                                 public PresentationIntentEmitter {
 public:
+  using PersistentSymbolLookup = std::function<std::optional<SymbolRecord>(
+      const std::string &, const std::optional<std::string> &,
+      const FactPartitionKey &)>;
+
   explicit FactBatchRecorder(std::string producer = {},
                              const CollisionSafeHandleIndex::Hasher
                                  &primary_hasher = stable_fact_hash);
 
   void set_completeness(FactCompleteness completeness);
+  void set_persistent_symbol_lookup(PersistentSymbolLookup lookup);
   void set_partition(
       FactPartitionKey partition,
       std::optional<std::int64_t> transient_file_handle = std::nullopt);
@@ -246,6 +253,14 @@ public:
   [[nodiscard]] auto batch() const -> FactBatch { return snapshot(); }
   [[nodiscard]] auto canonical_batch() const -> FactBatch;
   [[nodiscard]] auto counters() const -> const FactBatchOperationCounters &;
+  [[nodiscard]] auto pending_presentation_intents() const
+      -> std::vector<PresentationIntent> {
+    std::vector<PresentationIntent> result;
+    result.reserve(presentation_intents_.size());
+    std::ranges::transform(presentation_intents_, std::back_inserter(result),
+                           &RoutedRecord<PresentationIntent>::record);
+    return result;
+  }
 
 private:
   template <typename T> struct RoutedRecord {
@@ -318,6 +333,7 @@ private:
   CollisionSafeHandleIndex type_handles_;
   CollisionSafeHandleIndex definition_handles_;
   CollisionSafeHandleIndex file_handles_;
+  PersistentSymbolLookup persistent_symbol_lookup_;
   std::unordered_map<std::string, std::int64_t> symbol_ids_by_source_usr_;
   std::unordered_map<std::string, std::set<std::int64_t>>
       symbol_ids_by_scope_usr_;

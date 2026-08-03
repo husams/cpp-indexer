@@ -3,6 +3,8 @@
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclCXX.h"
 
+#include <string_view>
+
 namespace cidx::ast {
 
 int cidx_symbol_kind(const clang::Decl *decl) {
@@ -24,45 +26,86 @@ int cidx_symbol_kind(const clang::Decl *decl) {
     if (rd->isStruct()) {
       return 2; // struct
     }
-    return 4;   // class
+    return 4; // class
   }
-  case Decl::Enum:             return 5;  // enum
-  case Decl::Field:            return 6;  // member (field)
-  case Decl::EnumConstant:     return 7;  // enum-constant
-  case Decl::Function:         return 8;  // function
-  case Decl::Var:              return 9;  // variable
-  case Decl::Typedef:          return 20; // typedef
-  case Decl::CXXMethod:        return 21; // method
-  case Decl::Namespace:        return 22; // namespace
-  case Decl::CXXConstructor:   return 24; // constructor
-  case Decl::CXXDestructor:    return 25; // destructor
-  case Decl::FunctionTemplate: return 30; // function-template
-  case Decl::ClassTemplate:    return 31; // class-template
-  case Decl::TypeAlias:        return 36; // type-alias
-  default:                     return -1;
+  case Decl::Enum:
+    return 5; // enum
+  case Decl::Field:
+    return 6; // member (field)
+  case Decl::EnumConstant:
+    return 7; // enum-constant
+  case Decl::Function:
+    return 8; // function
+  case Decl::Var:
+    return 9; // variable
+  case Decl::Typedef:
+    return 20; // typedef
+  case Decl::CXXMethod:
+    return 21; // method
+  case Decl::Namespace:
+    return 22; // namespace
+  case Decl::CXXConstructor:
+    return 24; // constructor
+  case Decl::CXXDestructor:
+    return 25; // destructor
+  case Decl::FunctionTemplate:
+    return 30; // function-template
+  case Decl::ClassTemplate:
+    return 31; // class-template
+  case Decl::TypeAlias:
+    return 36; // type-alias
+  default:
+    return -1;
   }
 }
 
 const char *cidx_kind_name_from_int(int kind) {
   switch (kind) {
-  case 2:  return "struct";
-  case 3:  return "union";
-  case 4:  return "class";
-  case 5:  return "enum";
-  case 6:  return "member";
-  case 7:  return "enum-constant";
-  case 8:  return "function";
-  case 9:  return "variable";
-  case 20: return "typedef";
-  case 21: return "method";
-  case 22: return "namespace";
-  case 24: return "constructor";
-  case 25: return "destructor";
-  case 30: return "function-template";
-  case 31: return "class-template";
-  case 36: return "type-alias";
-  default: return nullptr;
+  case 2:
+    return "struct";
+  case 3:
+    return "union";
+  case 4:
+    return "class";
+  case 5:
+    return "enum";
+  case 6:
+    return "member";
+  case 7:
+    return "enum-constant";
+  case 8:
+    return "function";
+  case 9:
+    return "variable";
+  case 20:
+    return "typedef";
+  case 21:
+    return "method";
+  case 22:
+    return "namespace";
+  case 24:
+    return "constructor";
+  case 25:
+    return "destructor";
+  case 30:
+    return "function-template";
+  case 31:
+    return "class-template";
+  case 36:
+    return "type-alias";
+  default:
+    return nullptr;
   }
+}
+
+int cidx_kind_int_from_name(const std::string_view &name) {
+  for (const int kind :
+       {2, 3, 4, 5, 6, 7, 8, 9, 20, 21, 22, 24, 25, 30, 31, 36}) {
+    if (name == cidx_kind_name_from_int(kind)) {
+      return kind;
+    }
+  }
+  return -1;
 }
 
 const char *cidx_symbol_kind_name(const clang::Decl *decl) {

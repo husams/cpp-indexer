@@ -12,10 +12,10 @@
 // is handed out, it is removed from the pool while in use, and the pool is
 // finalized before the connection closes.
 //
-// SQLite floor: >= 3.35 (RETURNING). Probed on the gcc-index-test box
-// (192.168.1.115, Ubuntu 24.04: libsqlite3 3.45.1) — design §4.2: the
-// RETURNING path is the ONLY path shipped; the ctor asserts the runtime
-// library version.
+// SQLite floor: >= 3.37 (RETURNING + sqlite3_changes64). Probed on the
+// gcc-index-test box (192.168.1.115, Ubuntu 24.04: libsqlite3 3.45.1) — design
+// §4.2: the RETURNING path is the ONLY path shipped; the ctor asserts the
+// runtime library version.
 #pragma once
 
 #include <cstddef>
@@ -63,6 +63,15 @@ struct SqliteProfileSettings {
 
 class SqliteDb;
 
+struct SqliteStatementStats {
+  std::uint64_t executions = 0;
+  std::uint64_t reuses = 0;
+  std::uint64_t virtual_machine_steps = 0;
+  std::uint64_t fullscan_steps = 0;
+  std::uint64_t reprepares = 0;
+  double step_seconds = 0.0;
+};
+
 // Owns a sqlite3_stmt*. Movable, non-copyable. Bind indexes are 1-based,
 // column indexes 0-based (SQLite convention).
 //
@@ -73,7 +82,8 @@ class SqliteDb;
 class SqliteStmt {
 public:
   SqliteStmt(sqlite3 *db, std::string_view sql); // throws StorageError
-  SqliteStmt(SqliteDb &owner, std::string sql, sqlite3_stmt *compiled) noexcept;
+  SqliteStmt(SqliteDb &owner, std::string sql, sqlite3_stmt *compiled,
+             bool reused) noexcept;
   ~SqliteStmt();
   SqliteStmt(SqliteStmt &&other) noexcept;
   SqliteStmt &operator=(SqliteStmt &&other) noexcept;
@@ -99,12 +109,21 @@ public:
   [[nodiscard]] int64_t col_int64(int idx) const;
   [[nodiscard]] double col_double(int idx) const;
   [[nodiscard]] std::string col_text(int idx) const; // NULL -> ""
+  [[nodiscard]] auto stats() const -> const SqliteStatementStats & {
+    return stats_;
+  }
+  [[nodiscard]] auto reused_compiled_statement() const -> bool {
+    return reused_compiled_statement_;
+  }
 
 private:
   sqlite3 *db_ = nullptr;
   sqlite3_stmt *stmt_ = nullptr;
   SqliteDb *owner_ = nullptr; // non-null: return to the pool, do not finalize
   std::string sql_;
+  SqliteStatementStats stats_;
+  bool execution_started_ = false;
+  bool reused_compiled_statement_ = false;
 };
 
 // Owns a sqlite3*. Non-copyable, non-movable (Storage holds it by value).

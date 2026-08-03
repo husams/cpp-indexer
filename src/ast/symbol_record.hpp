@@ -23,10 +23,12 @@ struct SymbolRecord {
   int64_t end_col = 0;
   std::optional<int64_t> decl_line; // spelling location; declarations only
   std::optional<int64_t> decl_col;
+  std::optional<std::string> decl_path; // unregistered declaration source
   bool is_definition = false;
   bool is_pure = false;
   bool is_static = false;
   bool is_instantiation = false; // from TemplateSpecializationKind
+  bool is_named_instance = false;
   std::optional<std::string> callable_kind;
   std::optional<std::string> template_origin;
   std::optional<std::string> template_form;

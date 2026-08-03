@@ -279,7 +279,9 @@ StorageApplicationOperations::execute(const IndexRequest &request,
                                             : outcome.error,
           .file_path = path});
     }
-    db.replace_diagnostics(file.id, persisted_diagnostics);
+    if (outcome.parse_failed || outcome.source_changed) {
+      db.replace_diagnostics(file.id, persisted_diagnostics);
+    }
     for (const Diagnostic &diagnostic : persisted_diagnostics) {
       if (diagnostic.severity >= 3) {
         ++errors;
@@ -307,7 +309,6 @@ StorageApplicationOperations::execute(const IndexRequest &request,
                                              ? "indexing failed for " + path
                                              : outcome.error)}}));
     } else {
-      db.mark_file_indexed(file.id, std::nullopt, outcome.source_md5);
       ++indexed;
       file_records.push_back(json_out::Value::obj(
           {{"path", json_out::Value::of(path)},

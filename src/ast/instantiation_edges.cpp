@@ -179,9 +179,15 @@ void emit_callable_template_identity(
   const std::string prim_usr = usr_for_decl(info.primary);
   const std::string fd_usr = usr_for_decl(fd);
   if (!prim_usr.empty() && prim_usr != fd_usr) {
-    if (const auto prim = identity.lookup_symbol_id(
-            prim_usr,
-            expansion_loc(mint.context(), info.primary->getLocation()).file)) {
+    std::optional<std::int64_t> prim = identity.lookup_symbol_id(
+        prim_usr,
+        expansion_loc(mint.context(), info.primary->getLocation()).file);
+    if (!prim) {
+      if (const auto request = mint.build(info.primary)) {
+        prim = identity.mint_symbol(*request);
+      }
+    }
+    if (prim) {
       EdgeRecord e;
       e.src_id = dst_id;
       e.dst_id = *prim;

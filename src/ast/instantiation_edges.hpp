@@ -51,7 +51,7 @@ callable_template_info(const clang::FunctionDecl *fd);
 
 // Emit the declaration-owned identity of callable `fd` (minted as `dst_id`):
 //   - fd -> primary structural edge, specializes(4) or instantiates(5),
-//     idempotent (lookup-only: the primary must already be indexed);
+//     idempotent (minting a stub when the primary is outside this batch);
 //   - template_arg rows from the FULL specialization argument list, optionally
 //     overlaid with the as-written types `written` where positions align;
 //   - a typed presentation intent carrying the encoded argument literals;

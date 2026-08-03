@@ -92,6 +92,7 @@ auto fixture_batch(ast::FactCompleteness completeness =
                                            .decl_line = 4,
                                            .decl_col = 2,
                                            .decl_path = "src/main.cpp",
+                                           .is_named_instance = true,
                                            .identity_source = "src/main.cpp",
                                            .linkage = "external",
                                            .callable_kind = "free",
@@ -509,6 +510,10 @@ TEST_CASE("canonical FactBatch artifact round trips every fact family") {
 
   REQUIRE(result.usable());
   const auto &info = require_info(result);
+  REQUIRE(require_batch(result).records().symbols.size() == 2);
+  CHECK(require_batch(result).records().symbols.front().decl_path ==
+        "src/main.cpp");
+  CHECK(require_batch(result).records().symbols.front().is_named_instance);
   CHECK(info.producer == "fact-batch-artifact-test");
   CHECK(info.producer_version == 1);
   CHECK(info.pass_version == 3);
@@ -523,7 +528,7 @@ TEST_CASE("canonical FactBatch artifact round trips every fact family") {
         std::vector<std::string>{"sha256:dep-a", "sha256:dep-b"});
   CHECK(info.content_digest ==
         "sha256:"
-        "09beca8c16f8d49d60fe5eebbc151f46a9937fdd1d267e8d7b14fb2febcfa2e7");
+        "4c0c16a3a7a4cc298789812052445859dbdfd2a0df9228a64457a4c01cd87b42");
 
   const auto replay =
       ast::encode_fact_batch_artifact(require_batch(result), options);
@@ -742,7 +747,7 @@ TEST_CASE("FactBatch decoder exercises authenticated corruption branches") {
   require_diagnostic(result, ast::FactBatchArtifactErrorCode::incompatible);
 
   auto unsupported_version = empty_wire_bytes();
-  unsupported_version.at(kTestWireMagic.size()) = std::byte{0x02};
+  unsupported_version.at(kTestWireMagic.size()) = std::byte{0x03};
   refresh_test_digest(unsupported_version);
   result = ast::decode_fact_batch_artifact(
       ast::FactBatchArtifact::from_bytes(std::move(unsupported_version)),
@@ -933,7 +938,7 @@ TEST_CASE("FactBatch artifact spill is bounded and transfer neutral") {
   CHECK(require_info(result).byte_size == artifact.byte_size());
   CHECK(require_info(result).content_digest ==
         "sha256:"
-        "09beca8c16f8d49d60fe5eebbc151f46a9937fdd1d267e8d7b14fb2febcfa2e7");
+        "4c0c16a3a7a4cc298789812052445859dbdfd2a0df9228a64457a4c01cd87b42");
   CHECK(bytes(loaded) == bytes(artifact));
 
   REQUIRE(std::filesystem::remove(materialized));

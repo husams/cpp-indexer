@@ -396,10 +396,13 @@ void write_symbol_location(BinaryWriter &writer, const SymbolRecord &value) {
                                 [&](auto item) { writer.i64(item); });
   writer.optional<std::int64_t>(value.decl_col,
                                 [&](auto item) { writer.i64(item); });
+  writer.optional<std::string>(value.decl_path,
+                               [&](const auto &item) { writer.string(item); });
   writer.boolean(value.is_definition);
   writer.boolean(value.is_pure);
   writer.boolean(value.is_static);
   writer.boolean(value.is_instantiation);
+  writer.boolean(value.is_named_instance);
 }
 
 void write_symbol_identity(BinaryWriter &writer, const SymbolRecord &value) {
@@ -457,10 +460,13 @@ void read_symbol_location(FactBatchArtifactInput &reader, SymbolRecord &value) {
   value.end_col = reader.i64();
   value.decl_line = reader.optional<std::int64_t>([&] { return reader.i64(); });
   value.decl_col = reader.optional<std::int64_t>([&] { return reader.i64(); });
+  value.decl_path =
+      reader.optional<std::string>([&] { return reader.string(); });
   value.is_definition = reader.boolean();
   value.is_pure = reader.boolean();
   value.is_static = reader.boolean();
   value.is_instantiation = reader.boolean();
+  value.is_named_instance = reader.boolean();
 }
 
 void read_symbol_identity(FactBatchArtifactInput &reader, SymbolRecord &value) {

@@ -1,23 +1,23 @@
 #include "ast/index_engine.hpp"
 #include "ast/front_end_reuse.hpp"
 
-#include "ast/controlled_header_writer.hpp"
 #include "ast/declaration_edge_visitor.hpp"
 #include "ast/display_name_rewrite.hpp"
+#include "ast/fact_batch.hpp"
 #include "ast/function_definition_visitor.hpp"
 #include "ast/include_facts.hpp"
+#include "ast/kind_map.hpp"
 #include "ast/location.hpp"
 #include "ast/namespace_use_visitor.hpp"
 #include "ast/owned_header_plan.hpp"
 #include "ast/pass_registry.hpp"
 #include "ast/routed_root_events.hpp"
-#include "ast/storage_edge_sink.hpp"
-#include "ast/storage_symbol_sink.hpp"
 #include "ast/symbol_visitor.hpp"
 
 #include "catalogs/generated_catalog.hpp"
 #include "compiledb/compiledb.hpp"
 #include "profile/index_profile.hpp"
+#include "storage/fact_batch_writer.hpp"
 #include "storage/ports.hpp"
 #include "storage/sqlite_adapters.hpp"
 #include "storage/storage.hpp"
@@ -51,6 +51,7 @@
 #include <functional>
 #include <memory>
 #include <numeric>
+#include <set>
 #include <stdexcept>
 #include <tuple>
 #include <unordered_map>
@@ -148,7 +149,6 @@ private:
 struct EngineState {
   cidx::Storage *db = nullptr;
   cidx::storage::AstStoragePorts *ports = nullptr;
-  std::unique_ptr<cidx::storage::UnitOfWork> unit;
   const cidx::File *rec = nullptr;
   std::string path; // main file (canonical absolute)
   bool graph_enabled = true;
@@ -162,11 +162,15 @@ struct EngineState {
   IncludeFacts includes;
   std::vector<PresentationIntent> presentation_intents;
   const cidx::IncludeConfig *config = nullptr; // v31: this TU's normalized args
+  const cidx::TranslationUnitConfig *publication_config = nullptr;
   int64_t normalized_config_id = -1;
   ComponentOwnershipIndex *ownership = nullptr;
   IndexSessionMetrics *session_metrics = nullptr;
   clang::Preprocessor *pp = nullptr; // v31: for include-guard status
   bool tu_handled = false;
+  IndexFailurePoint requested_failure = IndexFailurePoint::none;
+  std::optional<FactBatch> batch;
+  OwnedHeaderRoutePlan route_plan;
 };
 
 // Severity map mirroring CXDiagnosticSeverity (collect_diagnostics parity).
@@ -223,9 +227,62 @@ class TranslationUnitIndexer {
 public:
   TranslationUnitIndexer(clang::ASTContext &context, EngineState &state)
       : context_(context), state_(state), db_(*state.db),
-        symbols_(*state.ports),
-        edges_(*state.ports, &state.out->evidence, &state.presentation_intents),
-        tu_(context.getTranslationUnitDecl()) {}
+        recorder_("production-index"), symbol_emitter_(recorder_),
+        tu_(context.getTranslationUnitDecl()) {
+    recorder_.set_persistent_symbol_lookup(
+        [this](
+            const std::string &usr,
+            const std::optional<std::string> &identity_source,
+            const FactPartitionKey &partition) -> std::optional<SymbolRecord> {
+          const auto universe = db_.get_semantic_universe_by_key(
+              partition.configuration.semantic_universe);
+          if (!universe) {
+            return std::nullopt;
+          }
+          const auto symbol =
+              db_.lookup_symbol(usr, universe->id, identity_source,
+                                partition.configuration.translation_unit);
+          if (!symbol) {
+            return std::nullopt;
+          }
+          const std::string file =
+              symbol->file_id
+                  ? db_.file_abs_path(*symbol->file_id).value_or("")
+                  : identity_source.value_or(symbol->decl_path.value_or(""));
+          return SymbolRecord{
+              .file = file,
+              .usr = symbol->usr,
+              .spelling = symbol->spelling,
+              .kind = cidx_kind_int_from_name(symbol->kind),
+              .qual_name = symbol->qual_name,
+              .display_name = symbol->display_name,
+              .type_info = symbol->type_info,
+              .line = 0,
+              .col = 0,
+              .end_line = 0,
+              .end_col = 0,
+              .decl_path = symbol->decl_path,
+              .is_definition = false,
+              .is_pure = symbol->is_pure,
+              .is_static = symbol->is_static,
+              .is_instantiation = symbol->is_instantiation,
+              .callable_kind = symbol->callable_kind,
+              .template_origin = symbol->template_origin,
+              .template_form = symbol->template_form,
+              .linkage = symbol->linkage,
+              .access = symbol->access,
+              .parent_usr = symbol->parent_usr,
+              .const_value = symbol->const_value,
+              .resolved = false,
+              .semantic_universe = partition.configuration.semantic_universe,
+              .normalized_configuration =
+                  partition.configuration.normalized_configuration,
+              .identity_source = identity_source,
+              .identity_translation_unit =
+                  partition.configuration.translation_unit,
+              .kind_name = symbol->kind};
+        });
+  }
 
   void run() {
     if (!prepare_routed_files()) {
@@ -241,9 +298,55 @@ public:
       provider(session, registry, plan);
     }
     record_pass_metrics(registry.run(plan, &session));
+    state_.batch = recorder_.canonical_batch();
+    update_output_stats(*state_.batch);
+    state_.out->evidence = state_.batch->records().evidence;
   }
 
 private:
+  static auto partition_fact_count(const FactBatch &batch,
+                                   const FactPartitionKey &partition,
+                                   std::initializer_list<FactFamily> families)
+      -> std::size_t {
+    const auto found = std::ranges::find_if(
+        batch.partitions(), [&partition](const FileFactPartition &candidate) {
+          return candidate.key.file == partition.file;
+        });
+    if (found == batch.partitions().end()) {
+      return 0;
+    }
+    return std::transform_reduce(
+        families.begin(), families.end(), std::size_t{0}, std::plus<>(),
+        [&found](FactFamily family) {
+          const auto members = found->members.find(family);
+          return members == found->members.end() ? std::size_t{0}
+                                                 : members->second.size();
+        });
+  }
+
+  void update_output_stats(const FactBatch &batch) const {
+    state_.out->stored = 0;
+    state_.out->headers.indexed = static_cast<int>(pending_headers_.size());
+    state_.out->headers.symbols = 0;
+    for (const SymbolRecord &symbol : batch.records().symbols) {
+      if (symbol.line <= 0) {
+        continue;
+      }
+      const std::string symbol_path =
+          pathutil::normpath(pathutil::abspath(symbol.file));
+      if (symbol_path == state_.path) {
+        ++state_.out->stored;
+        continue;
+      }
+      if (std::ranges::any_of(pending_headers_,
+                              [&symbol_path](const PendingHeader &header) {
+                                return header.path == symbol_path;
+                              })) {
+        ++state_.out->headers.symbols;
+      }
+    }
+  }
+
   // The rooted graph collector's event bound, matching the emitted-fact budget
   // every extraction pass declares. Overflow raises the named
   // PassBudgetExceeded diagnostic instead of letting the buffer grow without
@@ -296,8 +399,27 @@ private:
         descriptor("symbols.main", {FrontendCapability::ast}, {}, {"symbols"},
                    {}, PassScope::main_file, TraversalMode::declaration),
         [this](PassExecutionContext &execution) -> void {
+          const auto main_route = std::ranges::find_if(
+              state_.route_plan.routes(), [](const PlannedFileRoute &route) {
+                return route.role == PlannedFileRole::translation_unit;
+              });
+          if (main_route == state_.route_plan.routes().end()) {
+            throw std::logic_error(
+                "diagnostic capture has no translation-unit route");
+          }
           for (const cidx::Diagnostic &diagnostic : state_.out->diagnostics) {
             execution.metrics.note_diagnostic(diagnostic.spelling);
+            recorder_.emit(DiagnosticFactRecord{
+                .partition = main_route->extraction.partition,
+                .severity = static_cast<DiagnosticSeverity>(
+                    std::clamp(diagnostic.severity - 1, 0, 3)),
+                .spelling = diagnostic.spelling,
+                .location_file = diagnostic.file_path
+                                     ? std::optional{portable_file_identity(
+                                           *diagnostic.file_path)}
+                                     : std::nullopt,
+                .line = diagnostic.line,
+                .col = diagnostic.col});
           }
         });
     registry.register_pass(
@@ -308,12 +430,6 @@ private:
                    FactCompleteness::complete, FactTrust::trusted, 1),
         [this](PassExecutionContext &execution) -> void {
           run_routed_symbol_pass(execution);
-          state_.out->stored = symbols_.stored_count(state_.rec->id);
-          main_symbol_ids_ = symbols_.symbol_ids(state_.rec->id);
-          for (PendingHeader &header : pending_headers_) {
-            header.stored = symbols_.stored_count(header.file_id);
-            header.symbol_ids = symbols_.symbol_ids(header.file_id);
-          }
           inject(cidx::storage::FailurePoint::symbol_capture_complete);
         });
   }
@@ -344,12 +460,6 @@ private:
         [this](PassExecutionContext &execution) -> void {
           collect_routed_graph_events(execution);
           run_routed_declaration_stage(execution);
-          for (PendingHeader &header : pending_headers_) {
-            header.edge_ids = edges_.edge_ids(header.file_id);
-            header.definition_ids = edges_.definition_ids(header.file_id);
-          }
-          main_edge_ids_ = edges_.edge_ids(state_.rec->id);
-          main_definition_ids_ = edges_.definition_ids(state_.rec->id);
           inject(cidx::storage::FailurePoint::declaration_replay);
         });
     registry.register_pass(
@@ -362,12 +472,6 @@ private:
                    FactCompleteness::complete, FactTrust::trusted, 0),
         [this](PassExecutionContext &execution) -> void {
           routed_definition_visitor_ = collect_routed_definitions(execution);
-          for (PendingHeader &header : pending_headers_) {
-            header.edge_ids = edges_.edge_ids(header.file_id);
-            header.definition_ids = edges_.definition_ids(header.file_id);
-          }
-          main_edge_ids_ = edges_.edge_ids(state_.rec->id);
-          main_definition_ids_ = edges_.definition_ids(state_.rec->id);
           inject(cidx::storage::FailurePoint::definition_replay);
         });
     registry.register_pass(
@@ -392,12 +496,6 @@ private:
                    FactTrust::trusted, 0),
         [this](PassExecutionContext &execution) -> void {
           run_routed_namespace_stage(execution);
-          for (PendingHeader &header : pending_headers_) {
-            header.edge_ids = edges_.edge_ids(header.file_id);
-            header.definition_ids = edges_.definition_ids(header.file_id);
-          }
-          main_edge_ids_ = edges_.edge_ids(state_.rec->id);
-          main_definition_ids_ = edges_.definition_ids(state_.rec->id);
           inject(cidx::storage::FailurePoint::namespace_replay);
         });
     auto header_association = descriptor(
@@ -412,25 +510,26 @@ private:
           for (PendingHeader &header : pending_headers_) {
             if (!SourceSnapshot{.md5 = header.md5}.matches(header.path)) {
               state_.out->source_changed = true;
-              db_.set_file_indexed(header.file_id, false);
               continue;
             }
-            const AssociationStats stats = db_.associate_facts_for_file(
-                header.file_id, state_.normalized_config_id, header.symbol_ids,
-                header.edge_ids, header.definition_ids);
-            profile::add_counter("applicability_attempted", stats.attempted);
-            profile::add_counter("applicability_inserted", stats.inserted);
-            profile::add_counter("applicability_ignored", stats.ignored);
-            profile::add_counter("applicability_deleted", stats.deleted);
-            profile::add_counter("applicability_temporary_rows",
-                                 stats.temporary_rows);
-            execution.metrics.note_emitted(stats.inserted);
-            execution.metrics.note_fact_family("file_associations",
-                                               stats.attempted, stats.inserted,
-                                               stats.ignored);
-            db_.mark_file_indexed(header.file_id, header.mtime, header.md5);
-            ++state_.out->headers.indexed;
-            state_.out->headers.symbols += header.stored;
+            const auto route =
+                std::ranges::find(state_.route_plan.routes(), header.path,
+                                  &PlannedFileRoute::path);
+            if (route == state_.route_plan.routes().end()) {
+              throw std::logic_error(
+                  "header route disappeared before publication");
+            }
+            recorder_.emit(ApplicabilityOwnershipRecord{
+                .partition = route->extraction.partition,
+                .file = route->extraction.partition.file,
+                .role = ApplicabilityRole::header,
+                .state = ApplicabilityState::registered,
+                .generation = {.token = state_.route_plan.token()}});
+            const FactBatch snapshot = recorder_.snapshot();
+            execution.metrics.note_emitted(partition_fact_count(
+                snapshot, route->extraction.partition,
+                {FactFamily::symbols, FactFamily::relations,
+                 FactFamily::definitions}));
           }
           inject(cidx::storage::FailurePoint::header_association);
         });
@@ -442,7 +541,7 @@ private:
                                       PassScope::main_file,
                                       TraversalMode::lifecycle),
                            [this](PassExecutionContext &execution) -> void {
-                             configure_fact_file(state_.rec->id, true);
+                             configure_fact_file(main_file_handle_, true);
                              execution.metrics.note_visited();
                            });
     registry.register_pass(
@@ -471,12 +570,6 @@ private:
             run_statement_stage(*routed_definition_visitor_, execution, nullptr,
                                 nullptr);
           }
-          for (PendingHeader &header : pending_headers_) {
-            header.edge_ids = edges_.edge_ids(header.file_id);
-            header.definition_ids = edges_.definition_ids(header.file_id);
-          }
-          main_edge_ids_ = edges_.edge_ids(state_.rec->id);
-          main_definition_ids_ = edges_.definition_ids(state_.rec->id);
           inject(cidx::storage::FailurePoint::statement_body_replay);
         });
     registry.register_pass(
@@ -503,6 +596,7 @@ private:
   }
 
   void persist_presentation(PassExecutionContext &execution) {
+    state_.presentation_intents = recorder_.pending_presentation_intents();
     std::ranges::sort(state_.presentation_intents, {},
                       [](const PresentationIntent &intent) -> auto {
                         return std::tie(intent.symbol_id, intent.display_args);
@@ -522,7 +616,7 @@ private:
     std::vector<std::pair<std::int64_t, std::string>> updates;
     updates.reserve(state_.presentation_intents.size());
     for (const PresentationIntent &intent : state_.presentation_intents) {
-      const auto display = edges_.lookup_display_name(intent.symbol_id);
+      const auto display = recorder_.lookup_display_name(intent.symbol_id);
       if (!display) {
         continue;
       }
@@ -534,7 +628,7 @@ private:
     }
     execution.metrics.note_emitted(updates.size());
     for (const auto &[symbol_id, display] : updates) {
-      edges_.update_display_name(symbol_id, display);
+      recorder_.update_display_name(symbol_id, display);
     }
     execution.metrics.note_fact_family("display_names", before, updates.size(),
                                        before -
@@ -552,19 +646,25 @@ private:
     registry.register_pass(
         std::move(main_association),
         [this](PassExecutionContext &execution) -> void {
-          const AssociationStats stats = db_.associate_facts_for_file(
-              state_.rec->id, state_.normalized_config_id, main_symbol_ids_,
-              main_edge_ids_, main_definition_ids_);
-          profile::add_counter("applicability_attempted", stats.attempted);
-          profile::add_counter("applicability_inserted", stats.inserted);
-          profile::add_counter("applicability_ignored", stats.ignored);
-          profile::add_counter("applicability_deleted", stats.deleted);
-          profile::add_counter("applicability_temporary_rows",
-                               stats.temporary_rows);
-          execution.metrics.note_emitted(stats.inserted);
-          execution.metrics.note_fact_family("file_associations",
-                                             stats.attempted, stats.inserted,
-                                             stats.ignored);
+          const auto route = std::ranges::find_if(
+              state_.route_plan.routes(),
+              [](const PlannedFileRoute &candidate) {
+                return candidate.role == PlannedFileRole::translation_unit;
+              });
+          if (route == state_.route_plan.routes().end()) {
+            throw std::logic_error("main route disappeared before publication");
+          }
+          recorder_.emit(ApplicabilityOwnershipRecord{
+              .partition = route->extraction.partition,
+              .file = route->extraction.partition.file,
+              .role = ApplicabilityRole::translation_unit,
+              .state = ApplicabilityState::registered,
+              .generation = {.token = state_.route_plan.token()}});
+          const FactBatch snapshot = recorder_.snapshot();
+          execution.metrics.note_emitted(
+              partition_fact_count(snapshot, route->extraction.partition,
+                                   {FactFamily::symbols, FactFamily::relations,
+                                    FactFamily::definitions}));
           inject(cidx::storage::FailurePoint::main_association);
         });
     registry.register_pass(
@@ -577,22 +677,75 @@ private:
             resolve_include_guards(*state_.pp, state_.includes);
           }
           execution.metrics.note_visited(state_.includes.includes.size());
-          const IncludeFactStats stats =
-              persist_include_facts(db_, state_.includes, *state_.config);
-          profile::add_counter("include_attempted", stats.attempted);
-          profile::add_counter("include_inserted_or_updated",
-                               stats.inserted_or_updated);
-          profile::add_counter("include_ignored", stats.ignored);
-          profile::add_counter("include_deleted", stats.deleted);
-          profile::add_counter("include_cascade_deleted",
-                               stats.cascade_deleted);
-          profile::add_counter("include_path_resolution_queries",
-                               stats.path_resolution_queries);
-          execution.metrics.note_duplicate(stats.duplicates);
-          execution.metrics.note_emitted(stats.inserted_or_updated);
-          execution.metrics.note_fact_family("include_facts", stats.attempted,
-                                             stats.inserted_or_updated,
-                                             stats.ignored);
+          std::uint64_t recorded = 0;
+          for (const IncludeFact &fact : state_.includes.includes) {
+            const auto source = routed_file_ids_.find(fact.src_path);
+            const FactPartitionKey owner = fact_partition(fact.src_path);
+            if (source != routed_file_ids_.end()) {
+              recorder_.set_current_file_id(source->second);
+            } else {
+              if (!db_.get_file(fact.src_path)) {
+                continue;
+              }
+              // Include facts are configuration-specific even when the owned
+              // header's semantic partition is already current. Register its
+              // natural partition so this TU still publishes the nested edge.
+              recorder_.set_partition(owner);
+            }
+            recorder_.emit(IncludeDirectiveRecord{
+                .partition = owner,
+                .source = owner.file,
+                .destination =
+                    fact.resolved
+                        ? std::optional(portable_file_identity(fact.dst_path))
+                        : std::nullopt,
+                .destination_path = fact.dst_path,
+                .spelling = fact.spelling,
+                .directive = static_cast<IncludeDirectiveKind>(fact.directive),
+                .line = fact.line,
+                .col = fact.col,
+                .begin_offset = fact.begin_offset,
+                .end_offset = fact.end_offset,
+                .conditional_fingerprint = fact.cond_fingerprint,
+                .is_angled = fact.is_angled,
+                .resolved = fact.resolved,
+                .is_system = fact.is_system,
+                .guarded = fact.guarded});
+            ++recorded;
+          }
+          for (const MacroUseFact &fact : state_.includes.macro_uses) {
+            const auto source = routed_file_ids_.find(fact.src_path);
+            const FactPartitionKey owner = fact_partition(fact.src_path);
+            if (source != routed_file_ids_.end()) {
+              recorder_.set_current_file_id(source->second);
+            } else {
+              if (!db_.get_file(fact.src_path)) {
+                continue;
+              }
+              recorder_.set_partition(owner);
+            }
+            recorder_.emit(MacroUseRecord{
+                .partition = owner,
+                .source = owner.file,
+                .definition = portable_file_identity(fact.def_path),
+                .definition_path = fact.def_path,
+                .name = fact.name});
+            ++recorded;
+          }
+          std::set<std::pair<std::string, std::string>> unique_edges;
+          for (const IncludeFact &fact : state_.includes.includes) {
+            unique_edges.emplace(fact.src_path, fact.dst_path);
+          }
+          const std::size_t collapsed =
+              state_.includes.includes.size() - unique_edges.size();
+          execution.metrics.note_duplicate(1 + (2 * collapsed));
+          execution.metrics.note_emitted(
+              recorded + (state_.includes.includes.empty() ? 0 : 1));
+          execution.metrics.note_fact_family(
+              "include_facts",
+              state_.includes.includes.size() +
+                  state_.includes.macro_uses.size(),
+              recorded);
         });
     registry.register_pass(
         descriptor(
@@ -658,14 +811,14 @@ private:
     return FrontendSession{
         .ast_context = &context_,
         .preprocessor = state_.pp,
-        .declaration_ports = &static_cast<DeclarationPassPorts &>(edges_),
-        .statement_ports = &static_cast<StatementFactPorts &>(edges_),
-        .namespace_ports = &static_cast<NamespacePassPorts &>(edges_),
-        .definition_ports = &static_cast<DefinitionScopeEmitter &>(edges_),
-        .evidence = &static_cast<EvidenceEmitter &>(edges_),
+        .declaration_ports = &static_cast<DeclarationPassPorts &>(recorder_),
+        .statement_ports = &static_cast<StatementFactPorts &>(recorder_),
+        .namespace_ports = &static_cast<NamespacePassPorts &>(recorder_),
+        .definition_ports = &static_cast<DefinitionScopeEmitter &>(recorder_),
+        .evidence = &static_cast<EvidenceEmitter &>(recorder_),
         .presentation_intents =
-            &static_cast<PresentationIntentEmitter &>(edges_),
-        .lifecycle = &static_cast<IndexingLifecycle &>(edges_),
+            &static_cast<PresentationIntentEmitter &>(recorder_),
+        .lifecycle = &static_cast<IndexingLifecycle &>(recorder_),
         .cfg_builder = [this](const clang::FunctionDecl *function)
             -> std::unique_ptr<clang::CFG> {
           if (function == nullptr || function->getBody() == nullptr) {
@@ -730,12 +883,10 @@ private:
 
   void run_routed_symbol_pass(PassExecutionContext &execution) {
     routed_symbol_file_id_ = -1;
-    symbols_.set_identity_translation_unit_config_id(
-        state_.normalized_config_id, state_.rec->id);
-    symbols_.reset_all_counters();
-    symbols_.set_metrics(&execution.metrics);
+    recorder_.set_identity_translation_unit_config_id(
+        state_.normalized_config_id, main_file_handle_);
     SymbolVisitor visitor(
-        context_, symbols_, {}, &execution.metrics,
+        context_, symbol_emitter_, {}, &execution.metrics,
         [this](const std::string &path) { return route_symbol_file(path); });
     execution.metrics.note_whole_tu_traversal();
     profile::add_counter("root_traverse_decl_calls");
@@ -743,9 +894,13 @@ private:
   }
 
   [[nodiscard]] auto translation_unit_route_key() const -> std::string {
-    return state_.ports->workspace
-        .portable_translation_unit_identity_for_config(
-            state_.normalized_config_id, state_.rec->id);
+    if (state_.publication_config == nullptr) {
+      throw std::logic_error("publication configuration is unavailable");
+    }
+    return "config:" +
+           translation_unit_config_hash(*state_.publication_config) +
+           "\x1fsource:" +
+           db_.portable_source_identity_for_file(state_.rec->id);
   }
 
   [[nodiscard]] auto portable_file_identity(const std::string &path) const
@@ -827,71 +982,6 @@ private:
     return plan_owned_header_routes(route_generation(), std::move(candidates));
   }
 
-  [[nodiscard]] bool
-  apply_owned_header_route_plan(const OwnedHeaderRoutePlan &plan,
-                                double &persistence_seconds) {
-    const profile::ScopedAccumulator persistence(persistence_seconds);
-    ControlledHeaderWriter writer(
-        [this](const PlannedFileRoute &route) {
-          return state_.ports->source_write.add_file_path(
-              route.path, route.snapshot.mtime, route.snapshot.md5,
-              route.compile_options, route.driver);
-        },
-        [this](std::int64_t file_id) {
-          db_.capture_transform_changes_for_file(file_id);
-          state_.ports->symbols_write.delete_symbols_for_file(file_id);
-        });
-    const ControlledHeaderWriteResult applied = writer.apply(
-        plan, translation_unit_route_key(), route_generation(),
-        [](const std::string &path, const PlannedSourceSnapshot &snapshot) {
-          return SourceSnapshot{.mtime = snapshot.mtime, .md5 = snapshot.md5}
-              .matches(path);
-        });
-    if (!applied.ok()) {
-      const HeaderPlanRejection rejection =
-          applied.rejection.value_or(HeaderPlanRejection{
-              .kind = HeaderPlanRejectionKind::invalid_route,
-              .path = {},
-              .detail = "controlled writer rejected a route without a reason"});
-      if (rejection.kind == HeaderPlanRejectionKind::stale_source) {
-        state_.out->source_changed = true;
-      } else {
-        state_.out->parse_failed = true;
-        state_.out->error = rejection.path.empty()
-                                ? rejection.detail
-                                : rejection.path + ": " + rejection.detail;
-      }
-      return false;
-    }
-    for (const PlannedFileRoute &route : plan.routes()) {
-      if (route.translation_unit != translation_unit_route_key()) {
-        continue;
-      }
-      if (route.role != PlannedFileRole::owned_header) {
-        continue;
-      }
-      const auto pending =
-          std::ranges::find(pending_headers_, route.path, &PendingHeader::path);
-      const std::optional<std::int64_t> transient_handle =
-          route.extraction.transient_file_handle;
-      if (pending == pending_headers_.end() || !transient_handle.has_value()) {
-        state_.out->parse_failed = true;
-        state_.out->error =
-            "controlled writer returned an invalid header route";
-        return false;
-      }
-      const auto file_id = applied.file_ids.find(*transient_handle);
-      if (file_id == applied.file_ids.end()) {
-        state_.out->parse_failed = true;
-        state_.out->error =
-            "controlled writer omitted a planned header file identity";
-        return false;
-      }
-      pending->file_id = file_id->second;
-    }
-    return true;
-  }
-
   // Planning and lifecycle publication complete before semantic pass
   // dispatch. The passes consume only the frozen path-to-file routing answer.
   [[nodiscard]] bool prepare_routed_files() {
@@ -900,14 +990,30 @@ private:
     {
       const profile::ScopedAccumulator routing(routing_seconds);
       pending_headers_ = discover_owned_headers(persistence_seconds);
-      const OwnedHeaderRoutePlan plan = build_owned_header_route_plan();
-      if (!apply_owned_header_route_plan(plan, persistence_seconds)) {
-        return false;
-      }
+      state_.route_plan = build_owned_header_route_plan();
       routed_file_ids_.clear();
-      routed_file_ids_.emplace(state_.path, state_.rec->id);
-      for (const PendingHeader &header : pending_headers_) {
-        routed_file_ids_.emplace(header.path, header.file_id);
+      for (const PlannedFileRoute &route : state_.route_plan.routes()) {
+        if (route.translation_unit != translation_unit_route_key() ||
+            !route.extraction.transient_file_handle) {
+          continue;
+        }
+        const std::int64_t handle = *route.extraction.transient_file_handle;
+        recorder_.set_partition(route.extraction.partition, handle);
+        routed_file_ids_.emplace(route.path, handle);
+        if (route.role == PlannedFileRole::translation_unit) {
+          main_file_handle_ = handle;
+          continue;
+        }
+        const auto pending = std::ranges::find(pending_headers_, route.path,
+                                               &PendingHeader::path);
+        if (pending != pending_headers_.end()) {
+          pending->file_id = handle;
+        }
+      }
+      if (main_file_handle_ < 0) {
+        state_.out->parse_failed = true;
+        state_.out->error = "publication plan omitted the main file route";
+        return false;
       }
     }
     profile::add_timing(profile::kRootSymbolRoutingTiming,
@@ -923,7 +1029,7 @@ private:
       return false;
     }
     if (routed_symbol_file_id_ != file->second) {
-      symbols_.set_current_file_id(file->second);
+      recorder_.set_current_file_id(file->second);
       routed_symbol_file_id_ = file->second;
     }
     return true;
@@ -935,7 +1041,7 @@ private:
       return std::nullopt;
     }
     if (routed_fact_file_id_ != file->second) {
-      edges_.set_current_file_id(file->second);
+      recorder_.set_current_file_id(file->second);
       routed_fact_file_id_ = file->second;
     }
     return file->second;
@@ -953,22 +1059,12 @@ private:
   }
 
   void configure_fact_file(int64_t file_id, bool reset) {
-    edges_.set_current_file_id(file_id);
-    edges_.set_identity_translation_unit_config_id(state_.normalized_config_id,
-                                                   state_.rec->id);
+    recorder_.set_current_file_id(file_id);
+    recorder_.set_identity_translation_unit_config_id(
+        state_.normalized_config_id, main_file_handle_);
     if (reset) {
-      edges_.delete_edges_for_file(file_id);
-      edges_.delete_definitions_for_file(file_id);
-      edges_.reset_fact_ids();
-    }
-  }
-
-  static auto append_fact_ids(std::vector<int64_t> &destination,
-                              const std::vector<int64_t> &source) -> void {
-    for (const int64_t id : source) {
-      if (std::ranges::find(destination, id) == destination.end()) {
-        destination.push_back(id);
-      }
+      recorder_.delete_edges_for_file(file_id);
+      recorder_.delete_definitions_for_file(file_id);
     }
   }
 
@@ -999,14 +1095,13 @@ private:
     if (!state_.graph_enabled || graph_events_ == nullptr) {
       return;
     }
-    edges_.reset_all_fact_ids();
     routed_fact_file_id_ = -1;
     BudgetedDeclarationPassPorts ports(
-        static_cast<DeclarationPassPorts &>(edges_), execution.metrics);
+        static_cast<DeclarationPassPorts &>(recorder_), execution.metrics);
     BudgetedPresentationIntentEmitter presentation_intents(
-        static_cast<PresentationIntentEmitter &>(edges_), execution.metrics);
+        static_cast<PresentationIntentEmitter &>(recorder_), execution.metrics);
     BudgetedDefinitionScopeEmitter definitions(
-        static_cast<DefinitionScopeEmitter &>(edges_), execution.metrics);
+        static_cast<DefinitionScopeEmitter &>(recorder_), execution.metrics);
     DeclarationEdgeVisitor decls(
         context_, ports, {}, -1, &definitions, &execution.metrics,
         &presentation_intents,
@@ -1019,11 +1114,10 @@ private:
     if (!state_.graph_enabled || graph_events_ == nullptr) {
       return nullptr;
     }
-    edges_.reset_fact_ids();
     routed_fact_file_id_ = -1;
     auto visitor = std::make_unique<FunctionDefinitionVisitor>(
-        context_, static_cast<DeclarationIdentityResolver &>(edges_),
-        static_cast<DefinitionScopeEmitter &>(edges_), std::string{}, -1,
+        context_, static_cast<DeclarationIdentityResolver &>(recorder_),
+        static_cast<DefinitionScopeEmitter &>(recorder_), std::string{}, -1,
         &execution.metrics,
         [this](const std::string &path) { return route_fact_file(path); });
     graph_events_->replay_definitions(*visitor);
@@ -1038,29 +1132,23 @@ private:
       return;
     }
     configure_fact_file(visitor.file_id(), false);
-    edges_.reset_fact_ids();
     routed_fact_file_id_ = -1;
-    BudgetedStatementFactPorts ports(static_cast<StatementFactPorts &>(edges_),
-                                     execution.metrics);
+    BudgetedStatementFactPorts ports(
+        static_cast<StatementFactPorts &>(recorder_), execution.metrics);
     BudgetedDefinitionScopeEmitter definitions(
-        static_cast<DefinitionScopeEmitter &>(edges_), execution.metrics);
+        static_cast<DefinitionScopeEmitter &>(recorder_), execution.metrics);
     visitor.run_statement_pass(ports, &execution.metrics, &definitions);
-    if (edge_ids != nullptr) {
-      append_fact_ids(*edge_ids, edges_.edge_ids());
-    }
-    if (definition_ids != nullptr) {
-      append_fact_ids(*definition_ids, edges_.definition_ids());
-    }
+    static_cast<void>(edge_ids);
+    static_cast<void>(definition_ids);
   }
 
   void run_routed_namespace_stage(PassExecutionContext &execution) {
     if (!state_.graph_enabled || graph_events_ == nullptr) {
       return;
     }
-    edges_.reset_fact_ids();
     routed_fact_file_id_ = -1;
-    BudgetedNamespacePassPorts ports(static_cast<NamespacePassPorts &>(edges_),
-                                     execution.metrics);
+    BudgetedNamespacePassPorts ports(
+        static_cast<NamespacePassPorts &>(recorder_), execution.metrics);
     NamespaceUseVisitor ns(
         context_, ports, {}, -1, &execution.metrics,
         [this](const std::string &path) { return route_fact_file(path); });
@@ -1173,16 +1261,14 @@ private:
   clang::ASTContext &context_;
   EngineState &state_;
   cidx::Storage &db_;
-  StorageSymbolSink symbols_;
-  StorageEdgeSink edges_;
+  FactBatchRecorder recorder_;
+  SymbolEmitterAdapter symbol_emitter_;
   clang::Decl *tu_;
   std::vector<PendingHeader> pending_headers_;
   std::unordered_map<std::string, int64_t> routed_file_ids_;
   int64_t routed_symbol_file_id_ = -1;
   int64_t routed_fact_file_id_ = -1;
-  std::vector<int64_t> main_symbol_ids_;
-  std::vector<int64_t> main_edge_ids_;
-  std::vector<int64_t> main_definition_ids_;
+  int64_t main_file_handle_ = -1;
   std::unique_ptr<FunctionDefinitionVisitor> routed_definition_visitor_;
   // The one rooted graph traversal's recorded event stream, alive only between
   // its collection and the last replay of the same translation unit.
@@ -1578,10 +1664,30 @@ public:
     if (const auto found = configuration_id_cache_.find(configuration_hash);
         found != configuration_id_cache_.end()) {
       ++metrics_.configuration_id_hits;
+      if (found->second < 0) {
+        auto statement = db_.raw_db().prepare(
+            "SELECT id FROM translation_unit_config WHERE descriptor_hash=?");
+        statement.bind(1, std::string_view(configuration_hash));
+        if (statement.step()) {
+          const std::int64_t id = statement.col_int64(0);
+          configuration_id_cache_.insert_or_assign(configuration_hash, id);
+          return id;
+        }
+      }
       return found->second;
     }
     ++metrics_.configuration_id_misses;
-    const int64_t id = db_.add_translation_unit_config(configuration);
+    auto statement = db_.raw_db().prepare(
+        "SELECT id FROM translation_unit_config WHERE descriptor_hash=?");
+    statement.bind(1, std::string_view(configuration_hash));
+    std::int64_t id = -static_cast<std::int64_t>(
+        stable_fact_hash(configuration_hash) & 0x3fff'ffff'ffff'ffffULL);
+    if (id == 0) {
+      id = -1;
+    }
+    if (statement.step()) {
+      id = statement.col_int64(0);
+    }
     configuration_id_cache_.emplace(configuration_hash, id);
     return id;
   }
@@ -1835,10 +1941,13 @@ struct IndexOneSetup {
                 const std::string &path, bool graph_enabled,
                 IndexFailurePoint failure, IndexOneOutcome &out,
                 TranslationUnitConfig resolved_config,
+                TranslationUnitConfig publication_config,
                 ComponentOwnershipIndex &ownership,
                 IndexSessionMetrics &metrics)
-      : resolved(std::move(resolved_config)), setup(resolved.arguments, path),
-        collector(out.diagnostics), injector(failure), ports(db, &injector),
+      : resolved(std::move(resolved_config)),
+        publication(std::move(publication_config)),
+        setup(resolved.arguments, path), collector(out.diagnostics),
+        injector(failure), ports(db, &injector),
         ast_ports{.workspace = ports.workspace_catalog_read(),
                   .source = ports.source_read(),
                   .source_write = ports.source_write(),
@@ -1864,12 +1973,14 @@ struct IndexOneSetup {
     state.failure_injector = &injector;
     state.out = &out;
     state.config = &config;
+    state.publication_config = &publication;
     state.ownership = &ownership;
     state.session_metrics = &metrics;
-    state.unit = ports.unit_of_work().begin();
+    state.requested_failure = failure;
   }
 
   TranslationUnitConfig resolved;
+  TranslationUnitConfig publication;
   CompilationSetup setup;
   DiagCollector collector;
   PipelineFailureInjector injector;
@@ -1906,11 +2017,62 @@ void record_final_profile(
                        cpu_started, child_wall_before);
 }
 
-void rollback_index_one(EngineState &state, bool profiling) {
-  state.unit->rollback();
+void note_index_one_rollback(bool profiling) {
   if (profiling) {
     profile::note_transaction_rollback();
   }
+}
+
+auto writer_failure(IndexFailurePoint failure)
+    -> cidx::storage::FactBatchWriterFailurePoint {
+  switch (failure) {
+  case IndexFailurePoint::begin:
+    return cidx::storage::FactBatchWriterFailurePoint::temporary_load;
+  case IndexFailurePoint::adapter:
+    return cidx::storage::FactBatchWriterFailurePoint::entity_apply;
+  case IndexFailurePoint::commit:
+    return cidx::storage::FactBatchWriterFailurePoint::commit;
+  default:
+    return cidx::storage::FactBatchWriterFailurePoint::none;
+  }
+}
+
+void record_writer_profile(const cidx::storage::FactBatchWriterReport &report,
+                           bool profiling) {
+  if (!profiling) {
+    return;
+  }
+  profile::add_counter("fact_batch_writer.statements_prepared",
+                       report.statements_prepared);
+  profile::add_counter("fact_batch_writer.statements_reused",
+                       report.statements_reused);
+  profile::add_counter("fact_batch_writer.statements_eliminated",
+                       report.statements_eliminated);
+  profile::add_counter("fact_batch_writer.statement_executions",
+                       report.statement_executions);
+  profile::add_counter("fact_batch_writer.virtual_machine_steps",
+                       report.virtual_machine_steps);
+  profile::add_timing("fact_batch_writer.prepare", report.prepare_seconds);
+  profile::add_timing("fact_batch_writer.virtual_machine",
+                      report.virtual_machine_seconds);
+  profile::add_timing("fact_batch_writer.commit", report.commit_seconds);
+  std::uint64_t staged = 0;
+  std::uint64_t inserted = 0;
+  std::uint64_t updated = 0;
+  std::uint64_t ignored = 0;
+  std::uint64_t deleted = 0;
+  for (const auto &[_, rows] : report.families) {
+    staged += rows.staged;
+    inserted += rows.inserted;
+    updated += rows.updated;
+    ignored += rows.ignored;
+    deleted += rows.deleted;
+  }
+  profile::add_counter("fact_batch_writer.rows_staged", staged);
+  profile::add_counter("fact_batch_writer.rows_inserted", inserted);
+  profile::add_counter("fact_batch_writer.rows_updated", updated);
+  profile::add_counter("fact_batch_writer.rows_ignored", ignored);
+  profile::add_counter("fact_batch_writer.rows_deleted", deleted);
 }
 
 bool prepare_front_end_reuse(const TranslationUnitConfig &resolved,
@@ -1953,7 +2115,7 @@ IndexOneOutcome finalize_index_one(
   if (!state.tu_handled) {
     out.parse_failed = true;
     out.error = "cannot parse " + path;
-    rollback_index_one(state, profiling);
+    note_index_one_rollback(profiling);
     out.session_metrics = session.metrics();
     record_final_profile(session, profiled_metrics, profiling, path,
                          session_before, out, state, start_position,
@@ -1978,15 +2140,61 @@ IndexOneOutcome finalize_index_one(
     profile::add_timing("verification", elapsed_seconds(verification_started));
   }
   if (!out.parse_failed && !out.source_changed) {
-    const auto commit_started =
-        profiling ? ProfileClock::now() : ProfileClock::time_point{};
-    state.unit->commit();
-    if (profiling) {
-      profile::note_transaction_commit();
-      profile::add_timing("commit", elapsed_seconds(commit_started));
+    if (!state.batch) {
+      out.parse_failed = true;
+      out.error = "FactBatch extraction produced no publication batch";
+      note_index_one_rollback(profiling);
+    } else if (state.route_plan.routes().empty()) {
+      out.parse_failed = true;
+      out.error = "FactBatch extraction produced no publication route";
+      note_index_one_rollback(profiling);
+    } else {
+      const std::string translation_unit =
+          state.route_plan.routes().front().translation_unit;
+      out.publication = ExtractedFactPublication{
+          .batch = *state.batch,
+          .route_plan = state.route_plan,
+          .translation_unit = translation_unit,
+          .expected_generation = state.route_plan.generation(),
+          .configuration_id = state.normalized_config_id,
+          .configuration = *state.publication_config};
+      cidx::storage::FactBatchWriter writer(db);
+      cidx::storage::FactBatchPublicationContext context{
+          .route_plan = out.publication->route_plan,
+          .translation_unit = out.publication->translation_unit,
+          .expected_generation = out.publication->expected_generation,
+          .source_is_current =
+              [](const std::string &candidate,
+                 const PlannedSourceSnapshot &snapshot) {
+                return SourceSnapshot{.mtime = snapshot.mtime,
+                                      .md5 = snapshot.md5}
+                    .matches(candidate);
+              },
+          .configuration_id = out.publication->configuration_id,
+          .configuration = out.publication->configuration,
+          .failure = writer_failure(state.requested_failure)};
+      cidx::storage::FactBatchWriterResult result =
+          writer.apply(out.publication->batch, context);
+      record_writer_profile(result.report, profiling);
+      if (!result.ok()) {
+        note_index_one_rollback(profiling);
+        if (state.requested_failure != IndexFailurePoint::none) {
+          throw std::runtime_error(
+              result.error.value_or("injected FactBatch publication failure"));
+        }
+        if (result.error && (result.error->contains("readonly") ||
+                             result.error->contains("read-only"))) {
+          throw std::runtime_error(*result.error);
+        }
+        out.parse_failed = true;
+        out.error = result.error.value_or("FactBatch publication failed");
+      } else if (profiling) {
+        profile::note_transaction_commit();
+        profile::add_timing("commit", result.report.commit_seconds);
+      }
     }
   } else {
-    rollback_index_one(state, profiling);
+    note_index_one_rollback(profiling);
   }
   record_final_profile(session, profiled_metrics, profiling, path,
                        session_before, out, state, start_position,
@@ -2030,6 +2238,7 @@ IndexOneOutcome run_index_one(cidx::Storage &db, IndexSession &session,
   const TranslationUnitDescriptor &descriptor =
       session.impl_->prepared_descriptor(path, rec.id, source.md5);
   TranslationUnitConfig resolved = configuration_without_source(descriptor);
+  const TranslationUnitConfig publication_config = resolved;
   if (!prepare_front_end_reuse(resolved, no_front_end_reuse, profiling, out)) {
     return out;
   }
@@ -2038,15 +2247,16 @@ IndexOneOutcome run_index_one(cidx::Storage &db, IndexSession &session,
                         elapsed_seconds(workspace_started));
   }
   IndexOneSetup prepared(db, rec, path, graph_enabled, failure, out,
-                         std::move(resolved), session.impl_->ownership(),
-                         session.impl_->metrics_);
+                         std::move(resolved), publication_config,
+                         session.impl_->ownership(), session.impl_->metrics_);
   CompilationSetup &setup = prepared.setup;
   EngineState &state = prepared.state;
   const std::vector<std::string> &args = prepared.resolved.arguments;
+  state.normalized_config_id = session.impl_->configuration_id(descriptor);
+
   if (profiling) {
     profile::note_transaction_begin();
   }
-  state.normalized_config_id = session.impl_->configuration_id(descriptor);
 
   execute_index_one_frontend(setup, state, out, profiling);
   return finalize_index_one(

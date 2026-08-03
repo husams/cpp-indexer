@@ -116,6 +116,14 @@ the percentage overhead, and paired canonical digests. Build that executable
 from the immediately preceding revision in a disposable worktree with the same
 compiler and build settings.
 
+`--baseline-cidx` is the separate writer commit A/B mode. Every synthetic
+workload/trial, plus self-index when enabled, runs with both the pre-writer and
+candidate executables. One JSON artifact records baseline, candidate, and
+paired deltas for wall time, peak RSS, prepared/reused/eliminated statements,
+VM steps, row outcomes, semantic digests, and translation-unit order. It also
+records that S-073 keeps the shipped durability profile and retains the
+binary/NOCASE spelling and qualified-name index pairs.
+
 Raw profile JSON, generated corpora, databases, command output, and recovery
 probes are written below `--work-root`, which must be outside the checkout.
 On macOS give that directory a `.noindex` suffix so Spotlight does not index

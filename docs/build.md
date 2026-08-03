@@ -5,7 +5,8 @@
 ## Toolchain
 
 - **CMake, C++23.** Build hosts: macOS AppleClang 15+ / Linux gcc 13+
-  (gcc-toolset-13 on RHEL 9). SQLite **≥ 3.35** required (for `RETURNING`).
+  (gcc-toolset-13 on RHEL 9). SQLite **≥ 3.37** required (for `RETURNING` and
+  `sqlite3_changes64`).
 - **LLVM/Clang dev install** — the engine links the Clang C++ API
   (`clang-cpp` + shared `libLLVM`). CMake auto-discovers it via
   `llvm-config --cmakedir`; pass `-DLLVM_DIR=…/lib/cmake/llvm
@@ -32,7 +33,7 @@ The script:
 - installs deps (`gcc-toolset-13`, `cmake`, `clang-devel`, `llvm-devel`,
   `clang-libs`, `llvm-libs`); `DEPS_ONLY=1` stops after deps;
 - builds a **static SQLite** from the amalgamation (RHEL ships 3.34.1, below the
-  3.35 floor);
+  3.37 floor);
 - configures with `LLVM_DIR`/`Clang_DIR` from `llvm-config --cmakedir` so
   `find_package(Clang)` resolves the versioned RHEL LLVM.
 

@@ -101,7 +101,7 @@ endif()
 
 message(STATUS "cidx: compiler ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}, C++${CMAKE_CXX_STANDARD}")
 
-# S02: storage layer sits on the system SQLite3 (>= 3.35 enforced at runtime).
+# S02: storage layer sits on the system SQLite3 (>= 3.37 enforced at runtime).
 find_package(SQLite3 REQUIRED)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
@@ -162,6 +162,7 @@ add_library(cidx_core STATIC
   src/util/front_end_reuse.cpp
   src/profile/index_profile.cpp
   src/storage/sqlite.cpp
+  src/storage/fact_batch_writer.cpp
   src/storage/sqlite_adapters.cpp
   src/storage/storage.cpp
   src/storage/transforms.cpp
