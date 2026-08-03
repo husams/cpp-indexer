@@ -821,9 +821,9 @@ source_identity(SqliteDb &db, const TransformDescriptor &d,
     canonical += "\x1e"
                  "change-generation\x1f" +
                  std::to_string(changes->generation);
-  } else {
-    canonical += "\x1equery\x1f" + query_identity(db, d.input_queries);
+    return sha256_hex(canonical);
   }
+  canonical += "\x1equery\x1f" + query_identity(db, d.input_queries);
   return sha256_hex(canonical);
 }
 
@@ -2160,6 +2160,11 @@ void SqliteStorageService::note_transform_changes(
     int64_t file_id, const std::vector<int64_t> &symbol_ids,
     const std::vector<int64_t> &edge_ids,
     const std::vector<int64_t> &definition_ids) {
+  auto baseline = db_.prepare(
+      "SELECT 1 FROM meta WHERE key = 'transform.generation' LIMIT 1");
+  if (!baseline.step()) {
+    return;
+  }
   auto write_id =
       db_.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, '1')");
   const auto record = [&](std::string_view kind, std::int64_t id) {
@@ -2246,14 +2251,15 @@ void SqliteStorageService::capture_transform_changes_for_file(int64_t file_id) {
 
 TransformChangeSet SqliteStorageService::pending_transform_changes() {
   TransformChangeSet changes;
-  changes.file_ids = read_change_ids(db_, "file");
-  changes.symbol_ids = read_change_ids(db_, "symbol");
-  changes.edge_ids = read_change_ids(db_, "edge");
-  changes.definition_ids = read_change_ids(db_, "definition");
-  changes.generation = std::stoull(
-      read_transform_meta(db_, "transform.change_generation").value_or("0"));
-  changes.trusted =
-      read_transform_meta(db_, "transform.change_trusted").value_or("0") == "1";
+  changes.file_ids = read_change_ids(this->db_, "file");
+  changes.symbol_ids = read_change_ids(this->db_, "symbol");
+  changes.edge_ids = read_change_ids(this->db_, "edge");
+  changes.definition_ids = read_change_ids(this->db_, "definition");
+  changes.generation =
+      std::stoull(read_transform_meta(this->db_, "transform.change_generation")
+                      .value_or("0"));
+  changes.trusted = read_transform_meta(this->db_, "transform.change_trusted")
+                        .value_or("0") == "1";
   return changes;
 }
 

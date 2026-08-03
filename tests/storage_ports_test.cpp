@@ -892,6 +892,7 @@ TEST_CASE("change capture skips work before a published baseline exists") {
   const auto directory = db.add_directory(component, "");
   const auto file = db.add_file(directory, "capture.cpp");
   db.capture_transform_changes_for_file(file);
+  db.note_transform_changes(file, {41}, {42}, {43});
   CHECK(db.pending_transform_changes().empty());
 }
 

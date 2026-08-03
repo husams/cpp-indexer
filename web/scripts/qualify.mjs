@@ -151,7 +151,7 @@ const relocateTrackedWorkspacePaths = (db) => {
   const escapedRoot = root.replaceAll("'", "''");
   return sqlite(db, `UPDATE clone SET path='${escapedRoot}' WHERE ` +
     `repository_id=(SELECT id FROM repository ` +
-    `WHERE name='cpp-indexer-self-host');`);
+    `WHERE name='cpp-indexer');`);
 };
 
 const prepareScenarioState = async (db, state) => {
@@ -234,7 +234,10 @@ const seenSemanticOutputs = new Map();
 const temporary = await mkdtemp(join(tmpdir(), 'cidx-explorer-qualification-'));
 try {
   const cppDb = resolve(root, 'index.db');
-  workspaceDbs.set('cpp-indexer', cppDb);
+  const cppQualificationDb = join(temporary, 'cpp-indexer.db');
+  await copyFile(cppDb, cppQualificationDb);
+  await relocateTrackedWorkspacePaths(cppQualificationDb);
+  workspaceDbs.set('cpp-indexer', cppQualificationDb);
   const banking = manifest.workspaces.find((workspace) => workspace.name === 'banking');
   if (!banking) throw new Error('banking workspace is missing');
   const bankingSource = resolve(root, banking.compile_commands);
