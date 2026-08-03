@@ -6,7 +6,9 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -32,8 +34,14 @@ std::string sha1_hex(const std::string &data);
 
 // Algorithm-tagged SHA-256 digest for content-addressed artifacts.
 std::string sha256_hex(const std::string &data);
+std::string sha256_hex(std::span<const std::byte> data);
 std::optional<std::string> sha256_of(const std::string &path);
 std::optional<std::string> sha256_of_fd(int fd);
+// Hash exactly the first byte_count bytes of a regular file descriptor.
+// Returns nullopt when the descriptor is invalid, shorter than byte_count, or
+// cannot be read. The descriptor offset is not changed.
+std::optional<std::string> sha256_of_fd_prefix(int fd,
+                                               std::uint64_t byte_count);
 
 // Cache key: sha1(abspath + "\0" + "\0".join(flags) [+ "\0drv\0" + driver])
 // Mirrors Python astcache.cache_key() byte-for-byte (ADR-005 §interchange).

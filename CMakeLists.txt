@@ -154,6 +154,7 @@ add_library(cidx_core STATIC
   src/util/env.cpp
   src/util/subprocess.cpp
   src/util/hashing.cpp
+  src/util/artifact_io.cpp
   src/util/json_min.cpp
   src/util/pathutil.cpp
   src/util/repo.cpp
@@ -286,6 +287,7 @@ add_library(cidx_ast OBJECT
   src/ast/fact_identity.cpp src/ast/fact_batch.cpp src/ast/fact_extraction.cpp
   src/ast/controlled_header_writer.cpp
   src/ast/owned_header_plan.cpp
+  src/ast/fact_batch_artifact.cpp
   src/ast/indexing_plan.cpp src/ast/pass_registry.cpp
   src/ast/index_engine.cpp
   src/ast/include_facts.cpp

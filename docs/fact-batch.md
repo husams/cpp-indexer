@@ -63,6 +63,11 @@ retain emission order.
 Canonicalization sorts and deduplicates exact records inside each partition;
 it retains conflicting payloads, repeated declarations, duplicate-USR groups,
 semantic-universe distinctions, and their apply metadata.
+The serialized artifact preserves that within-group sequence and validates its
+renumbered first-seen/conflict ordinals for internal consistency. Because the
+legacy sequence originates in extraction order, a decoder cannot independently
+derive it from the remaining record fields; the content digest protects the
+sequence in transit but is not an authenticity claim about its producer.
 
 ## Typed fact coverage
 
@@ -126,6 +131,7 @@ Here `k` is one selected keyed bucket, `r` is returned or copied output, and
 | `lookup_display_name` | `O(log n)` |
 | `update_display_name` | `O(log n + k)` |
 | `snapshot`, `batch`, `canonical_batch` | `O(n log n)` |
+| artifact canonical-layout validation | `O(n)` plus stable-key materialization |
 | `counters` | `O(1)` |
 
 No per-emission operation scans a growing whole-batch vector. The isolated
@@ -169,3 +175,6 @@ planning/lifecycle, and S-073 owns their set-based storage publication.
 - S-101 owns atomic clean-rebuild replacement.
 
 This contract adds no schema or Python-indexer change.
+
+The durable S-100 representation is frozen separately in the
+[FactBatch artifact v1 wire contract](fact-batch-artifact-v1.md).
