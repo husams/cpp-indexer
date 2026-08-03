@@ -7,6 +7,7 @@
 #include <ranges>
 #include <stdexcept>
 #include <tuple>
+#include <unordered_set>
 #include <utility>
 
 namespace cidx::ast {
@@ -81,6 +82,13 @@ auto symbol_record_key(const SymbolRecord &record) -> std::string {
          optional_text(record.parent_usr) + '\x1f' +
          optional_text(record.const_value) + '\x1f' +
          bool_text(record.resolved);
+}
+
+auto declaration_site_key(const DeclarationSiteRecord &record) -> std::string {
+  return record.symbol.stable_string() + ':' + std::to_string(record.line) +
+         ':' + std::to_string(record.col) + ':' +
+         std::to_string(record.end_line) + ':' +
+         std::to_string(record.end_col) + ':' + bool_text(record.is_definition);
 }
 
 auto edge_record_key(const EdgeRecord &record) -> std::string {
@@ -190,6 +198,56 @@ auto evidence_key(const EvidenceRecord &record) -> std::string {
          record.detail;
 }
 
+auto include_key(const IncludeDirectiveRecord &record) -> std::string {
+  return record.partition.stable_string() + ':' +
+         portable_file_key(record.source) + ':' +
+         optional_file_key(record.destination) + ':' + record.destination_path +
+         ':' + record.spelling + ':' +
+         std::to_string(std::to_underlying(record.directive)) + ':' +
+         std::to_string(record.line) + ':' + std::to_string(record.col) + ':' +
+         std::to_string(record.begin_offset) + ':' +
+         std::to_string(record.end_offset) + ':' +
+         record.conditional_fingerprint + ':' + bool_text(record.is_angled) +
+         bool_text(record.resolved) + bool_text(record.is_system) +
+         bool_text(record.guarded);
+}
+
+auto macro_key(const MacroUseRecord &record) -> std::string {
+  return record.partition.stable_string() + ':' +
+         portable_file_key(record.source) + ':' +
+         optional_file_key(record.definition) + ':' + record.definition_path +
+         ':' + record.name + ':' + std::to_string(record.count);
+}
+
+auto diagnostic_key(const DiagnosticFactRecord &record) -> std::string {
+  return record.partition.stable_string() + ':' +
+         std::to_string(static_cast<unsigned>(record.severity)) + ':' +
+         record.spelling + ':' + optional_file_key(record.location_file) + ':' +
+         optional_text(record.line) + ':' + optional_text(record.col);
+}
+
+auto presentation_key(const PresentationIntent &record) -> std::string {
+  std::string result = std::to_string(record.symbol_id);
+  for (const std::string &argument : record.display_args) {
+    result += ':' + std::to_string(argument.size()) + ':' + argument;
+  }
+  return result;
+}
+
+auto cleanup_key(const LifecycleCleanupIntent &record) -> std::string {
+  return record.partition.stable_string() + ':' +
+         std::to_string(static_cast<unsigned>(record.kind)) + ':' +
+         record.target.portable_path() + ':' + record.prior_generation.token;
+}
+
+auto applicability_key(const ApplicabilityOwnershipRecord &record)
+    -> std::string {
+  return record.partition.stable_string() + ':' + record.file.portable_path() +
+         ':' + std::to_string(static_cast<unsigned>(record.role)) + ':' +
+         std::to_string(static_cast<unsigned>(record.state)) + ':' +
+         optional_text(record.reason) + ':' + record.generation.token;
+}
+
 auto canonical_symbol_order(
     const std::vector<SymbolEmissionMetadata> &emissions)
     -> std::vector<SymbolEmissionMetadata> {
@@ -233,6 +291,103 @@ auto canonical_symbol_order(
                   std::make_move_iterator(entries.end()));
   }
   return result;
+}
+
+auto symbol_order_is_canonical(
+    const std::vector<SymbolEmissionMetadata> &emissions) -> bool {
+  using GroupOrder =
+      std::tuple<std::string, std::string, std::string, std::string>;
+  std::optional<GroupOrder> previous_order;
+  std::unordered_set<std::string> seen_symbols;
+  std::size_t offset = 0;
+  while (offset < emissions.size()) {
+    const std::string natural = emissions[offset].symbol.stable_string();
+    if (!seen_symbols.insert(natural).second) {
+      return false;
+    }
+    auto minimum_file = std::tuple(emissions[offset].apply_order.component_path,
+                                   emissions[offset].apply_order.directory_path,
+                                   emissions[offset].apply_order.file_name);
+    std::uint64_t group_index = 0;
+    while (offset < emissions.size() &&
+           emissions[offset].symbol.stable_string() == natural) {
+      const auto &entry = emissions[offset];
+      if (entry.first_seen != group_index || entry.last_seen != group_index ||
+          entry.apply_order.first_seen != group_index ||
+          entry.apply_order.conflict_ordinal != group_index) {
+        return false;
+      }
+      minimum_file =
+          std::min(minimum_file, std::tuple(entry.apply_order.component_path,
+                                            entry.apply_order.directory_path,
+                                            entry.apply_order.file_name));
+      ++group_index;
+      ++offset;
+    }
+    const auto order = std::tuple_cat(minimum_file, std::tuple(natural));
+    if (previous_order && *previous_order >= order) {
+      return false;
+    }
+    previous_order = order;
+  }
+  return true;
+}
+
+template <typename T, typename Key>
+auto family_is_canonical(const std::vector<T> &records,
+                         const std::vector<FileFactPartition> &partitions,
+                         FactFamily family, Key key) -> bool {
+  std::size_t expected_index = 0;
+  for (const FileFactPartition &partition : partitions) {
+    const auto found = partition.members.find(family);
+    if (found == partition.members.end()) {
+      continue;
+    }
+    if (found->second.empty()) {
+      return false;
+    }
+    std::optional<std::string> previous_key;
+    for (const std::size_t index : found->second) {
+      if (index != expected_index || index >= records.size()) {
+        return false;
+      }
+      const auto current_key = key(records[index]);
+      if (previous_key && *previous_key >= current_key) {
+        return false;
+      }
+      previous_key = current_key;
+      ++expected_index;
+    }
+  }
+  return expected_index == records.size();
+}
+
+template <typename T, typename Partition>
+auto family_ownership_is_canonical(
+    const std::vector<T> &records,
+    const std::vector<FileFactPartition> &partitions, FactFamily family,
+    Partition record_partition) -> bool {
+  for (const FileFactPartition &partition : partitions) {
+    const auto found = partition.members.find(family);
+    if (found == partition.members.end()) {
+      continue;
+    }
+    for (const std::size_t index : found->second) {
+      if (index >= records.size() ||
+          records[index].*record_partition != partition.key) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+auto partitions_are_strictly_ordered(
+    const std::vector<FileFactPartition> &partitions) -> bool {
+  return std::ranges::adjacent_find(partitions,
+                                    [](const auto &left, const auto &right) {
+                                      return !(left.key < right.key);
+                                    }) == partitions.end();
 }
 
 auto candidate_key(const TypeArgCandidate &candidate) -> std::string {
@@ -296,6 +451,78 @@ auto FactBatch::producer_version() const -> std::uint32_t {
 }
 auto FactBatch::completeness() const -> FactCompleteness {
   return data_->completeness;
+}
+auto FactBatch::has_canonical_layout() const -> bool {
+  if (!data_->canonical ||
+      !partitions_are_strictly_ordered(data_->partitions)) {
+    return false;
+  }
+  const auto &records = data_->records;
+  const auto &partitions = data_->partitions;
+  return family_is_canonical(records.symbols, partitions, FactFamily::symbols,
+                             symbol_record_key) &&
+         family_is_canonical(records.declaration_sites, partitions,
+                             FactFamily::declaration_sites,
+                             declaration_site_key) &&
+         family_ownership_is_canonical(records.declaration_sites, partitions,
+                                       FactFamily::declaration_sites,
+                                       &DeclarationSiteRecord::partition) &&
+         family_is_canonical(records.relations, partitions,
+                             FactFamily::relations, edge_record_key) &&
+         family_is_canonical(records.edge_sites, partitions,
+                             FactFamily::edge_sites, edge_site_key) &&
+         family_is_canonical(records.call_args, partitions,
+                             FactFamily::call_arguments, call_arg_key) &&
+         family_is_canonical(records.template_params, partitions,
+                             FactFamily::template_parameters,
+                             template_param_key) &&
+         family_is_canonical(records.template_args, partitions,
+                             FactFamily::template_arguments,
+                             template_arg_key) &&
+         family_is_canonical(records.type_nodes, partitions, FactFamily::types,
+                             type_node_key) &&
+         family_is_canonical(records.type_edges, partitions,
+                             FactFamily::type_edges, type_edge_key) &&
+         family_is_canonical(records.parameters, partitions,
+                             FactFamily::parameters, parameter_key) &&
+         family_is_canonical(records.symbol_types, partitions,
+                             FactFamily::symbol_types, symbol_type_key) &&
+         family_is_canonical(records.definitions, partitions,
+                             FactFamily::definitions, definition_key) &&
+         family_is_canonical(records.definition_edges, partitions,
+                             FactFamily::definition_edges,
+                             definition_edge_key) &&
+         family_is_canonical(records.includes, partitions, FactFamily::includes,
+                             include_key) &&
+         family_ownership_is_canonical(records.includes, partitions,
+                                       FactFamily::includes,
+                                       &IncludeDirectiveRecord::partition) &&
+         family_is_canonical(records.macros, partitions, FactFamily::macros,
+                             macro_key) &&
+         family_ownership_is_canonical(records.macros, partitions,
+                                       FactFamily::macros,
+                                       &MacroUseRecord::partition) &&
+         family_is_canonical(records.diagnostics, partitions,
+                             FactFamily::diagnostics, diagnostic_key) &&
+         family_ownership_is_canonical(records.diagnostics, partitions,
+                                       FactFamily::diagnostics,
+                                       &DiagnosticFactRecord::partition) &&
+         family_is_canonical(records.evidence, partitions, FactFamily::evidence,
+                             evidence_key) &&
+         family_is_canonical(records.presentation_intents, partitions,
+                             FactFamily::presentation_intents,
+                             presentation_key) &&
+         family_is_canonical(records.lifecycle_cleanup, partitions,
+                             FactFamily::lifecycle_cleanup, cleanup_key) &&
+         family_ownership_is_canonical(records.lifecycle_cleanup, partitions,
+                                       FactFamily::lifecycle_cleanup,
+                                       &LifecycleCleanupIntent::partition) &&
+         family_is_canonical(records.applicability, partitions,
+                             FactFamily::applicability, applicability_key) &&
+         family_ownership_is_canonical(
+             records.applicability, partitions, FactFamily::applicability,
+             &ApplicabilityOwnershipRecord::partition) &&
+         symbol_order_is_canonical(records.symbol_order);
 }
 auto FactBatch::records() const -> const FactRecords & {
   return data_->records;
@@ -853,17 +1080,9 @@ void FactBatchRecorder::append_symbol_records(FactBatch::Data &data,
                                               bool canonical) const {
   append_records(symbols_, data.records.symbols, FactFamily::symbols,
                  symbol_record_key, memberships, canonical);
-  append_records(
-      declaration_sites_, data.records.declaration_sites,
-      FactFamily::declaration_sites,
-      [](const DeclarationSiteRecord &record) {
-        return record.symbol.stable_string() + ':' +
-               std::to_string(record.line) + ':' + std::to_string(record.col) +
-               ':' + std::to_string(record.end_line) + ':' +
-               std::to_string(record.end_col) + ':' +
-               bool_text(record.is_definition);
-      },
-      memberships, canonical);
+  append_records(declaration_sites_, data.records.declaration_sites,
+                 FactFamily::declaration_sites, declaration_site_key,
+                 memberships, canonical);
   append_records(relations_, data.records.relations, FactFamily::relations,
                  edge_record_key, memberships, canonical);
   append_records(edge_sites_, data.records.edge_sites, FactFamily::edge_sites,
@@ -909,81 +1128,31 @@ void FactBatchRecorder::append_type_records(FactBatch::Data &data,
 void FactBatchRecorder::append_auxiliary_records(FactBatch::Data &data,
                                                  Memberships &memberships,
                                                  bool canonical) const {
-  append_records(
-      includes_, data.records.includes, FactFamily::includes,
-      [](const IncludeDirectiveRecord &record) {
-        return record.partition.stable_string() + ':' +
-               portable_file_key(record.source) + ':' +
-               optional_file_key(record.destination) + ':' +
-               record.destination_path + ':' + record.spelling + ':' +
-               std::to_string(std::to_underlying(record.directive)) + ':' +
-               std::to_string(record.line) + ':' + std::to_string(record.col) +
-               ':' + std::to_string(record.begin_offset) + ':' +
-               std::to_string(record.end_offset) + ':' +
-               record.conditional_fingerprint + ':' +
-               bool_text(record.is_angled) + bool_text(record.resolved) +
-               bool_text(record.is_system) + bool_text(record.guarded);
-      },
-      memberships, canonical);
-  append_records(
-      macros_, data.records.macros, FactFamily::macros,
-      [](const MacroUseRecord &record) {
-        return record.partition.stable_string() + ':' +
-               portable_file_key(record.source) + ':' +
-               optional_file_key(record.definition) + ':' +
-               record.definition_path + ':' + record.name + ':' +
-               std::to_string(record.count);
-      },
-      memberships, canonical);
-  append_records(
-      diagnostics_, data.records.diagnostics, FactFamily::diagnostics,
-      [](const DiagnosticFactRecord &record) {
-        return record.partition.stable_string() + ':' +
-               std::to_string(static_cast<unsigned>(record.severity)) + ':' +
-               record.spelling + ':' + optional_file_key(record.location_file) +
-               ':' + optional_text(record.line) + ':' +
-               optional_text(record.col);
-      },
-      memberships, canonical);
+  append_records(includes_, data.records.includes, FactFamily::includes,
+                 include_key, memberships, canonical);
+  append_records(macros_, data.records.macros, FactFamily::macros, macro_key,
+                 memberships, canonical);
+  append_records(diagnostics_, data.records.diagnostics,
+                 FactFamily::diagnostics, diagnostic_key, memberships,
+                 canonical);
   append_records(evidence_, data.records.evidence, FactFamily::evidence,
                  evidence_key, memberships, canonical);
-  append_records(
-      presentation_intents_, data.records.presentation_intents,
-      FactFamily::presentation_intents,
-      [](const PresentationIntent &record) {
-        std::string result = std::to_string(record.symbol_id);
-        for (const std::string &argument : record.display_args) {
-          result += ':' + std::to_string(argument.size()) + ':' + argument;
-        }
-        return result;
-      },
-      memberships, canonical);
-  append_records(
-      lifecycle_cleanup_, data.records.lifecycle_cleanup,
-      FactFamily::lifecycle_cleanup,
-      [](const LifecycleCleanupIntent &record) {
-        return record.partition.stable_string() + ':' +
-               std::to_string(static_cast<unsigned>(record.kind)) + ':' +
-               record.target.portable_path() + ':' +
-               record.prior_generation.token;
-      },
-      memberships, canonical);
-  append_records(
-      applicability_, data.records.applicability, FactFamily::applicability,
-      [](const ApplicabilityOwnershipRecord &record) {
-        return record.partition.stable_string() + ':' +
-               record.file.portable_path() + ':' +
-               std::to_string(static_cast<unsigned>(record.role)) + ':' +
-               std::to_string(static_cast<unsigned>(record.state)) + ':' +
-               optional_text(record.reason) + ':' + record.generation.token;
-      },
-      memberships, canonical);
+  append_records(presentation_intents_, data.records.presentation_intents,
+                 FactFamily::presentation_intents, presentation_key,
+                 memberships, canonical);
+  append_records(lifecycle_cleanup_, data.records.lifecycle_cleanup,
+                 FactFamily::lifecycle_cleanup, cleanup_key, memberships,
+                 canonical);
+  append_records(applicability_, data.records.applicability,
+                 FactFamily::applicability, applicability_key, memberships,
+                 canonical);
 }
 
 auto FactBatchRecorder::build_batch(bool canonical) const -> FactBatch {
   auto data = std::make_shared<FactBatch::Data>();
   data->producer = producer_;
   data->completeness = completeness_;
+  data->canonical = canonical;
   data->symbol_keys = symbol_handles_.entries();
   data->relation_keys = edge_handles_.entries();
   data->type_keys = type_handles_.entries();
