@@ -474,7 +474,7 @@ int cmd_index(const ParsedArgs &args, Context &ctx) {
       if (!graph_enabled) {
         db.mark_transform_pipeline_pending("graph extraction disabled");
       } else if (args.defer_transforms) {
-        db.mark_transform_pipeline_pending("derived publication deferred");
+        db.mark_transform_pipeline_pending("derived publication pending");
       } else if (!current) {
         db.mark_transform_pipeline_pending(
             "index has pending or selected files");

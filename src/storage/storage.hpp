@@ -640,7 +640,7 @@ public:
   void clear_entity_edges();
   // Materialise all 10 entity relation kinds from the Layer-0 graph.
   // Called by resolve_pass() after rollup_edge_counts(). Pure DB pass.
-  void materialise_entity_edges();
+  TransformWork materialise_entity_edges();
 
   // Resolve pass (DB-only, no parse): roll up edge.count from edge_site for
   // calls/uses, report remaining stubs. Returns count of still-unresolved

@@ -37,7 +37,11 @@ read adapters.
   `mark_file_indexed`, `component_for_path`, `replace_diagnostics`.
 - **Re-index cleanup**: `delete_edges_for_file` (excludes `contains`, keyed by
   the source symbol's file), `delete_definitions_for_file`.
-- **Resolve**: `resolve_pass()` and its sub-passes (below).
+- **Resolve**: `resolve_pass()` and its sub-passes (below). Each transform
+  persists execution mode, logical rows scanned/inserted/updated/deleted,
+  affected keys, and fallback reason. The pipeline summary is derived from
+  transforms that actually ran and reports `full`, `incremental`, `mixed`, or
+  `reused`; it is never inferred only from the presence of a change set.
 
 ### `Transaction` (`storage.hpp:45`)
 

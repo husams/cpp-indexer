@@ -29,6 +29,11 @@ using namespace detail;
 
 namespace {
 
+std::int64_t count_rows(SqliteDb &db, std::string_view query) {
+  auto count = db.prepare(query);
+  return count.step() ? count.col_int64(0) : 0;
+}
+
 void stage_transform_changes(SqliteDb &db, const TransformChangeSet &changes) {
   db.exec("CREATE TEMP TABLE IF NOT EXISTS cidx_transform_changes ("
           "kind TEXT NOT NULL, id INTEGER NOT NULL, PRIMARY KEY(kind, id));"
@@ -198,13 +203,17 @@ void SqliteStorageService::delete_edges_for_file(int64_t file_id) {
 TransformWork SqliteStorageService::rollup_edge_counts() {
   // For calls (1) and uses (7): set count = COUNT(edge_site) so the edge
   // reflects true site count after multi-TU indexing.
+  const std::int64_t scanned =
+      count_rows(db_, "SELECT COUNT(*) FROM edge WHERE kind IN (1, 7)");
   db_.exec("UPDATE edge SET count = ("
            "  SELECT COUNT(*) FROM edge_site WHERE edge_site.edge_id = edge.id"
            ") "
            "WHERE kind IN (1, 7)"
            "  AND EXISTS (SELECT 1 FROM edge_site WHERE edge_site.edge_id = "
            "edge.id)");
-  return TransformWork{.rows_updated = db_.changes()};
+  return TransformWork{.rows_scanned = scanned,
+                       .rows_updated = db_.changes(),
+                       .affected_keys = scanned};
 }
 
 TransformWork
@@ -235,6 +244,8 @@ TransformWork SqliteStorageService::materialize_dispatch_calls() {
   // bridge is the existing 'overrides' edge (6). Idempotent: kind-18 edges are
   // deleted and rebuilt each pass. Mirrors
   // indexer/storage.py:materialize_dispatch_calls() byte-identically.
+  const std::int64_t scanned =
+      count_rows(db_, "SELECT COUNT(*) FROM edge WHERE kind IN (1, 6)");
   db_.exec("DELETE FROM edge WHERE kind = 18");
   const std::int64_t deleted = db_.changes();
   db_.exec("WITH RECURSIVE dispatch(base_id, target_id) AS ("
@@ -251,7 +262,10 @@ TransformWork SqliteStorageService::materialize_dispatch_calls() {
            "JOIN dispatch d ON d.base_id = c.dst_id "
            "WHERE c.kind = 1 "
            "  AND c.src_id != d.target_id");
-  return TransformWork{.rows_inserted = db_.changes(), .rows_deleted = deleted};
+  return TransformWork{.rows_scanned = scanned,
+                       .rows_inserted = db_.changes(),
+                       .rows_deleted = deleted,
+                       .affected_keys = scanned};
 }
 
 TransformWork SqliteStorageService::materialize_dispatch_calls(
@@ -399,6 +413,9 @@ void SqliteStorageService::delete_definitions_for_file(int64_t file_id) {
 }
 
 TransformWork SqliteStorageService::set_multi_def() {
+  const std::int64_t scanned =
+      count_rows(db_, "SELECT COUNT(*) FROM symbol") +
+      count_rows(db_, "SELECT COUNT(*) FROM definition");
   db_.exec("UPDATE symbol SET multi_def = 0");
   std::int64_t updated = db_.changes();
   db_.exec(
@@ -406,7 +423,9 @@ TransformWork SqliteStorageService::set_multi_def() {
       "  (SELECT COUNT(*) FROM definition d WHERE d.symbol_id = symbol.id) "
       "WHERE id IN (SELECT DISTINCT symbol_id FROM definition)");
   updated += db_.changes();
-  return TransformWork{.rows_updated = updated};
+  return TransformWork{.rows_scanned = scanned,
+                       .rows_updated = updated,
+                       .affected_keys = scanned};
 }
 
 TransformWork
@@ -423,6 +442,9 @@ SqliteStorageService::set_multi_def(const TransformChangeSet &changes) {
 }
 
 TransformWork SqliteStorageService::materialize_possible_calls() {
+  const std::int64_t scanned =
+      count_rows(db_, "SELECT COUNT(*) FROM def_edge WHERE kind = 1") +
+      count_rows(db_, "SELECT COUNT(*) FROM definition");
   db_.exec("DELETE FROM possible_call");
   const std::int64_t deleted = db_.changes();
   db_.exec(
@@ -433,7 +455,10 @@ TransformWork SqliteStorageService::materialize_possible_calls() {
       "JOIN definition td ON td.symbol_id = de.dst_id "
       "WHERE de.kind = 1 AND s.multi_def > 1 "
       "GROUP BY de.src_def_id, td.id");
-  return TransformWork{.rows_inserted = db_.changes(), .rows_deleted = deleted};
+  return TransformWork{.rows_scanned = scanned,
+                       .rows_inserted = db_.changes(),
+                       .rows_deleted = deleted,
+                       .affected_keys = scanned};
 }
 
 TransformWork SqliteStorageService::materialize_possible_calls(

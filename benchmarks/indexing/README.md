@@ -96,6 +96,10 @@ same final Layer-0 facts; any mismatch, fallback of a bounded transform,
 untrusted generation, failed publication, or graph-disabled resolve is a
 release failure. Existing cold, unchanged, integrity, recovery, and profiling
 overhead gates remain required.
+The pipeline-level `transform.pipeline.execution_mode` summarizes transforms
+that actually ran: `full`, `incremental`, `mixed`, or `reused`; a one-source
+publication is normally `mixed` because bounded transforms run incrementally
+while entity roll-up retains its generation-gated full rebuild contract.
 Each disposable setting is SIGKILL-interrupted during a real `cidx index`,
 resumed, integrity/foreign keys checked, and compared by canonical semantic
 digest before a separate production-profile change can be considered.

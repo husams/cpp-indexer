@@ -323,12 +323,6 @@ void write_transform_meta(SqliteDb &db, const std::string &key,
   st.step_done();
 }
 
-void write_change_id(SqliteDb &db, std::string_view kind, std::int64_t id) {
-  write_transform_meta(
-      db, "transform.change." + std::string(kind) + "." + std::to_string(id),
-      "1");
-}
-
 std::vector<std::int64_t> read_change_ids(SqliteDb &db, std::string_view kind) {
   const std::string prefix = "transform.change." + std::string(kind) + ".";
   auto st = db.prepare(
@@ -783,6 +777,26 @@ bool qualified_ready(const TransformRun &run) {
          run.completeness == TransformCompleteness::complete;
 }
 
+std::string pipeline_execution_mode(const std::vector<TransformRun> &runs) {
+  bool full = false;
+  bool incremental = false;
+  for (const auto &run : runs) {
+    if (run.status != TransformRunStatus::ran) {
+      continue;
+    }
+    full = full || run.execution_mode == TransformExecutionMode::full;
+    incremental = incremental ||
+                  run.execution_mode == TransformExecutionMode::incremental;
+  }
+  if (full && incremental) {
+    return "mixed";
+  }
+  if (incremental) {
+    return "incremental";
+  }
+  return full ? "full" : "reused";
+}
+
 std::string
 source_identity(SqliteDb &db, const TransformDescriptor &d,
                 const std::unordered_map<std::string, std::string> &key_values,
@@ -884,8 +898,7 @@ TransformWork run_transform(SqliteStorageService &storage,
                : storage.materialize_dispatch_calls();
   }
   if (d.id == "entity-graph-rollup") {
-    storage.materialise_entity_edges();
-    return {};
+    return storage.materialise_entity_edges();
   }
   throw StorageError("no executor registered for transform: " + d.id);
 }
@@ -2095,7 +2108,7 @@ static void cpp_materialise_declares(cidx::SqliteDb &db) {
   }
 }
 
-void SqliteStorageService::materialise_entity_edges() {
+TransformWork SqliteStorageService::materialise_entity_edges() {
   // Idempotent: full re-materialise each resolve. The DELETE runs INSIDE the
   // rebuild transaction so a failure in any phase rolls back to the previous
   // rows instead of leaving entity_edge empty (atomic resolve).
@@ -2103,6 +2116,13 @@ void SqliteStorageService::materialise_entity_edges() {
   // RollupState precomputes the collapse next-hop map + interface owner-sets
   // ONCE for the whole pass (edge/symbol are read-only here), so every phase's
   // collapse / interface lookups are in-memory instead of per-row SQL.
+  const std::int64_t scanned =
+      output_count(db_, "SELECT COUNT(*) FROM symbol") +
+      output_count(db_, "SELECT COUNT(*) FROM edge") +
+      output_count(db_, "SELECT COUNT(*) FROM type_edge");
+  const std::int64_t deleted =
+      output_count(db_, "SELECT COUNT(*) FROM entity_node") +
+      output_count(db_, "SELECT COUNT(*) FROM entity_edge");
   CtxGuard guard(db_);
   const auto rebuild = [&]() {
     db_.exec("DELETE FROM entity_edge");
@@ -2127,38 +2147,55 @@ void SqliteStorageService::materialise_entity_edges() {
     rebuild();
     txn.commit();
   }
+  const std::int64_t inserted =
+      output_count(db_, "SELECT COUNT(*) FROM entity_node") +
+      output_count(db_, "SELECT COUNT(*) FROM entity_edge");
+  return TransformWork{.rows_scanned = scanned,
+                       .rows_inserted = inserted,
+                       .rows_deleted = deleted,
+                       .affected_keys = inserted};
 }
 
 void SqliteStorageService::note_transform_changes(
     int64_t file_id, const std::vector<int64_t> &symbol_ids,
     const std::vector<int64_t> &edge_ids,
     const std::vector<int64_t> &definition_ids) {
-  write_change_id(db_, "file", file_id);
+  auto write_id =
+      db_.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, '1')");
+  const auto record = [&](std::string_view kind, std::int64_t id) {
+    const std::string key =
+        "transform.change." + std::string(kind) + "." + std::to_string(id);
+    write_id.bind(1, std::string_view(key));
+    write_id.step_done();
+    write_id.reset();
+  };
+  auto endpoints = db_.prepare("SELECT src_id, dst_id FROM edge WHERE id = ?");
+  auto facts = db_.prepare(
+      "SELECT d.symbol_id, de.dst_id FROM definition d LEFT JOIN def_edge de "
+      "ON de.src_def_id = d.id WHERE d.id = ?");
+  record("file", file_id);
   for (const int64_t id : symbol_ids) {
-    write_change_id(db_, "symbol", id);
+    record("symbol", id);
   }
   for (const int64_t id : edge_ids) {
-    write_change_id(db_, "edge", id);
-    auto endpoints =
-        db_.prepare("SELECT src_id, dst_id FROM edge WHERE id = ?");
+    record("edge", id);
     endpoints.bind(1, id);
     if (endpoints.step()) {
-      write_change_id(db_, "symbol", endpoints.col_int64(0));
-      write_change_id(db_, "symbol", endpoints.col_int64(1));
+      record("symbol", endpoints.col_int64(0));
+      record("symbol", endpoints.col_int64(1));
     }
+    endpoints.reset();
   }
   for (const int64_t id : definition_ids) {
-    write_change_id(db_, "definition", id);
-    auto facts = db_.prepare(
-        "SELECT d.symbol_id, de.dst_id FROM definition d LEFT JOIN def_edge de "
-        "ON de.src_def_id = d.id WHERE d.id = ?");
+    record("definition", id);
     facts.bind(1, id);
     while (facts.step()) {
-      write_change_id(db_, "symbol", facts.col_int64(0));
+      record("symbol", facts.col_int64(0));
       if (!facts.col_is_null(1)) {
-        write_change_id(db_, "symbol", facts.col_int64(1));
+        record("symbol", facts.col_int64(1));
       }
     }
+    facts.reset();
   }
   const std::uint64_t generation =
       std::stoull(read_transform_meta(db_, "transform.change_generation")
@@ -2170,6 +2207,11 @@ void SqliteStorageService::note_transform_changes(
 }
 
 void SqliteStorageService::capture_transform_changes_for_file(int64_t file_id) {
+  auto baseline = db_.prepare(
+      "SELECT 1 FROM meta WHERE key = 'transform.generation' LIMIT 1");
+  if (!baseline.step()) {
+    return;
+  }
   std::vector<int64_t> symbols;
   std::vector<int64_t> edges;
   std::vector<int64_t> definitions;
@@ -2363,6 +2405,10 @@ TransformReport SqliteStorageService::run_transform_pipeline(
       validate_implementation_provider(*transform);
       if (!readiness_only) {
         run.work = run_transform(*this, *transform, execution_mode, changes);
+      } else {
+        run.work.rows_scanned =
+            output_count(db_, transform->output_count_query);
+        run.work.affected_keys = run.work.rows_scanned;
       }
       run.work.input_identity_rows_scanned = incremental ? 0 : -1;
       if (transform_nondeterminism_for_testing_ &&
@@ -2444,8 +2490,7 @@ TransformReport SqliteStorageService::run_transform_pipeline(
     write_transform_meta(db_, "transform.pipeline.state", "complete");
     write_transform_meta(db_, "transform.pipeline.stale_cause", "");
     write_transform_meta(db_, "transform.pipeline.execution_mode",
-                         changes.trusted && !changes.empty() ? "incremental"
-                                                             : "full");
+                         pipeline_execution_mode(report.runs));
     write_transform_meta(db_, "transform.pipeline.input_generation",
                          std::to_string(changes.generation));
     clear_change_ids(db_);

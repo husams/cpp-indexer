@@ -122,7 +122,9 @@ page.
 
 `--no-graph` and `--defer-transforms` are mutually exclusive. A no-graph run
 records `graph extraction disabled` and cannot be made ready by `cidx resolve`;
-the sources must first be re-indexed with graph extraction. Transform status
-persists execution mode, affected-key and row-work counters, input generation,
-duration, and any full-rebuild fallback reason. The same counters are emitted
-in `--profile-json` output under `transform.<id>.*`.
+the sources must first be re-indexed with graph extraction. A deferred run
+records `derived publication pending`; `cidx resolve` later publishes the
+persisted Layer-0 facts without invoking Clang. Transform status persists
+execution mode, affected-key and row-work counters, input generation, duration,
+and any full-rebuild fallback reason. The same counters are emitted in
+`--profile-json` output under `transform.<id>.*`.

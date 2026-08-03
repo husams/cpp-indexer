@@ -380,7 +380,7 @@ StorageApplicationOperations::execute(const IndexRequest &request,
   if (!request.graph) {
     db.mark_transform_pipeline_pending("graph extraction disabled");
   } else if (request.defer_transforms) {
-    db.mark_transform_pipeline_pending("derived publication deferred");
+    db.mark_transform_pipeline_pending("derived publication pending");
   } else if (incomplete) {
     db.mark_transform_pipeline_pending("index has pending or selected files");
   } else {

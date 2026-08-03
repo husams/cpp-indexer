@@ -845,6 +845,10 @@ TEST_CASE("clean and incremental publication have equal identities") {
   const Fixture incremental_fixture = seed(incremental);
   REQUIRE(clean.run_transform_pipeline().complete);
   REQUIRE(incremental.run_transform_pipeline().complete);
+  auto baseline_mode = clean.raw_db().prepare(
+      "SELECT value FROM meta WHERE key = 'transform.pipeline.execution_mode'");
+  REQUIRE(baseline_mode.step());
+  CHECK(baseline_mode.col_text(0) == "full");
   mutate(clean, clean_fixture, false);
   mutate(incremental, incremental_fixture, true);
   const auto clean_run = clean.run_transform_pipeline();
@@ -876,6 +880,89 @@ TEST_CASE("clean and incremental publication have equal identities") {
   REQUIRE(entity != incremental_run.runs.end());
   CHECK(entity->execution_mode == TransformExecutionMode::full);
   CHECK(entity->fallback_reason == "generation-gated full rebuild contract");
+  auto mixed_mode = incremental.raw_db().prepare(
+      "SELECT value FROM meta WHERE key = 'transform.pipeline.execution_mode'");
+  REQUIRE(mixed_mode.step());
+  CHECK(mixed_mode.col_text(0) == "mixed");
+}
+
+TEST_CASE("change capture skips work before a published baseline exists") {
+  Storage db(":memory:");
+  const auto component = db.add_component("capture", "/tmp/capture");
+  const auto directory = db.add_directory(component, "");
+  const auto file = db.add_file(directory, "capture.cpp");
+  db.capture_transform_changes_for_file(file);
+  CHECK(db.pending_transform_changes().empty());
+}
+
+TEST_CASE("removing file facts preserves full and incremental equivalence") {
+  struct Fixture {
+    int64_t file_id = 0;
+  };
+  const auto seed = [](Storage &db) {
+    const auto component = db.add_component("removal", "/tmp/removal");
+    const auto directory = db.add_directory(component, "");
+    const auto first_file = db.add_file(directory, "first.cpp");
+    const auto second_file = db.add_file(directory, "second.cpp");
+    Symbol base;
+    base.usr = "transform:@F@removal-base";
+    base.spelling = "removal-base";
+    base.kind = "function";
+    base.is_definition = true;
+    base.resolved = true;
+    base.file_id = first_file;
+    const auto base_id = db.add_symbol(base);
+    Symbol caller = base;
+    caller.usr = "transform:@F@removal-caller";
+    caller.spelling = "removal-caller";
+    caller.file_id = second_file;
+    const auto caller_id = db.add_symbol(caller);
+    Symbol override = caller;
+    override.usr = "transform:@F@removal-override";
+    override.spelling = "removal-override";
+    const auto override_id = db.add_symbol(override);
+    (void)db.get_or_create_definition(base_id, first_file);
+    (void)db.get_or_create_definition(base_id, second_file);
+    const auto caller_definition =
+        db.get_or_create_definition(caller_id, second_file);
+    db.add_def_edge(caller_definition, base_id, 1);
+    const auto call = db.add_edge(
+        Edge{.src_id = caller_id, .dst_id = base_id, .kind = 1, .count = 1});
+    (void)db.add_edge(
+        Edge{.src_id = override_id, .dst_id = base_id, .kind = 6, .count = 1});
+    db.add_edge_site(
+        EdgeSite{.edge_id = call, .file_id = second_file, .line = 1, .col = 1});
+    return Fixture{.file_id = second_file};
+  };
+  const auto remove = [](Storage &db, const Fixture &fixture,
+                         bool capture_changes) {
+    if (capture_changes) {
+      db.capture_transform_changes_for_file(fixture.file_id);
+    }
+    db.delete_edges_for_file(fixture.file_id);
+    db.delete_definitions_for_file(fixture.file_id);
+    db.delete_symbols_for_file(fixture.file_id);
+    if (capture_changes) {
+      db.capture_transform_changes_for_file(fixture.file_id);
+    }
+  };
+  Storage full(":memory:");
+  Storage incremental(":memory:");
+  const Fixture full_fixture = seed(full);
+  const Fixture incremental_fixture = seed(incremental);
+  REQUIRE(full.run_transform_pipeline().complete);
+  REQUIRE(incremental.run_transform_pipeline().complete);
+  remove(full, full_fixture, false);
+  remove(incremental, incremental_fixture, true);
+  const auto full_run = full.run_transform_pipeline();
+  const auto incremental_run = incremental.run_transform_pipeline();
+  REQUIRE(full_run.complete);
+  REQUIRE(incremental_run.complete);
+  REQUIRE(full_run.runs.size() == incremental_run.runs.size());
+  for (std::size_t i = 0; i < full_run.runs.size(); ++i) {
+    CHECK(full_run.runs[i].output_identity ==
+          incremental_run.runs[i].output_identity);
+  }
 }
 
 TEST_CASE("legacy resolve propagates a failed transform") {
@@ -928,8 +1015,10 @@ TEST_CASE("deferred publication resolves from persisted Layer-0 facts") {
   symbol.is_definition = true;
   const auto symbol_id = db.add_symbol(symbol);
   db.note_transform_changes(1, {symbol_id}, {}, {});
-  db.mark_transform_pipeline_pending("derived publication deferred");
+  db.mark_transform_pipeline_pending("derived publication pending");
   CHECK_FALSE(db.transform_status().complete);
+  CHECK(db.transform_explain().find("derived publication pending") !=
+        std::string::npos);
   CHECK(db.resolve_pass() >= 0);
   CHECK(db.transform_status().complete);
 }
