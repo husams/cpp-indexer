@@ -366,6 +366,7 @@ public:
 struct AstStoragePorts {
   WorkspaceCatalogReadPort &workspace;
   SourceStoreReadPort &source;
+  SourceStoreWritePort &source_write;
   SymbolReadPort &symbols_read;
   SymbolWritePort &symbols_write;
   TypeWritePort &types_write;

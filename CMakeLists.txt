@@ -284,6 +284,7 @@ add_library(cidx_ast OBJECT
   src/ast/receiver_provenance.cpp src/ast/instantiation_edges.cpp
   src/ast/namespace_use_visitor.cpp src/ast/routed_root_events.cpp
   src/ast/fact_identity.cpp src/ast/fact_batch.cpp src/ast/fact_extraction.cpp
+  src/ast/owned_header_plan.cpp
   src/ast/indexing_plan.cpp src/ast/pass_registry.cpp
   src/ast/index_engine.cpp
   src/ast/include_facts.cpp
@@ -299,7 +300,9 @@ if(NOT LLVM_ENABLE_RTTI)
   target_compile_options(cidx_ast PRIVATE -fno-rtti)
 endif()
 target_sources(cidx_core PRIVATE $<TARGET_OBJECTS:cidx_ast>)
-target_sources(cidx_core PRIVATE src/application/fact_batch_replay.cpp)
+target_sources(cidx_core PRIVATE
+  src/application/controlled_header_writer.cpp
+  src/application/fact_batch_replay.cpp)
 
 # --- include-hygiene validator/executor (cidx_hygiene) -----------------------
 # validator.cpp drives a SyntaxOnlyAction over an in-memory VFS overlay and
