@@ -2218,6 +2218,118 @@ void collect_maps(SqliteDb &database, FactBatchWriterResult &result,
   result.report.statement_executions += 5;
 }
 
+// Shared tail of both change-set recorders: bump the change generation and
+// mark the set trusted, through the counted statement path.
+void seal_transform_changes(SqliteDb &database, FactBatchWriterResult &result) {
+  static_cast<void>(execute(
+      database, result.report,
+      "INSERT OR REPLACE INTO meta(key,value) VALUES("
+      "'transform.change_generation',CAST(COALESCE((SELECT CAST(value AS "
+      "INTEGER) FROM meta WHERE key='transform.change_generation'),0)+1 AS "
+      "TEXT))"));
+  static_cast<void>(execute(database, result.report,
+                            "INSERT OR REPLACE INTO meta(key,value) VALUES("
+                            "'transform.change_trusted','1')"));
+}
+
+// True when a transform baseline exists; the change set is only maintained
+// once one has been established.
+auto transform_changes_enabled(SqliteDb &database,
+                               FactBatchWriterResult &result) -> bool {
+  auto baseline = prepare_statement(
+      database, result.report,
+      "SELECT 1 FROM meta WHERE key='transform.generation' LIMIT 1");
+  const bool enabled = baseline.step();
+  if (enabled) {
+    baseline.step_done();
+  }
+  note_statement_stats(result.report, baseline);
+  ++result.report.statement_executions;
+  return enabled;
+}
+
+// Captures the PRIOR persistent identities of the files this publication is
+// about to clean, before lifecycle cleanup or the upserts mutate them.
+//
+// This replaces the per-route SqliteStorageService::capture_transform_changes_
+// for_file call, which read the same three id sets and then handed them to
+// note_transform_changes -- one INSERT OR REPLACE INTO meta per id plus a
+// per-edge endpoint and per-definition def_edge lookup, all on raw db_.prepare
+// handles and therefore invisible to FactBatchWriterReport. On a republication
+// of a large header that is thousands of uncounted row-at-a-time statements
+// inside the publication transaction, which is exactly what this story exists
+// to remove. The eight statements below are constant in the number of prior
+// facts and run through the counted execute() path.
+//
+// The queries are the ones capture_transform_changes_for_file used, widened
+// from one file id to the set, plus the two derived-id lookups
+// note_transform_changes performed on top of them (both endpoints of every
+// touched edge; each definition's symbol and its def_edge targets), so the
+// captured set is unchanged.
+void capture_prior_transform_changes(
+    SqliteDb &database, FactBatchWriterResult &result,
+    const std::vector<std::int64_t> &file_ids) {
+  if (file_ids.empty() || !transform_changes_enabled(database, result)) {
+    return;
+  }
+  std::string files;
+  for (const std::int64_t file_id : file_ids) {
+    if (!files.empty()) {
+      files += ',';
+    }
+    files += std::to_string(file_id);
+  }
+  // Internally resolved row ids only -- never caller text.
+  const std::string in_files = " IN (" + files + ")";
+  const std::string prior_symbols =
+      "SELECT id FROM symbol WHERE file_id" + in_files + " OR decl_file_id" +
+      in_files + " UNION SELECT symbol_id FROM definition WHERE file_id" +
+      in_files;
+  const std::string prior_edges = "SELECT id FROM edge WHERE src_id IN (" +
+                                  prior_symbols + ") OR dst_id IN (" +
+                                  prior_symbols + ")";
+  const std::string prior_definitions =
+      "SELECT id FROM definition WHERE file_id" + in_files;
+  static_cast<void>(
+      execute(database, result.report,
+              "INSERT OR REPLACE INTO meta(key,value) SELECT "
+              "'transform.change.file.'||f.id,'1' FROM file f WHERE f.id" +
+                  in_files));
+  static_cast<void>(execute(database, result.report,
+                            "INSERT OR REPLACE INTO meta(key,value) SELECT "
+                            "DISTINCT 'transform.change.symbol.'||s.id,'1' "
+                            "FROM (" +
+                                prior_symbols + ") s"));
+  static_cast<void>(execute(database, result.report,
+                            "INSERT OR REPLACE INTO meta(key,value) SELECT "
+                            "DISTINCT 'transform.change.edge.'||e.id,'1' "
+                            "FROM (" +
+                                prior_edges + ") e"));
+  static_cast<void>(
+      execute(database, result.report,
+              "INSERT OR REPLACE INTO meta(key,value) SELECT DISTINCT "
+              "'transform.change.symbol.'||ends.id,'1' FROM (SELECT "
+              "e.src_id AS id FROM edge e WHERE e.id IN (" +
+                  prior_edges +
+                  ") UNION SELECT e.dst_id FROM edge e WHERE "
+                  "e.id IN (" +
+                  prior_edges + ")) ends WHERE ends.id IS NOT NULL"));
+  static_cast<void>(execute(database, result.report,
+                            "INSERT OR REPLACE INTO meta(key,value) SELECT "
+                            "DISTINCT 'transform.change.definition.'||d.id,'1' "
+                            "FROM (" +
+                                prior_definitions + ") d"));
+  static_cast<void>(execute(
+      database, result.report,
+      "INSERT OR REPLACE INTO meta(key,value) SELECT DISTINCT "
+      "'transform.change.symbol.'||facts.id,'1' FROM (SELECT d.symbol_id AS id "
+      "FROM definition d WHERE d.id IN (" +
+          prior_definitions +
+          ") UNION SELECT de.dst_id FROM def_edge de WHERE de.src_def_id IN (" +
+          prior_definitions + ")) facts WHERE facts.id IS NOT NULL"));
+  seal_transform_changes(database, result);
+}
+
 // Records the transform change set for this publication set-wise, straight
 // from the batch staging tables. The replaced path grouped ids in C++ and
 // called SqliteStorageService::note_transform_changes per file, which issued
@@ -2228,16 +2340,7 @@ void collect_maps(SqliteDb &database, FactBatchWriterResult &result,
 // through the counted execute() path, so AC #1700/#1701 stay measurable.
 void record_transform_changes(SqliteDb &database, FactBatchWriterResult &result,
                               std::int64_t token) {
-  auto baseline = prepare_statement(
-      database, result.report,
-      "SELECT 1 FROM meta WHERE key='transform.generation' LIMIT 1");
-  const bool enabled = baseline.step();
-  if (enabled) {
-    baseline.step_done();
-  }
-  note_statement_stats(result.report, baseline);
-  ++result.report.statement_executions;
-  if (!enabled) {
+  if (!transform_changes_enabled(database, result)) {
     return;
   }
   const std::string token_text = std::to_string(token);
@@ -2308,15 +2411,7 @@ void record_transform_changes(SqliteDb &database, FactBatchWriterResult &result,
           planned_files +
           "JOIN def_edge de ON de.src_def_id=dm.definition_id WHERE b.batch=" +
           token_text + ") facts WHERE facts.id IS NOT NULL"));
-  static_cast<void>(execute(
-      database, result.report,
-      "INSERT OR REPLACE INTO meta(key,value) VALUES("
-      "'transform.change_generation',CAST(COALESCE((SELECT CAST(value AS "
-      "INTEGER) FROM meta WHERE key='transform.change_generation'),0)+1 AS "
-      "TEXT))"));
-  static_cast<void>(execute(database, result.report,
-                            "INSERT OR REPLACE INTO meta(key,value) VALUES("
-                            "'transform.change_trusted','1')"));
+  seal_transform_changes(database, result);
 }
 
 } // namespace
@@ -2434,19 +2529,20 @@ auto FactBatchWriter::apply(const ast::FactBatch &batch,
     // or upsert mutates them. Incremental transforms consume this change set.
     // Owned-header candidates do not carry existing_file_id, so use the file
     // id resolved above for every route whose prior facts will be cleaned.
+    std::vector<std::int64_t> cleaned_file_ids;
     for (const ast::PlannedFileRoute &route : context.route_plan.routes()) {
       if (route.translation_unit == context.translation_unit &&
           route.cleanup_symbols) {
         if (!route.extraction.transient_file_handle) {
           throw StorageError("publication route has no transient file handle");
         }
-        const std::int64_t file_id = route.existing_file_id.value_or(
-            result.file_ids.at(*route.extraction.transient_file_handle));
-        storage_.capture_transform_changes_for_file(file_id);
+        cleaned_file_ids.push_back(route.existing_file_id.value_or(
+            result.file_ids.at(*route.extraction.transient_file_handle)));
       }
     }
 
     SqliteDb &database = storage_.raw_db();
+    capture_prior_transform_changes(database, result, cleaned_file_ids);
     create_temporary_schema(database, result.report);
     clear_temporary_rows(database, result.report, token);
     load_file_map(database, result, batch, context, token);

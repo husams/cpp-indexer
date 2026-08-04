@@ -450,6 +450,312 @@ TEST_CASE(
         changes.definition_ids.end());
 }
 
+// Split out from C-1499 as C-1529: a compact matrix over the symbol upsert's
+// three merge-rule classes, one representative per class, published in both
+// orders across republications. This locks the semantics the deleted
+// storage_sink_test.cpp field matrices (:204, :327, :439) covered without
+// restoring the 844-line suite.
+struct MergeFixture : Fixture {
+  // Publishes one main-partition symbol with `usr-merge`, customised by the
+  // caller, and returns the stored row. Same USR and partition on every call,
+  // so every publication after the first takes the ON CONFLICT branch.
+  template <typename Customise> auto publish(Customise customise) -> void {
+    ast::FactBatchRecorder recorder("fact-batch-merge-test");
+    const auto route = plan.serial_route("/tmp/cidx-s073-writer/main.cpp");
+    const auto &main = route.partitions[route.main_partition];
+    recorder.set_partition(main.partition, main.transient_file_handle);
+    ast::SymbolRecord record = symbol(main.partition, "usr-merge", "merge");
+    customise(record);
+    recorder.emit(record);
+    storage::FactBatchWriter writer(storage);
+    const auto result = writer.apply(recorder.canonical_batch(), context());
+    INFO(result.error.value_or(""));
+    REQUIRE(result.ok());
+  }
+
+  auto column(const std::string &name) -> std::string {
+    auto row = storage.raw_db().prepare("SELECT COALESCE(CAST(" + name +
+                                        " AS TEXT),'<null>') FROM symbol "
+                                        "WHERE usr='usr-merge'");
+    REQUIRE(row.step());
+    return row.col_text(0);
+  }
+};
+
+TEST_CASE("FactBatchWriter merges COALESCE-preserved fields in both orders") {
+  // Rich then poor: a later publication that knows nothing must not erase.
+  {
+    MergeFixture fixture;
+    fixture.publish([](ast::SymbolRecord &record) {
+      record.qual_name = "ns::merge";
+      record.display_name = "merge()";
+      record.type_info = "void ()";
+      record.access = "public";
+      record.parent_usr = "usr-parent";
+      record.const_value = "42";
+      record.callable_kind = "function";
+      record.template_origin = "primary";
+    });
+    fixture.publish([](ast::SymbolRecord &record) {
+      record.qual_name.reset();
+      record.display_name.reset();
+      record.type_info.reset();
+      record.access.reset();
+      record.parent_usr.reset();
+      record.const_value.reset();
+      record.callable_kind.reset();
+      record.template_origin.reset();
+    });
+    CHECK(fixture.column("qual_name") == "ns::merge");
+    CHECK(fixture.column("display_name") == "merge()");
+    CHECK(fixture.column("type_info") == "void ()");
+    CHECK(fixture.column("access") == "public");
+    CHECK(fixture.column("parent_usr") == "usr-parent");
+    CHECK(fixture.column("const_value") == "42");
+    CHECK(fixture.column("callable_kind") == "function");
+    CHECK(fixture.column("template_origin") == "primary");
+  }
+  // Poor then rich: a later publication that knows more must fill the gaps.
+  {
+    MergeFixture fixture;
+    fixture.publish([](ast::SymbolRecord &record) {
+      record.qual_name.reset();
+      record.const_value.reset();
+      record.callable_kind.reset();
+    });
+    CHECK(fixture.column("qual_name") == "<null>");
+    fixture.publish([](ast::SymbolRecord &record) {
+      record.qual_name = "ns::merge";
+      record.const_value = "42";
+      record.callable_kind = "function";
+    });
+    CHECK(fixture.column("qual_name") == "ns::merge");
+    CHECK(fixture.column("const_value") == "42");
+    CHECK(fixture.column("callable_kind") == "function");
+  }
+}
+
+TEST_CASE(
+    "FactBatchWriter keeps MAX-monotonic flags monotonic in both orders") {
+  const auto flags = [](ast::SymbolRecord &record, bool on) {
+    record.is_definition = on;
+    record.is_pure = on;
+    record.is_static = on;
+    record.resolved = on;
+    record.is_named_instance = on;
+  };
+  // Set then cleared: monotonic fields never fall back to 0.
+  {
+    MergeFixture fixture;
+    fixture.publish([&](ast::SymbolRecord &record) { flags(record, true); });
+    fixture.publish([&](ast::SymbolRecord &record) { flags(record, false); });
+    for (const char *name : {"is_definition", "is_pure", "is_static",
+                             "resolved", "is_named_instance"}) {
+      CAPTURE(std::string(name));
+      CHECK(fixture.column(name) == "1");
+    }
+  }
+  // Cleared then set: they still rise.
+  {
+    MergeFixture fixture;
+    fixture.publish([&](ast::SymbolRecord &record) { flags(record, false); });
+    for (const char *name : {"is_pure", "is_static", "is_named_instance"}) {
+      CAPTURE(std::string(name));
+      CHECK(fixture.column(name) == "0");
+    }
+    fixture.publish([&](ast::SymbolRecord &record) { flags(record, true); });
+    for (const char *name : {"is_definition", "is_pure", "is_static",
+                             "resolved", "is_named_instance"}) {
+      CAPTURE(std::string(name));
+      CHECK(fixture.column(name) == "1");
+    }
+  }
+}
+
+TEST_CASE("FactBatchWriter ranks the location merge by definition and origin") {
+  // A located definition is not displaced by a later location-less
+  // declaration: the CASE requires excluded.file_id IS NOT NULL.
+  {
+    MergeFixture fixture;
+    fixture.publish([](ast::SymbolRecord &record) {
+      record.line = 11;
+      record.col = 3;
+      record.end_line = 11;
+      record.end_col = 20;
+      record.is_definition = true;
+    });
+    const std::string file_id = fixture.column("file_id");
+    fixture.publish([](ast::SymbolRecord &record) {
+      record.line = 0;
+      record.col = 0;
+      record.end_line = 0;
+      record.end_col = 0;
+      record.is_definition = false;
+    });
+    CHECK(fixture.column("line") == "11");
+    CHECK(fixture.column("col") == "3");
+    CHECK(fixture.column("end_line") == "11");
+    CHECK(fixture.column("end_col") == "20");
+    CHECK(fixture.column("file_id") == file_id);
+  }
+  // A located declaration IS displaced by a later located definition, because
+  // excluded.is_definition >= symbol.is_definition.
+  {
+    MergeFixture fixture;
+    fixture.publish([](ast::SymbolRecord &record) {
+      record.line = 5;
+      record.col = 1;
+      record.is_definition = false;
+    });
+    CHECK(fixture.column("line") == "5");
+    fixture.publish([](ast::SymbolRecord &record) {
+      record.line = 11;
+      record.col = 3;
+      record.is_definition = true;
+    });
+    CHECK(fixture.column("line") == "11");
+    CHECK(fixture.column("col") == "3");
+  }
+  // ...and a located declaration does NOT displace an existing definition's
+  // location, because excluded.is_definition < symbol.is_definition.
+  {
+    MergeFixture fixture;
+    fixture.publish([](ast::SymbolRecord &record) {
+      record.line = 11;
+      record.col = 3;
+      record.is_definition = true;
+    });
+    fixture.publish([](ast::SymbolRecord &record) {
+      record.line = 5;
+      record.col = 1;
+      record.is_definition = false;
+    });
+    CHECK(fixture.column("line") == "11");
+    CHECK(fixture.column("col") == "3");
+  }
+}
+
+TEST_CASE("FactBatchWriter merges declaration coordinates by direction") {
+  // A location-less emission (excluded.file_id IS NULL) prefers the EXISTING
+  // decl_* triple; a located one prefers its own. decl_path is
+  // preserve-existing in both directions.
+  {
+    MergeFixture fixture;
+    fixture.publish([](ast::SymbolRecord &record) {
+      record.decl_line = 4;
+      record.decl_col = 7;
+      record.decl_path = "/tmp/cidx-s073-writer/first.hpp";
+    });
+    CHECK(fixture.column("decl_line") == "4");
+    fixture.publish([](ast::SymbolRecord &record) {
+      record.line = 0;
+      record.col = 0;
+      record.end_line = 0;
+      record.end_col = 0;
+      record.decl_line = 9;
+      record.decl_col = 2;
+      record.decl_path = "/tmp/cidx-s073-writer/second.hpp";
+    });
+    CHECK(fixture.column("decl_line") == "4");
+    CHECK(fixture.column("decl_col") == "7");
+    CHECK(fixture.column("decl_path") == "/tmp/cidx-s073-writer/first.hpp");
+  }
+  {
+    MergeFixture fixture;
+    fixture.publish([](ast::SymbolRecord &record) {
+      record.decl_line = 4;
+      record.decl_col = 7;
+    });
+    fixture.publish([](ast::SymbolRecord &record) {
+      record.decl_line = 9;
+      record.decl_col = 2;
+    });
+    CHECK(fixture.column("decl_line") == "9");
+    CHECK(fixture.column("decl_col") == "2");
+  }
+}
+
+// The other half of the change set: the ids a republication REMOVES. Those
+// exist only before cleanup runs, so they can reach the change set only from
+// the pre-cleanup capture. This locks the set-based capture that replaced the
+// per-route SqliteStorageService::capture_transform_changes_for_file call, and
+// asserts the capture is counted in the writer report rather than issued on
+// raw prepare handles the report cannot see.
+TEST_CASE("FactBatchWriter records removed prior facts as transform changes") {
+  Fixture fixture;
+  storage::FactBatchWriter writer(fixture.storage);
+  auto context = fixture.context();
+  context.configuration = TranslationUnitConfig{
+      .descriptor_hash = "writer-config", .descriptor_json = "{}"};
+
+  // Publish WITH the extra header symbol, edge and definition, then settle.
+  const auto initial = writer.apply(fixture.batch(true), context);
+  INFO(initial.error.value_or(""));
+  REQUIRE(initial.ok());
+  REQUIRE(fixture.storage.run_transform_pipeline().complete);
+  REQUIRE(fixture.storage.pending_transform_changes().empty());
+
+  auto prior_symbol = fixture.storage.raw_db().prepare(
+      "SELECT id FROM symbol WHERE usr='usr-header-added'");
+  REQUIRE(prior_symbol.step());
+  const std::int64_t prior_symbol_id = prior_symbol.col_int64(0);
+  auto prior_edge =
+      fixture.storage.raw_db().prepare("SELECT id FROM edge WHERE dst_id=?");
+  prior_edge.bind(1, prior_symbol_id);
+  REQUIRE(prior_edge.step());
+  const std::int64_t prior_edge_id = prior_edge.col_int64(0);
+  auto prior_definition = fixture.storage.raw_db().prepare(
+      "SELECT id FROM definition WHERE symbol_id=?");
+  prior_definition.bind(1, prior_symbol_id);
+  REQUIRE(prior_definition.step());
+  const std::int64_t prior_definition_id = prior_definition.col_int64(0);
+
+  // Republish WITHOUT them. Nothing the publication path sees names these ids.
+  const auto republished = writer.apply(fixture.batch(), context);
+  INFO(republished.error.value_or(""));
+  REQUIRE(republished.ok());
+
+  const auto changes = fixture.storage.pending_transform_changes();
+  CAPTURE(prior_symbol_id);
+  CAPTURE(prior_edge_id);
+  CAPTURE(prior_definition_id);
+  CHECK(std::ranges::find(changes.symbol_ids, prior_symbol_id) !=
+        changes.symbol_ids.end());
+  CHECK(std::ranges::find(changes.edge_ids, prior_edge_id) !=
+        changes.edge_ids.end());
+  CHECK(std::ranges::find(changes.definition_ids, prior_definition_id) !=
+        changes.definition_ids.end());
+}
+
+// AC #1701: the change-set recording must not scale the number of DISTINCT
+// SQL statements with the number of facts. Both halves -- the pre-cleanup
+// capture and the post-publication record -- are set-based, so publishing a
+// batch with three extra facts compiles exactly as many statements as
+// publishing without them.
+//
+// statements_prepared is the right measure and the other two are not:
+// statements_reused counts per-row rebinds of the staging loaders (one step
+// per staged row on a single compiled statement) and statement_executions
+// counts those steps, so both scale with rows by design. The row-at-a-time
+// pattern this story removes would show up here as extra PREPARES.
+TEST_CASE("FactBatchWriter change-set recording is constant in fact count") {
+  const auto statements = [](bool additions) {
+    Fixture fixture;
+    storage::FactBatchWriter writer(fixture.storage);
+    auto context = fixture.context();
+    context.configuration = TranslationUnitConfig{
+        .descriptor_hash = "writer-config", .descriptor_json = "{}"};
+    const auto initial = writer.apply(fixture.batch(additions), context);
+    REQUIRE(initial.ok());
+    REQUIRE(fixture.storage.run_transform_pipeline().complete);
+    // The republication runs both halves against an already-populated file.
+    const auto republished = writer.apply(fixture.batch(additions), context);
+    REQUIRE(republished.ok());
+    return republished.report.statements_prepared;
+  };
+  CHECK(statements(true) == statements(false));
+}
+
 // PERF-002.6h: every declared failure point must roll the publication back
 // completely, not only the one the e2e sweep happens to reach.
 TEST_CASE("FactBatchWriter rolls back at every declared failure point") {

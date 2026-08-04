@@ -161,7 +161,7 @@ def test_profile_contract_requires_named_timings_and_counters(
                 },
                 "translation_units": [
                     {
-                        key: 0
+key: 0
                         for key in benchmark.REQUIRED_TRANSLATION_UNIT_FIELDS
                     }
                 ],
@@ -357,7 +357,26 @@ def test_commit_ab_reports_writer_deltas_and_parity() -> None:
     assert paired["delta"]["statements_prepared"] == -20
     assert paired["delta"]["virtual_machine_steps"] == -200
     assert paired["candidate"]["statements_prepared_per_staged_fact"] == 1.0
-    assert not result["durability_profile_changed"]
+
+#Elimination is measured against the baseline arm, never synthesized by
+#the writer : 30 - 10 prepares and 300 - 100 VM steps.
+    assert paired["delta"]["statements_eliminated"] == 20
+    assert paired["delta"]["virtual_machine_steps_eliminated"] == 200
+    assert result["statement_elimination"]["statements_eliminated"] == 20
+    assert result["statement_elimination"]["virtual_machine_steps_eliminated"] == 200
+    assert result["statement_elimination"]["basis"]
+
+#This A / B runs both arms on the same SQLite runtime profile and performs no
+#durability, index write - cost, query - plan or latency experiment, so it must
+#report those criteria as unqualified rather than assert a conclusion.
+    assert result["durability_profile"]["status"] == "not-qualified"
+    assert result["durability_profile"]["reason"]
+    assert result["secondary_index_decision"]["status"] == "not-qualified"
+    assert result["secondary_index_decision"]["reason"]
+    assert result["secondary_index_decision"]["removed_or_deferred"] is False
+#The old literal fields must not come back.
+    assert "durability_profile_changed" not in result
+    assert "binary_nocase_pairs" not in result["secondary_index_decision"]
 
 
 def test_commit_ab_normalizes_synthetic_translation_unit_roots() -> None:
