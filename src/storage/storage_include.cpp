@@ -258,6 +258,19 @@ int64_t SqliteStorageService::add_translation_unit_config(
   return id;
 }
 
+std::optional<int64_t> SqliteStorageService::translation_unit_config_id_by_hash(
+    const std::string &descriptor_hash) {
+  auto st = db_.prepare(
+      "SELECT id FROM translation_unit_config WHERE descriptor_hash = ?");
+  st.bind(1, std::string_view(descriptor_hash));
+  if (!st.step()) {
+    return std::nullopt;
+  }
+  const int64_t id = st.col_int64(0);
+  st.step_done();
+  return id;
+}
+
 std::optional<TranslationUnitConfig>
 SqliteStorageService::translation_unit_config_by_id(int64_t config_id) {
   auto st = db_.prepare(

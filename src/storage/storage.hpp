@@ -503,6 +503,11 @@ public:
   int64_t add_translation_unit_config(const TranslationUnitConfig &input);
   std::optional<TranslationUnitConfig>
   translation_unit_config_by_id(int64_t config_id);
+  // Resolve a persisted configuration id from its portable descriptor hash.
+  // Extraction needs this to reuse an already-registered configuration without
+  // reaching into the raw connection (scripts/check_raw_db_boundaries.py).
+  std::optional<int64_t>
+  translation_unit_config_id_by_hash(const std::string &descriptor_hash);
   std::vector<TranslationUnitConfig>
   translation_unit_configs_for_file(int64_t file_id);
   void add_file_config(const FileConfigApplicability &applicability);

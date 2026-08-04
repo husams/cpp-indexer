@@ -13,6 +13,7 @@ ALLOWED_FILES = {
     Path("src/storage/storage.hpp"): "persistence-service-api",
     Path("src/storage/storage_query.cpp"): "persistence-service",
     Path("src/storage/artifacts.cpp"): "persistence-service",
+    Path("src/storage/fact_batch_writer.cpp"): "persistence-service",
     Path("src/query/exec.hpp"): "query-read-adapter-api",
     Path("src/query/exec.cpp"): "query-read-adapter",
     Path("src/graph/query.cpp"): "graph-read-adapter",

@@ -1678,28 +1678,24 @@ public:
         found != configuration_id_cache_.end()) {
       ++metrics_.configuration_id_hits;
       if (found->second < 0) {
-        auto statement = db_.raw_db().prepare(
-            "SELECT id FROM translation_unit_config WHERE descriptor_hash=?");
-        statement.bind(1, std::string_view(configuration_hash));
-        if (statement.step()) {
-          const std::int64_t id = statement.col_int64(0);
-          configuration_id_cache_.insert_or_assign(configuration_hash, id);
-          return id;
+        if (const auto id =
+                db_.translation_unit_config_id_by_hash(configuration_hash)) {
+          configuration_id_cache_.insert_or_assign(configuration_hash, *id);
+          return *id;
         }
       }
       return found->second;
     }
     ++metrics_.configuration_id_misses;
-    auto statement = db_.raw_db().prepare(
-        "SELECT id FROM translation_unit_config WHERE descriptor_hash=?");
-    statement.bind(1, std::string_view(configuration_hash));
+    const auto persisted =
+        db_.translation_unit_config_id_by_hash(configuration_hash);
     std::int64_t id = -static_cast<std::int64_t>(
         stable_fact_hash(configuration_hash) & 0x3fff'ffff'ffff'ffffULL);
     if (id == 0) {
       id = -1;
     }
-    if (statement.step()) {
-      id = statement.col_int64(0);
+    if (persisted) {
+      id = *persisted;
     }
     configuration_id_cache_.emplace(configuration_hash, id);
     return id;
