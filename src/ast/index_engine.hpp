@@ -15,6 +15,7 @@
 #include "ast/fact_batch.hpp"
 #include "ast/fact_records.hpp"
 #include "ast/header_stats.hpp" // HeaderStats
+#include "ast/include_facts.hpp"
 #include "ast/owned_header_plan.hpp"
 #include "ast/pass_registry.hpp"
 #include "storage/records.hpp"
@@ -109,6 +110,27 @@ struct ExtractedFactPublication {
   cidx::TranslationUnitConfig configuration;
 };
 
+// Everything the TU fact cache needs to key one translation unit before the
+// parse runs. Resolved from the session's descriptor cache, so obtaining it is
+// free for a translation unit this session is about to index; it never holds a
+// timestamp or a database row id (ADR-016: validity is content- and
+// configuration-addressed only).
+struct TranslationUnitCacheInputs {
+  std::string workspace_identity;
+  std::string source_identity;          // normalized absolute main-source path
+  std::string configuration_identity;   // descriptor semantic hash
+  std::string configuration_hash;       // resolved TranslationUnitConfig hash
+  std::string front_end_reuse_identity; // T-027 published identity or `none`
+  std::string clang_identity;           // Clang/resource/target/ABI identity
+  std::vector<std::string> environment;
+  std::vector<std::string> generated_inputs;
+  // The resolved configuration the extraction path publishes under. A replay
+  // must publish under the same one so the configuration row it associates
+  // facts with is the row a fresh extraction would have used.
+  cidx::TranslationUnitConfig configuration;
+  std::int64_t configuration_id = -1;
+};
+
 struct IndexOneOutcome {
   int stored = 0;            // main-file symbols stored (index_symbols)
   cidx::HeaderStats headers; // header two-pass counters
@@ -124,6 +146,11 @@ struct IndexOneOutcome {
   std::size_t observed_whole_tu_traversals = 0;
   std::vector<EvidenceRecord> evidence;
   std::optional<ExtractedFactPublication> publication;
+  // Preprocessor-observed dependency evidence: every include directive as
+  // opened and every macro expansion's defining file, whether or not the file
+  // carries a core `file` row. Populated only alongside `publication`, which is
+  // the only outcome a cache entry may be built from.
+  IncludeFacts dependency_facts;
   IndexSessionMetrics session_metrics;
 };
 
@@ -140,6 +167,14 @@ public:
   void
   invalidate(IndexInvalidationReason reason = IndexInvalidationReason::manual);
   [[nodiscard]] IndexSessionMetrics metrics() const;
+  // Resolves this translation unit's configuration through the same session
+  // caches run_index_one uses, without parsing. `no_front_end_reuse` selects
+  // the published front-end reuse identity so an explicitly disabled run never
+  // shares a cache slot with an enabled one.
+  [[nodiscard]] TranslationUnitCacheInputs
+  translation_unit_cache_inputs(const std::string &path, std::int64_t file_id,
+                                const std::optional<std::string> &source_md5,
+                                bool no_front_end_reuse);
 
 private:
   class Impl;

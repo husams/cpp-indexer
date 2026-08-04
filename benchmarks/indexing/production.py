@@ -177,11 +177,17 @@ REQUIRED_PROFILE_COUNTERS = frozenset(
         "fact_batch_writer.rows_updated",
         "fact_batch_writer.rows_ignored",
         "fact_batch_writer.rows_deleted",
+        # Every TU-cache decision class is registered at zero for the run, so
+        # "no hits" and "the cache never reported" stay distinguishable.
         "tu_fact_cache.hit",
-        "tu_fact_cache.miss",
+        "tu_fact_cache.missing",
         "tu_fact_cache.stale",
         "tu_fact_cache.corrupt",
         "tu_fact_cache.incompatible",
+        "tu_fact_cache.partial",
+        "tu_fact_cache.truncated",
+        "tu_fact_cache.untrusted",
+        "tu_fact_cache.unavailable",
         "tu_fact_cache.incomplete_evidence",
         "tu_fact_cache.parser_calls_avoided",
         "tu_fact_cache.replay_bytes",
@@ -192,6 +198,7 @@ REQUIRED_PROFILE_COUNTERS = frozenset(
         "tu_dependency.proven_unaffected_configurations",
         "tu_dependency.visited_nodes",
         "tu_dependency.visited_edges",
+        "tu_dependency.fallbacks",
     }
 )
 REQUIRED_TRANSLATION_UNIT_FIELDS = frozenset(

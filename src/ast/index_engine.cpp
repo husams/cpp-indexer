@@ -1,6 +1,7 @@
 #include "ast/index_engine.hpp"
 #include "ast/front_end_reuse.hpp"
 
+#include "ast/clang_version.hpp"
 #include "ast/declaration_edge_visitor.hpp"
 #include "ast/display_name_rewrite.hpp"
 #include "ast/fact_batch.hpp"
@@ -1790,6 +1791,51 @@ void IndexSession::invalidate(IndexInvalidationReason reason) {
 
 IndexSessionMetrics IndexSession::metrics() const { return impl_->metrics(); }
 
+TranslationUnitCacheInputs IndexSession::translation_unit_cache_inputs(
+    const std::string &path, std::int64_t file_id,
+    const std::optional<std::string> &source_md5, bool no_front_end_reuse) {
+  const TranslationUnitDescriptor &descriptor =
+      impl_->prepared_descriptor(path, file_id, source_md5);
+  const TranslationUnitConfig resolved =
+      configuration_without_source(descriptor);
+  const FrontEndReusePlan reuse =
+      plan_front_end_reuse(resolved, no_front_end_reuse);
+  // The reuse identity already covers the normalized configuration; the
+  // explicit enabled/disabled suffix keeps an explicitly disabled run in its
+  // own cache slot even while ADR-014 selects the `none` mechanism for both.
+  std::string clang_identity =
+      "clang-cpp/" + std::to_string(clang_version_major());
+  for (const std::optional<std::string> &field :
+       {resolved.target, resolved.resource_dir, resolved.sysroot,
+        resolved.language, resolved.standard, resolved.diagnostics_policy}) {
+    clang_identity += '\x1f';
+    clang_identity += field.value_or("");
+  }
+  for (const std::string &option : resolved.abi_options) {
+    clang_identity += '\x1f';
+    clang_identity += option;
+  }
+  std::vector<std::string> generated_inputs;
+  generated_inputs.reserve(resolved.generated_inputs.size());
+  for (const std::string &input : resolved.generated_inputs) {
+    generated_inputs.push_back(pathutil::abspath(
+        pathutil::join(resolved.working_dir.value_or("."), input)));
+  }
+  return {.workspace_identity = descriptor.workspace_identity,
+          .source_identity = pathutil::normpath(pathutil::abspath(path)),
+          .configuration_identity = descriptor.semantic_hash,
+          .configuration_hash = translation_unit_config_hash(resolved),
+          .front_end_reuse_identity =
+              reuse.identity.version + ':' + reuse.identity.mechanism + ':' +
+              reuse.identity.sha256 +
+              (no_front_end_reuse ? ":disabled" : ":enabled"),
+          .clang_identity = std::move(clang_identity),
+          .environment = resolved.relevant_environment,
+          .generated_inputs = std::move(generated_inputs),
+          .configuration = resolved,
+          .configuration_id = impl_->configuration_id(descriptor)};
+}
+
 void record_pass_timings(const IndexOneOutcome &out) {
   profile::add_counter("registered_root_traversal_budget",
                        out.registered_whole_tu_traversal_budget);
@@ -2165,6 +2211,10 @@ IndexOneOutcome finalize_index_one(
           .expected_generation = state.route_plan.generation(),
           .configuration_id = state.normalized_config_id,
           .configuration = *state.publication_config};
+      // Dependency evidence travels with a committed publication only; the
+      // failure branch below drops it so a rolled-back TU never leaves
+      // evidence a cache entry could be built from.
+      out.dependency_facts = state.includes;
       cidx::storage::FactBatchWriter writer(db);
       cidx::storage::FactBatchPublicationContext context{
           .route_plan = out.publication->route_plan,
@@ -2184,6 +2234,7 @@ IndexOneOutcome finalize_index_one(
           writer.apply(out.publication->batch, context);
       record_writer_profile(result.report, profiling);
       if (!result.ok()) {
+        out.dependency_facts = {};
         note_index_one_rollback(profiling);
         if (state.requested_failure != IndexFailurePoint::none) {
           throw std::runtime_error(

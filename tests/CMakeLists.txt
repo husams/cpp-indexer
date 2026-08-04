@@ -108,6 +108,16 @@ set_tests_properties(front_end_reuse_parse_test PROPERTIES
 add_test(NAME front_end_reuse_probe_test COMMAND front_end_reuse_probe)
 set_tests_properties(front_end_reuse_probe_test PROPERTIES LABELS "clang")
 
+# The TU fact-cache integration suite runs real toolchain-resolved parses and
+# then proves the second run does not parse at all, so it carries the heavier
+# "clang" label rather than "default".
+add_executable(tu_fact_cache_integration_test tu_fact_cache_integration_test.cpp)
+target_compile_options(tu_fact_cache_integration_test PRIVATE -Wall -Wextra)
+target_link_libraries(tu_fact_cache_integration_test PRIVATE cidx_core)
+add_test(NAME tu_fact_cache_integration_test
+         COMMAND tu_fact_cache_integration_test)
+set_tests_properties(tu_fact_cache_integration_test PROPERTIES LABELS "clang")
+
 target_compile_definitions(result_protocol_test PRIVATE
   CIDX_RESULT_PROTOCOL_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/../spec/contracts/golden/result-envelope.json"
   CIDX_EVENT_PROTOCOL_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/../spec/contracts/golden/event.json"

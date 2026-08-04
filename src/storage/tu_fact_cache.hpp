@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -69,6 +70,17 @@ public:
       -> TuFactCacheLookup;
   [[nodiscard]] auto dependency_evidence()
       -> std::vector<TranslationUnitDependencyEvidence>;
+  // Dependency evidence for one slot without decoding its FactBatch payload.
+  // This is the cache-validity read on the indexing hot path: the caller
+  // recomputes the identity from the recorded dependencies' current content
+  // before asking for a payload at all. Returns nullopt when the slot has no
+  // current manifest; a present-but-unusable object is reported through the
+  // evidence state, never as a hit.
+  [[nodiscard]] auto
+  dependency_evidence_for(std::string_view workspace_identity,
+                          std::string_view source_identity,
+                          std::string_view configuration_identity)
+      -> std::optional<TranslationUnitDependencyEvidence>;
 
   void lease(std::string_view workspace_identity,
              std::string_view source_identity,
@@ -96,6 +108,9 @@ private:
   [[nodiscard]] auto read_current(const ArtifactRecord &record,
                                   TuFactCacheStatus status)
       -> TuFactCacheLookup;
+  [[nodiscard]] auto read_dependency_evidence(const ArtifactRecord &record,
+                                              TuFactCacheStatus status)
+      -> TranslationUnitDependencyEvidence;
 
   ArtifactStore artifacts_;
 };

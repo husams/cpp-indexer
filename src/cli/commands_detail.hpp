@@ -28,6 +28,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "application/tu_fact_cache_service.hpp"
 #include "ast/clang_version.hpp"
 #include "ast/index_engine.hpp"
 #include "cli/format.hpp"
@@ -215,16 +216,19 @@ const char kDirNeedsComponent[] =
 // main() (D23). The ParsedTu lives only inside the try block: its destructor
 // frees the TU + Index BEFORE mark_file_indexed runs — Python's
 // `del tu` in index_source's finally (one-AST peak memory, design §7).
-inline int index_one(Storage &db, ast::IndexSession &session, const File &rec,
-                     const std::string &path, bool graph_enabled,
-                     bool no_front_end_reuse, Context &ctx) {
+inline int index_one(Storage &db, application::TuFactCacheIndexer &indexer,
+                     const File &rec, const std::string &path,
+                     bool graph_enabled, bool no_front_end_reuse,
+                     Context &ctx) {
   // All indexing runs through the LibTooling engine (parity-proven visitors
   // over the Clang C++ API): same DB effects, counters, and per-file output
-  // line as the retired libclang cursor walk.
+  // line as the retired libclang cursor walk. The TU fact cache may serve the
+  // translation unit from a validated cache entry instead of parsing it; the
+  // outcome fields below are identical either way.
   {
     ast::IndexOneOutcome out =
-        ast::run_index_one(db, session, rec, path, graph_enabled,
-                           ast::IndexFailurePoint::none, no_front_end_reuse);
+        indexer.index_one(rec, path, graph_enabled,
+                          ast::IndexFailurePoint::none, no_front_end_reuse);
     if (ctx.index_outcome_sink) {
       ctx.index_outcome_sink(out);
     }
@@ -288,7 +292,8 @@ inline int index_one(Storage &db, ast::IndexSession &session, const File &rec,
 // flag but the loop continues.
 inline int index_files(Storage &db, const std::vector<std::string> &file_args,
                        const std::optional<std::string> &root,
-                       bool graph_enabled, ast::IndexSession &session,
+                       bool graph_enabled,
+                       application::TuFactCacheIndexer &indexer,
                        bool no_front_end_reuse, Context &ctx) {
   int rc = 0;
   for (const std::string &f : file_args) {
@@ -304,7 +309,7 @@ inline int index_files(Storage &db, const std::vector<std::string> &file_args,
       *ctx.out << "  already indexed\n";
       continue;
     }
-    rc |= index_one(db, session, *rec, path, graph_enabled, no_front_end_reuse,
+    rc |= index_one(db, indexer, *rec, path, graph_enabled, no_front_end_reuse,
                     ctx);
   }
   return rc;
@@ -316,8 +321,8 @@ inline int index_files(Storage &db, const std::vector<std::string> &file_args,
 // (ORDER BY c.path, d.path, f.name), snapshotted before the loop so header
 // rows added while indexing are not re-visited this run.
 inline int index_pending(Storage &db, bool graph_enabled,
-                         ast::IndexSession &session, bool no_front_end_reuse,
-                         Context &ctx) {
+                         application::TuFactCacheIndexer &indexer,
+                         bool no_front_end_reuse, Context &ctx) {
   int done = 0;
   int skipped = 0;
   int failed = 0;
@@ -340,7 +345,7 @@ inline int index_pending(Storage &db, bool graph_enabled,
       continue;
     }
     *ctx.out << "indexing " << path << "\n";
-    if (index_one(db, session, rec, path, graph_enabled, no_front_end_reuse,
+    if (index_one(db, indexer, rec, path, graph_enabled, no_front_end_reuse,
                   ctx) == 0) {
       ++done;
     } else {

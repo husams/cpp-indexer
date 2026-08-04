@@ -400,6 +400,69 @@ auto TuFactCache::lookup(std::string_view workspace_identity,
   return result;
 }
 
+auto TuFactCache::read_dependency_evidence(const ArtifactRecord &record,
+                                           TuFactCacheStatus status)
+    -> TranslationUnitDependencyEvidence {
+  TranslationUnitDependencyEvidence evidence{
+      .source = record.spec.tu_identity,
+      .configuration = record.spec.configuration_identity,
+      .generation = record.spec.input_fact_set_identity,
+      .state = evidence_state(status),
+      .edges = {}};
+  if (status != TuFactCacheStatus::hit) {
+    return evidence;
+  }
+  try {
+    artifacts_.read_current(record.spec.logical_id, [&](SqliteDb &database,
+                                                        std::string_view
+                                                            attachment_name) {
+      auto edges = database.prepare(
+          "SELECT source, destination, destination_content_sha256, "
+          "conditional_context, resolved, provenance, kind, system FROM \"" +
+          std::string(attachment_name) +
+          "\".tu_dependency ORDER BY source, destination, "
+          "conditional_context");
+      while (edges.step()) {
+        evidence.edges.push_back(
+            {.source = edges.col_text(0),
+             .destination = edges.col_text(1),
+             .destination_content_sha256 = edges.col_text(2),
+             .conditional_context = edges.col_text(3),
+             .provenance = edges.col_text(5),
+             .kind = dependency_kind(edges.col_text(6)),
+             .resolved = edges.col_int64(4) != 0,
+             .system = edges.col_int64(7) != 0});
+      }
+    });
+  } catch (const std::exception &error) {
+    static_cast<void>(error);
+    evidence.edges.clear();
+    evidence.state = DependencyEvidenceState::corrupt;
+  }
+  return evidence;
+}
+
+auto TuFactCache::dependency_evidence_for(
+    std::string_view workspace_identity, std::string_view source_identity,
+    std::string_view configuration_identity)
+    -> std::optional<TranslationUnitDependencyEvidence> {
+  const ArtifactValidation validation = artifacts_.validate(
+      logical_id(workspace_identity, source_identity, configuration_identity));
+  if (!validation.manifest) {
+    return std::nullopt;
+  }
+  if (validation.manifest->spec.workspace_identity != workspace_identity) {
+    return TranslationUnitDependencyEvidence{
+        .source = canonical_tu_cache_path(source_identity),
+        .configuration = std::string(configuration_identity),
+        .generation = {},
+        .state = DependencyEvidenceState::stale,
+        .edges = {}};
+  }
+  return read_dependency_evidence(
+      *validation.manifest, status_from_diagnostics(validation.diagnostics));
+}
+
 auto TuFactCache::dependency_evidence()
     -> std::vector<TranslationUnitDependencyEvidence> {
   const auto [records, diagnostics] = artifacts_.export_plan(true);
@@ -413,7 +476,7 @@ auto TuFactCache::dependency_evidence()
         artifacts_.validate(record.spec.logical_id);
     const TuFactCacheStatus status =
         status_from_diagnostics(validation.diagnostics);
-    result.push_back(read_current(record, status).dependency_evidence);
+    result.push_back(read_dependency_evidence(record, status));
   }
   std::ranges::sort(result, {}, [](const auto &entry) {
     return std::pair(entry.source, entry.configuration);
