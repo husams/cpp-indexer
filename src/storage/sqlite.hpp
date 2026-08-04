@@ -18,6 +18,7 @@
 // runtime library version.
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -70,6 +71,38 @@ struct SqliteStatementStats {
   std::uint64_t fullscan_steps = 0;
   std::uint64_t reprepares = 0;
   double step_seconds = 0.0;
+};
+
+// Per-step VM-step / timing sampling costs two steady_clock reads and three
+// sqlite3_stmt_status calls, so it is opt-in: SqliteStmt::step() samples only
+// while an indexing profiling session is active (profile::active()) or while a
+// StatementMeasurementScope is open. Statement execution and reuse counts are
+// plain increments and are always maintained.
+namespace detail {
+extern std::atomic_int statement_measurement_depth;
+} // namespace detail
+
+[[nodiscard]] inline auto statement_measurement_active() noexcept -> bool {
+  return detail::statement_measurement_depth.load(std::memory_order_relaxed) >
+         0;
+}
+
+// RAII: turns per-step sampling on for callers that consume a statement report
+// without running a full profiling session (FactBatchWriter, benchmarks,
+// tests). Nesting is refcounted.
+class StatementMeasurementScope {
+public:
+  StatementMeasurementScope() noexcept {
+    detail::statement_measurement_depth.fetch_add(1, std::memory_order_relaxed);
+  }
+  ~StatementMeasurementScope() {
+    detail::statement_measurement_depth.fetch_sub(1, std::memory_order_relaxed);
+  }
+  StatementMeasurementScope(const StatementMeasurementScope &) = delete;
+  StatementMeasurementScope &
+  operator=(const StatementMeasurementScope &) = delete;
+  StatementMeasurementScope(StatementMeasurementScope &&) = delete;
+  StatementMeasurementScope &operator=(StatementMeasurementScope &&) = delete;
 };
 
 // Owns a sqlite3_stmt*. Movable, non-copyable. Bind indexes are 1-based,

@@ -501,26 +501,6 @@
       "removalIssue": "HSE-62"
     },
     {
-      "source": "src/ast/storage_edge_sink.cpp",
-      "fromModule": "extraction.ast",
-      "toModule": "persistence.sqlite",
-      "boundary": "extraction -> persistence",
-      "owner": "Platform M1 storage maintainers",
-      "rationale": "This adapter is the legacy bridge from typed edge records to the monolithic Storage facade.",
-      "expiresOn": "2026-12-31",
-      "removalIssue": "HSE-62"
-    },
-    {
-      "source": "src/ast/storage_symbol_sink.cpp",
-      "fromModule": "extraction.ast",
-      "toModule": "persistence.sqlite",
-      "boundary": "extraction -> persistence",
-      "owner": "Platform M1 storage maintainers",
-      "rationale": "This adapter is the legacy bridge from typed symbol records to the monolithic Storage facade.",
-      "expiresOn": "2026-12-31",
-      "removalIssue": "HSE-62"
-    },
-    {
       "source": "src/astgraph/astgraph.cpp",
       "fromModule": "analysis.astgraph",
       "toModule": "product.cli",

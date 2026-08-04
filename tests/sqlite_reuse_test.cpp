@@ -19,6 +19,10 @@ auto sum(SqliteDb &database) -> std::int64_t {
 }
 
 TEST_CASE("one prepared statement supports 10000 clear rebind cycles") {
+  // Per-step VM-step sampling is opt-in (it costs two clock reads and three
+  // sqlite3_stmt_status calls per step), so a test that asserts on it must
+  // open the measurement scope.
+  const StatementMeasurementScope measuring;
   SqliteDb reusable(":memory:");
   reusable.exec("CREATE TABLE values_test(value INTEGER NOT NULL)");
   auto insert = reusable.prepare("INSERT INTO values_test(value) VALUES(?)");

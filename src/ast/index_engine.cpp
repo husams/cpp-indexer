@@ -2059,8 +2059,6 @@ void record_writer_profile(const cidx::storage::FactBatchWriterReport &report,
                        report.statements_prepared);
   profile::add_counter("fact_batch_writer.statements_reused",
                        report.statements_reused);
-  profile::add_counter("fact_batch_writer.statements_eliminated",
-                       report.statements_eliminated);
   profile::add_counter("fact_batch_writer.statement_executions",
                        report.statement_executions);
   profile::add_counter("fact_batch_writer.virtual_machine_steps",

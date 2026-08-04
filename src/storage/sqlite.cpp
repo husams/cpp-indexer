@@ -20,6 +20,8 @@ namespace {
 
 } // namespace
 
+std::atomic_int detail::statement_measurement_depth = 0;
+
 auto sqlite_profile_settings(SqliteProfile profile) -> SqliteProfileSettings {
   switch (profile) {
   case SqliteProfile::indexing:
@@ -179,6 +181,17 @@ bool SqliteStmt::step() {
     ++stats_.executions;
   }
   const bool profiling = profile::active();
+  if (!profiling && !statement_measurement_active()) {
+    // Uninstrumented path: no clock reads, no sqlite3_stmt_status calls.
+    const int rc = sqlite3_step(stmt_);
+    if (rc == SQLITE_ROW) {
+      return true;
+    }
+    if (rc == SQLITE_DONE) {
+      return false;
+    }
+    throw_db_error(db_, "step for \"" + sql_ + "\"");
+  }
   const auto started = std::chrono::steady_clock::now();
   const int rc = sqlite3_step(stmt_);
   const double step_seconds =

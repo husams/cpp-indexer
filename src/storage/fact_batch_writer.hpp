@@ -64,7 +64,10 @@ struct FactBatchWriterRows {
 struct FactBatchWriterReport {
   std::uint64_t statements_prepared = 0;
   std::uint64_t statements_reused = 0;
-  std::uint64_t statements_eliminated = 0;
+  // Statements eliminated relative to the replaced row-at-a-time path is not
+  // observable from inside the writer: it is a difference against a baseline
+  // build. It is reported by benchmarks/indexing/production.py as
+  // baseline prepare_calls - candidate prepare_calls, never synthesized here.
   std::uint64_t statement_executions = 0;
   std::uint64_t virtual_machine_steps = 0;
   double prepare_seconds = 0.0;
@@ -97,6 +100,10 @@ struct FactBatchPublicationContext {
   std::int64_t configuration_id = -1;
   std::optional<cidx::TranslationUnitConfig> configuration;
   FactBatchWriterFailurePoint failure = FactBatchWriterFailurePoint::none;
+  // Opt in to per-step VM-step/timing sampling for this publication. Off by
+  // default so an ordinary index run pays no measurement cost; an active
+  // profiling session enables sampling independently of this flag.
+  bool measure_statements = false;
 };
 
 struct FactBatchWriterResult {

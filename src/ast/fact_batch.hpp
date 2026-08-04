@@ -4,8 +4,10 @@
 #include "ast/fact_emitters.hpp"
 #include "ast/fact_identity.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <optional>

@@ -302,6 +302,10 @@ CREATE TEMP TABLE IF NOT EXISTS cidx_batch_aux(
   PRIMARY KEY(batch,family,ordinal));
 )SQL";
   database.exec(schema);
+  // 13 statements are compiled and stepped on every call: CREATE TEMP TABLE IF
+  // NOT EXISTS is a semantic no-op once the table exists, but SQLite still
+  // prepares and runs each one, so counting them every publication is the
+  // truthful figure, not an inflation.
   report.statements_prepared += 13;
   report.statement_executions += 13;
 }
@@ -322,6 +326,26 @@ void clear_temporary_rows(SqliteDb &database, FactBatchWriterReport &report,
     note_statement_stats(report, statement);
     ++report.statement_executions;
   }
+}
+
+// Two partitions belong to the same publication when their file and every
+// configuration axis that scopes published facts agree. identity_source (and
+// the reconstructable content descriptor) are per-symbol identity attributes,
+// not publication scope: a symbol minted for an external declaration keeps its
+// route's file but carries the external header as its identity_source, so full
+// FactPartitionKey equality would wrongly exclude it. Matching on the file
+// alone is the opposite error -- it marks a partition of a planned file under
+// an UNPLANNED configuration as planned, publishing that configuration's facts
+// into this context's applicability (AC #1703).
+auto publishes_same_partition(const ast::FactPartitionKey &route,
+                              const ast::FactPartitionKey &candidate) -> bool {
+  return route.file == candidate.file &&
+         route.configuration.semantic_universe ==
+             candidate.configuration.semantic_universe &&
+         route.configuration.translation_unit ==
+             candidate.configuration.translation_unit &&
+         route.configuration.normalized_configuration ==
+             candidate.configuration.normalized_configuration;
 }
 
 auto batch_token(const ast::FactBatch &batch,
@@ -354,10 +378,17 @@ void load_file_map(SqliteDb &database, FactBatchWriterResult &result,
     insert.bind(3, file->second);
     const std::string partition_key = partition.stable_string();
     insert.bind(4, std::string_view(partition_key));
+    // Must use the SAME strict match apply() uses to resolve routes: full
+    // FactPartitionKey (file AND configuration) scoped to this translation
+    // unit. Matching on the file alone marks a partition of a planned file
+    // under an unplanned configuration as planned, which publishes that
+    // configuration's facts into this context's applicability (AC #1703).
     const bool planned = std::ranges::any_of(
         context.route_plan.routes(),
-        [&partition](const ast::PlannedFileRoute &route) {
-          return route.extraction.partition.file == partition.file;
+        [&partition, &context](const ast::PlannedFileRoute &route) {
+          return route.translation_unit == context.translation_unit &&
+                 publishes_same_partition(route.extraction.partition,
+                                          partition);
         });
     insert.bind(5, static_cast<std::int64_t>(planned));
     insert.step_done();
@@ -368,7 +399,6 @@ void load_file_map(SqliteDb &database, FactBatchWriterResult &result,
   }
   result.report.statement_executions += executions;
   result.report.statements_reused += executions > 0 ? executions - 1 : 0;
-  result.report.statements_eliminated += executions > 0 ? executions - 1 : 0;
   note_statement_stats(result.report, insert);
 }
 
@@ -401,6 +431,13 @@ void load_symbols(cidx::SqliteStorageService &storage, SqliteDb &database,
       throw StorageError("symbol apply-order metadata has no staged record");
     }
     std::size_t &cursor = next_location[location_key];
+    // Repeated declarations of one natural key collapse to fewer staged
+    // records than apply-order emissions (a redeclaration, or the same USR
+    // emitted twice in a partition), so the cursor legitimately runs past the
+    // end. Clamping re-binds the last staged record, which is the merge
+    // semantics the upsert relies on -- last emission wins. Throwing here
+    // instead rejects every duplicate-heavy batch; the missing-key path above
+    // is the real error case.
     const SymbolLocation &location =
         found->second[std::min(cursor, found->second.size() - 1)];
     ++cursor;
@@ -435,6 +472,15 @@ void load_symbols(cidx::SqliteStorageService &storage, SqliteDb &database,
     insert.bind(22, static_cast<std::int64_t>(record.is_static));
     insert.bind(23, static_cast<std::int64_t>(record.is_instantiation));
     insert.bind(24, static_cast<std::int64_t>(record.is_named_instance));
+    // A location-less symbol (line <= 0) is one the extraction minted rather
+    // than saw declared -- an implicit instantiation such as Box<int> and its
+    // members. The replaced path created those through
+    // StorageEdgeSink::mint_symbol, which never wrote linkage, so staging
+    // record.linkage for them would change committed output: dropping this
+    // guard makes index_golden_test fail on exactly the two location-less
+    // c:@S@Box>#I rows in tests/golden/index_layer0.txt, which predates this
+    // branch. This is deliberate parity, not the file/line/col location
+    // pattern applied to a declaration property.
     if (record.line > 0) {
       bind_optional(insert, 25, record.linkage);
     } else {
@@ -457,7 +503,6 @@ void load_symbols(cidx::SqliteStorageService &storage, SqliteDb &database,
   rows.staged += ordinal;
   result.report.statement_executions += ordinal;
   result.report.statements_reused += ordinal > 0 ? ordinal - 1 : 0;
-  result.report.statements_eliminated += ordinal > 0 ? ordinal - 1 : 0;
   note_statement_stats(result.report, insert);
 }
 
@@ -505,7 +550,6 @@ void load_types(SqliteDb &database, FactBatchWriterResult &result,
   result.report.families[ast::FactFamily::types].staged += ordinal;
   result.report.statement_executions += ordinal;
   result.report.statements_reused += ordinal > 0 ? ordinal - 1 : 0;
-  result.report.statements_eliminated += ordinal > 0 ? ordinal - 1 : 0;
   note_statement_stats(result.report, insert);
 }
 
@@ -563,7 +607,6 @@ void load_relations(SqliteDb &database, FactBatchWriterResult &result,
   result.report.families[ast::FactFamily::relations].staged += ordinal;
   result.report.statement_executions += ordinal;
   result.report.statements_reused += ordinal > 0 ? ordinal - 1 : 0;
-  result.report.statements_eliminated += ordinal > 0 ? ordinal - 1 : 0;
   note_statement_stats(result.report, insert);
 }
 
@@ -604,7 +647,6 @@ void load_definitions(SqliteDb &database, FactBatchWriterResult &result,
   result.report.families[ast::FactFamily::definitions].staged += ordinal;
   result.report.statement_executions += ordinal;
   result.report.statements_reused += ordinal > 0 ? ordinal - 1 : 0;
-  result.report.statements_eliminated += ordinal > 0 ? ordinal - 1 : 0;
   note_statement_stats(result.report, insert);
 }
 
@@ -636,11 +678,11 @@ void load_auxiliary_rows(SqliteDb &database, FactBatchWriterResult &result,
   }
   result.report.statement_executions += rows.size();
   result.report.statements_reused += rows.empty() ? 0 : rows.size() - 1;
-  result.report.statements_eliminated += rows.empty() ? 0 : rows.size() - 1;
   note_statement_stats(result.report, insert);
 }
 
-auto auxiliary_rows(const ast::FactBatch &batch) -> std::vector<AuxiliaryRow> {
+auto auxiliary_rows(cidx::SqliteStorageService &storage,
+                    const ast::FactBatch &batch) -> std::vector<AuxiliaryRow> {
   std::vector<AuxiliaryRow> rows;
   const auto symbol_handles = inverse(batch.symbol_keys());
   const auto add_partitioned = [&batch, &rows](
@@ -840,12 +882,19 @@ auto auxiliary_rows(const ast::FactBatch &batch) -> std::vector<AuxiliaryRow> {
                         json_min::encode_string_array(record.display_args);
                     return row;
                   });
+  // i1 carries the intent's own semantic universe so cleanup deletes only the
+  // facts of the universe that emitted the intent (AC #1702); t1 carries the
+  // prior generation the intent was planned against, enforced in
+  // apply_lifecycle_cleanup.
   add_partitioned(ast::FactFamily::lifecycle_cleanup,
                   batch.records().lifecycle_cleanup.size(),
                   batch.records().lifecycle_cleanup,
-                  [](const ast::LifecycleCleanupIntent &record) {
+                  [&storage](const ast::LifecycleCleanupIntent &record) {
                     AuxiliaryRow row;
                     row.integers[0] = static_cast<std::int64_t>(record.kind);
+                    row.integers[1] = universe_id_for(
+                        storage,
+                        record.partition.configuration.semantic_universe);
                     row.texts = {record.target.portable_path(),
                                  record.prior_generation.token};
                     return row;
@@ -1057,6 +1106,26 @@ void apply_symbols(SqliteDb &database, FactBatchWriterResult &result,
   rows.ignored += rows.staged >= unique ? rows.staged - unique : 0;
 }
 
+// Rejects a lifecycle-cleanup intent whose planned-against generation is not
+// the generation this publication is applying. Producers do not populate
+// prior_generation yet (S-099 owns FactGenerationKey production), so the empty
+// token is the "unversioned intent" sentinel and is accepted; a populated token
+// that disagrees aborts the publication before any fact is deleted.
+void reject_stale_cleanup_intents(const ast::FactBatch &batch,
+                                  const FactBatchPublicationContext &context) {
+  for (const ast::LifecycleCleanupIntent &intent :
+       batch.records().lifecycle_cleanup) {
+    if (!intent.prior_generation.token.empty() &&
+        intent.prior_generation.token != context.expected_generation) {
+      throw StorageError("FactBatch lifecycle cleanup intent for " +
+                         intent.target.portable_path() +
+                         " was planned against generation '" +
+                         intent.prior_generation.token + "', not '" +
+                         context.expected_generation + "'");
+    }
+  }
+}
+
 void apply_lifecycle_cleanup(SqliteDb &database, FactBatchWriterResult &result,
                              std::int64_t token) {
   const std::string cleanup =
@@ -1066,20 +1135,29 @@ void apply_lifecycle_cleanup(SqliteDb &database, FactBatchWriterResult &result,
       std::to_string(std::to_underlying(ast::LifecycleCleanupKind::relations));
   const std::string definition_kind = std::to_string(
       std::to_underlying(ast::LifecycleCleanupKind::definitions));
+  // Scoped on three axes, all required by AC #1702/#1703: fm.planned=1 so a
+  // file this publication does not re-apply never loses its facts;
+  // s.semantic_universe_id=a.i1 so cleanup stays inside the universe that
+  // emitted the intent instead of wiping every universe's edges for the file.
   std::int64_t deleted = execute(
       database, result.report,
       "DELETE FROM edge WHERE kind<>3 AND src_id IN (SELECT s.id FROM symbol "
       "s JOIN temp.cidx_batch_aux a JOIN temp.cidx_batch_file_map fm ON "
       "fm.batch=a.batch AND fm.handle=a.file_handle WHERE a.family=" +
           cleanup + " AND a.i0=" + relation_kind +
-          " AND a.batch=" + token_text + " AND s.file_id=fm.file_id)");
-  deleted +=
-      execute(database, result.report,
-              "DELETE FROM definition WHERE file_id IN (SELECT fm.file_id FROM "
-              "temp.cidx_batch_aux a JOIN temp.cidx_batch_file_map fm ON "
-              "fm.batch=a.batch AND fm.handle=a.file_handle WHERE a.family=" +
-                  cleanup + " AND a.i0=" + definition_kind +
-                  " AND a.batch=" + token_text + ")");
+          " AND a.batch=" + token_text +
+          " AND fm.planned=1 AND s.file_id=fm.file_id"
+          " AND s.semantic_universe_id=a.i1)");
+  deleted += execute(
+      database, result.report,
+      "DELETE FROM definition WHERE id IN (SELECT d.id FROM definition d "
+      "JOIN symbol s ON s.id=d.symbol_id "
+      "JOIN temp.cidx_batch_aux a JOIN temp.cidx_batch_file_map fm ON "
+      "fm.batch=a.batch AND fm.handle=a.file_handle WHERE a.family=" +
+          cleanup + " AND a.i0=" + definition_kind +
+          " AND a.batch=" + token_text +
+          " AND fm.planned=1 AND d.file_id=fm.file_id"
+          " AND s.semantic_universe_id=a.i1)");
   result.report.families[ast::FactFamily::lifecycle_cleanup].deleted +=
       static_cast<std::uint64_t>(std::max<std::int64_t>(0, deleted));
 }
@@ -1679,23 +1757,44 @@ void publish_includes(SqliteDb &database, FactBatchWriterResult &result,
           include_config_text +
           " WHERE src.batch=a.batch AND src.handle=a.file_handle AND "
           "e.dst_file_id IS NOT NULL)"));
-  static_cast<void>(execute(
+  // Deliberately whole-batch, not planned-gated. include_config_id is keyed on
+  // this TU's tu_file_id, so every row touched here is include state this TU
+  // owns; the replaced routine (base storage_include.cpp:513) retired the
+  // config's rows wholesale for the same reason. Symbol/definition
+  // applicability is planned-gated because those facts are shared across TUs;
+  // include state is not. Re-deriving an unplanned header's include edges from
+  // this TU's own preprocessing is the correct, complete replacement.
+  auto &include_rows = result.report.families[ast::FactFamily::includes];
+  auto &macro_rows = result.report.families[ast::FactFamily::macros];
+  const auto count = [](std::int64_t changes) -> std::uint64_t {
+    return static_cast<std::uint64_t>(std::max<std::int64_t>(0, changes));
+  };
+  include_rows.deleted += count(execute(
       database, result.report,
       "DELETE FROM include_edge WHERE config_id=" + include_config_text +
           " AND src_file_id IN (SELECT file_id FROM temp.cidx_batch_file_map "
           "WHERE batch=" +
           batch_token_text + ")"));
-  static_cast<void>(execute(
+  macro_rows.deleted += count(execute(
       database, result.report,
       "DELETE FROM include_macro_use WHERE config_id=" + include_config_text +
           " AND src_file_id IN (SELECT file_id FROM temp.cidx_batch_file_map "
           "WHERE batch=" +
           batch_token_text + ")"));
-  static_cast<void>(execute(
+  // The grouped include_edge rows are a second attempted population for this
+  // family (the staged auxiliary records are the per-site observations), so
+  // they are added to both staged and inserted -- every count below is a
+  // measured sqlite3_changes64, never the staged count reused as a placeholder.
+  const std::uint64_t include_edges = count(execute(
       database, result.report,
       "INSERT INTO include_edge(src_file_id,dst_file_id,dst_path,config_id,"
       "is_system,is_generated,count) "
-      "SELECT src.file_id,COALESCE(dst.file_id,CASE WHEN a.t3 GLOB '[0-9]*' "
+      // MIN(...) over the dst resolution: the GROUP BY is (src.file_id, a.t0)
+      // and a.i9 / a.t3..a.t5 can differ inside one group, so an unaggregated
+      // reference would let SQLite pick an arbitrary row. MIN makes the choice
+      // deterministic.
+      "SELECT src.file_id,MIN(COALESCE(dst.file_id,CASE WHEN a.t3 GLOB "
+      "'[0-9]*' "
       "THEN CAST(a.t3 AS INTEGER) END,persisted.id,(SELECT pf.id FROM file pf "
       "JOIN directory pd ON pd.id=pf.directory_id JOIN component pc ON "
       "pc.id=pd.component_id LEFT JOIN repository pr ON "
@@ -1704,7 +1803,7 @@ void publish_includes(SqliteDb &database, FactBatchWriterResult &result,
       "((pc.repository_id IS NULL AND pc.path=a.t3) OR "
       "(pc.repository_id IS NOT NULL AND "
       "CASE WHEN pc.path='.' THEN pcl.path ELSE rtrim(pcl.path,'/')||'/'||"
-      "pc.path END=a.t3)) LIMIT 1)),a.t0," +
+      "pc.path END=a.t3)) LIMIT 1))),a.t0," +
           include_config_text +
           ",MAX(a.i7),0,COUNT(*) FROM temp.cidx_batch_aux a "
           "JOIN temp.cidx_batch_file_map src ON src.batch=a.batch "
@@ -1718,7 +1817,9 @@ void publish_includes(SqliteDb &database, FactBatchWriterResult &result,
           "WHERE a.family=" +
           include_family + " AND a.batch=" + batch_token_text +
           " GROUP BY src.file_id,a.t0"));
-  static_cast<void>(execute(
+  include_rows.staged += include_edges;
+  include_rows.inserted += include_edges;
+  const std::uint64_t include_sites = count(execute(
       database, result.report,
       "INSERT INTO "
       "include_site(edge_id,line,col,begin_offset,end_offset,spelling,"
@@ -1729,7 +1830,12 @@ void publish_includes(SqliteDb &database, FactBatchWriterResult &result,
       "ON e.src_file_id=src.file_id AND e.dst_path=a.t0 AND e.config_id=" +
           include_config_text + " WHERE a.family=" + include_family +
           " AND a.batch=" + batch_token_text));
-  static_cast<void>(
+  include_rows.inserted += include_sites;
+  include_rows.ignored +=
+      include_rows.staged > include_edges + include_sites
+          ? include_rows.staged - include_edges - include_sites
+          : 0;
+  const std::uint64_t macro_written = count(
       execute(database, result.report,
               "INSERT INTO "
               "include_macro_use(src_file_id,def_path,name,config_id,count) "
@@ -1740,10 +1846,11 @@ void publish_includes(SqliteDb &database, FactBatchWriterResult &result,
                   "AND src.handle=a.file_handle WHERE a.family=" +
                   macro_family + " AND a.batch=" + batch_token_text +
                   " GROUP BY src.file_id,a.t0,a.t1"));
-  result.report.families[ast::FactFamily::includes].inserted +=
-      result.report.families[ast::FactFamily::includes].staged;
-  result.report.families[ast::FactFamily::macros].inserted +=
-      result.report.families[ast::FactFamily::macros].staged;
+  // The macro INSERT groups repeated uses per (file, def_path, name), so the
+  // staged rows that collapse into an existing group are ignored, not written.
+  macro_rows.inserted += macro_written;
+  macro_rows.ignored +=
+      macro_rows.staged > macro_written ? macro_rows.staged - macro_written : 0;
 }
 
 void publish_applicability(SqliteDb &database, FactBatchWriterResult &result,
@@ -1765,7 +1872,21 @@ void publish_applicability(SqliteDb &database, FactBatchWriterResult &result,
       "fa.file_id=fm.file_id AND fa.config_id=" +
           config_text + "),1) WHERE fm.batch=" + token_text +
           " AND fm.planned=1"));
-  static_cast<void>(execute(
+  // AC #1700 wants measured rows for this family. It covers two populations:
+  // the file_config role/state rows staged as auxiliary records, and the
+  // fact_applicability rows derived below. Both are counted, never estimated.
+  const std::string file_config_population =
+      "SELECT COUNT(*) FROM file_config WHERE config_id=" + config_text;
+  const auto count_rows = [&](const std::string &sql) -> std::int64_t {
+    auto statement = prepare_statement(database, result.report, sql);
+    const std::int64_t value = statement.step() ? statement.col_int64(0) : 0;
+    statement.step_done();
+    note_statement_stats(result.report, statement);
+    ++result.report.statement_executions;
+    return value;
+  };
+  const std::int64_t file_config_before = count_rows(file_config_population);
+  std::int64_t file_config_affected = execute(
       database, result.report,
       "INSERT INTO file_config(file_id,config_id,role,state,reason) "
       "SELECT fm.file_id," +
@@ -1777,8 +1898,8 @@ void publish_applicability(SqliteDb &database, FactBatchWriterResult &result,
           "ON fm.batch=a.batch AND fm.handle=a.file_handle WHERE a.family=" +
           applicability + " AND a.batch=" + token_text + " AND a.i0=0" +
           " ON CONFLICT(file_id,config_id,role) DO UPDATE SET "
-          "state=excluded.state,reason=excluded.reason"));
-  static_cast<void>(execute(
+          "state=excluded.state,reason=excluded.reason");
+  file_config_affected += execute(
       database, result.report,
       "INSERT INTO file_config(file_id,config_id,role,state,reason) "
       "SELECT DISTINCT selected.file_id," +
@@ -1812,17 +1933,29 @@ void publish_applicability(SqliteDb &database, FactBatchWriterResult &result,
           " AND include.batch=" + token_text +
           ") selected WHERE selected.file_id IS NOT NULL "
           "ON CONFLICT(file_id,config_id,role) DO UPDATE "
-          "SET state=excluded.state,reason=excluded.reason"));
+          "SET state=excluded.state,reason=excluded.reason");
 
+  // AC #1700 requires measured rows, so applicability upserts are measured
+  // rather than estimated: every publish() accumulates sqlite3_changes64, and
+  // the row population owned by this publication is counted once before and
+  // once after. inserted = the population growth; updated = the remaining
+  // affected rows, which by definition hit the ON CONFLICT branch.
+  const std::string owned_population =
+      "SELECT COUNT(*) FROM fact_applicability WHERE config_id=" + config_text +
+      " AND file_id IN (SELECT file_id FROM temp.cidx_batch_file_map WHERE "
+      "batch=" +
+      token_text + " AND planned=1)";
+  const std::int64_t applicability_before = count_rows(owned_population);
+  std::int64_t applicability_affected = 0;
   const auto publish = [&](std::string_view kind, std::string_view rows) {
-    static_cast<void>(execute(
+    applicability_affected += execute(
         database, result.report,
         "INSERT INTO "
         "fact_applicability(fact_kind,fact_id,file_id,config_id,generation) "
         "SELECT '" +
             std::string(kind) + "'," + std::string(rows) +
             " ON CONFLICT(fact_kind,fact_id,file_id,config_id) DO UPDATE SET "
-            "generation=excluded.generation"));
+            "generation=excluded.generation");
   };
   publish("symbol", "sm.symbol_id,fm.file_id," + config_text + "," +
                         "fm.generation" +
@@ -1862,7 +1995,7 @@ void publish_applicability(SqliteDb &database, FactBatchWriterResult &result,
             "d.id,fm.file_id," + config_text + ",fm.generation" +
                 " FROM diagnostic d JOIN temp.cidx_batch_file_map fm "
                 "ON fm.file_id=d.file_id WHERE fm.batch=" +
-                token_text + " AND fm.planned=1 AND fm.generation>1");
+                token_text + " AND fm.planned=1");
   }
 
   const auto derive = [&](std::string_view kind, std::string_view rows) {
@@ -1981,7 +2114,7 @@ void publish_applicability(SqliteDb &database, FactBatchWriterResult &result,
                           scoped);
   }
   if (publish_diagnostics) {
-    static_cast<void>(execute(
+    applicability_affected += execute(
         database, result.report,
         "INSERT OR REPLACE INTO fact_applicability(fact_kind,fact_id,file_id,"
         "config_id,generation) SELECT 'diagnostic',d.id,fm.file_id," +
@@ -1989,7 +2122,7 @@ void publish_applicability(SqliteDb &database, FactBatchWriterResult &result,
             ",fm.generation FROM diagnostic d JOIN "
             "temp.cidx_batch_file_map fm ON fm.file_id=d.file_id WHERE "
             "fm.batch=" +
-            token_text + " AND fm.planned=1 AND fm.generation>1"));
+            token_text + " AND fm.planned=1");
   }
   static_cast<void>(execute(
       database, result.report,
@@ -2002,8 +2135,34 @@ void publish_applicability(SqliteDb &database, FactBatchWriterResult &result,
           " AND planned=1) AND EXISTS(SELECT 1 FROM file_config fc WHERE "
           "fc.file_id=fact_applicability.file_id AND fc.config_id=" +
           config_text + ")"));
-  result.report.families[ast::FactFamily::applicability].inserted +=
-      result.report.families[ast::FactFamily::applicability].staged;
+  auto &applicability_rows =
+      result.report.families[ast::FactFamily::applicability];
+  // file_config: the auxiliary rows already counted as staged. Every affected
+  // row is an insert or an ON CONFLICT update; staged rows that collapse onto
+  // the same (file, config, role) affect nothing and are ignored.
+  const std::int64_t file_config_inserted = std::max<std::int64_t>(
+      0, count_rows(file_config_population) - file_config_before);
+  applicability_rows.inserted +=
+      static_cast<std::uint64_t>(file_config_inserted);
+  applicability_rows.updated += static_cast<std::uint64_t>(
+      std::max<std::int64_t>(0, file_config_affected - file_config_inserted));
+  const std::uint64_t file_config_rows = static_cast<std::uint64_t>(
+      std::max<std::int64_t>(0, file_config_affected));
+  applicability_rows.ignored +=
+      applicability_rows.staged > file_config_rows
+          ? applicability_rows.staged - file_config_rows
+          : 0;
+  // fact_applicability: every attempted row is reported as staged, and the
+  // stale-fact DELETE above removes rows from the same owned population, so
+  // add it back before differencing.
+  applicability_rows.staged += static_cast<std::uint64_t>(
+      std::max<std::int64_t>(0, applicability_affected));
+  const std::int64_t inserted = std::max<std::int64_t>(
+      0, count_rows(owned_population) - applicability_before +
+             std::max<std::int64_t>(0, deleted));
+  applicability_rows.inserted += static_cast<std::uint64_t>(inserted);
+  applicability_rows.updated += static_cast<std::uint64_t>(
+      std::max<std::int64_t>(0, applicability_affected - inserted));
   result.report.families[ast::FactFamily::lifecycle_cleanup].deleted +=
       static_cast<std::uint64_t>(std::max<std::int64_t>(0, deleted));
 }
@@ -2059,56 +2218,105 @@ void collect_maps(SqliteDb &database, FactBatchWriterResult &result,
   result.report.statement_executions += 5;
 }
 
-// The persistent ids a batch published for one planned file, in the shape
-// SqliteStorageService::note_transform_changes consumes.
-struct PublishedFileFacts {
-  std::vector<std::int64_t> symbols;
-  std::vector<std::int64_t> edges;
-  std::vector<std::int64_t> definitions;
-};
-
-// Group the ids this publication wrote by owning file. The row shapes mirror
-// the applicability publication above (planned routes only, located symbols
-// only) so the transform change set names exactly the facts the batch made
-// current.
-auto collect_published_facts(SqliteDb &database, FactBatchWriterResult &result,
-                             std::int64_t token)
-    -> std::map<std::int64_t, PublishedFileFacts> {
-  std::map<std::int64_t, PublishedFileFacts> published;
-  const auto gather =
-      [&](std::string_view sql,
-          std::vector<std::int64_t> PublishedFileFacts::*bucket) -> void {
-    auto statement = prepare_statement(database, result.report, sql);
-    statement.bind(1, token);
-    while (statement.step()) {
-      (published[statement.col_int64(0)].*bucket)
-          .push_back(statement.col_int64(1));
-    }
-    note_statement_stats(result.report, statement);
-    ++result.report.statement_executions;
-  };
-  gather("SELECT fm.file_id,sm.symbol_id FROM temp.cidx_batch_symbol b "
-         "JOIN temp.cidx_batch_symbol_map sm ON sm.batch=b.batch "
-         "AND sm.handle=b.handle "
-         "JOIN temp.cidx_batch_file_map fm ON fm.batch=b.batch "
-         "AND fm.handle=b.file_handle AND fm.planned=1 "
-         "WHERE b.batch=? AND b.line>0 ORDER BY fm.file_id,sm.symbol_id",
-         &PublishedFileFacts::symbols);
-  gather("SELECT fm.file_id,rm.relation_id FROM temp.cidx_batch_relation r "
-         "JOIN temp.cidx_batch_relation_map rm ON rm.batch=r.batch "
-         "AND rm.handle=r.handle "
-         "JOIN temp.cidx_batch_file_map fm ON fm.batch=r.batch "
-         "AND fm.handle=r.file_handle AND fm.planned=1 "
-         "WHERE r.batch=? ORDER BY fm.file_id,rm.relation_id",
-         &PublishedFileFacts::edges);
-  gather("SELECT fm.file_id,dm.definition_id FROM temp.cidx_batch_definition d "
-         "JOIN temp.cidx_batch_definition_map dm ON dm.batch=d.batch "
-         "AND dm.handle=d.handle "
-         "JOIN temp.cidx_batch_file_map fm ON fm.batch=d.batch "
-         "AND fm.handle=d.file_handle AND fm.planned=1 "
-         "WHERE d.batch=? ORDER BY fm.file_id,dm.definition_id",
-         &PublishedFileFacts::definitions);
-  return published;
+// Records the transform change set for this publication set-wise, straight
+// from the batch staging tables. The replaced path grouped ids in C++ and
+// called SqliteStorageService::note_transform_changes per file, which issued
+// one INSERT OR REPLACE INTO meta per published id plus a per-edge and
+// per-definition lookup on raw db_.prepare handles: thousands of row-at-a-time
+// statements inside the publication transaction, invisible to this report.
+// These six statements are constant in the number of published facts and run
+// through the counted execute() path, so AC #1700/#1701 stay measurable.
+void record_transform_changes(SqliteDb &database, FactBatchWriterResult &result,
+                              std::int64_t token) {
+  auto baseline = prepare_statement(
+      database, result.report,
+      "SELECT 1 FROM meta WHERE key='transform.generation' LIMIT 1");
+  const bool enabled = baseline.step();
+  if (enabled) {
+    baseline.step_done();
+  }
+  note_statement_stats(result.report, baseline);
+  ++result.report.statement_executions;
+  if (!enabled) {
+    return;
+  }
+  const std::string token_text = std::to_string(token);
+  // Row shapes mirror the applicability publication: planned routes only,
+  // located symbols only, so the change set names exactly the facts this batch
+  // made current.
+  const std::string planned_files =
+      " JOIN temp.cidx_batch_file_map fm ON fm.batch=b.batch "
+      "AND fm.handle=b.file_handle AND fm.planned=1 ";
+  static_cast<void>(execute(
+      database, result.report,
+      "INSERT OR REPLACE INTO meta(key,value) SELECT "
+      "'transform.change.file.'||fm.file_id,'1' FROM temp.cidx_batch_file_map "
+      "fm WHERE fm.batch=" +
+          token_text + " AND fm.planned=1"));
+  static_cast<void>(execute(
+      database, result.report,
+      "INSERT OR REPLACE INTO meta(key,value) SELECT DISTINCT "
+      "'transform.change.symbol.'||sm.symbol_id,'1' FROM "
+      "temp.cidx_batch_symbol "
+      "b JOIN temp.cidx_batch_symbol_map sm ON sm.batch=b.batch "
+      "AND sm.handle=b.handle" +
+          planned_files + "WHERE b.batch=" + token_text + " AND b.line>0"));
+  static_cast<void>(
+      execute(database, result.report,
+              "INSERT OR REPLACE INTO meta(key,value) SELECT DISTINCT "
+              "'transform.change.edge.'||rm.relation_id,'1' FROM "
+              "temp.cidx_batch_relation b JOIN temp.cidx_batch_relation_map rm "
+              "ON rm.batch=b.batch AND rm.handle=b.handle" +
+                  planned_files + "WHERE b.batch=" + token_text));
+  // Both endpoints of every published edge, as the replaced per-edge lookup
+  // did.
+  static_cast<void>(execute(
+      database, result.report,
+      "INSERT OR REPLACE INTO meta(key,value) SELECT DISTINCT "
+      "'transform.change.symbol.'||ends.id,'1' FROM (SELECT e.src_id AS id "
+      "FROM temp.cidx_batch_relation b JOIN temp.cidx_batch_relation_map rm "
+      "ON rm.batch=b.batch AND rm.handle=b.handle" +
+          planned_files +
+          "JOIN edge e ON e.id=rm.relation_id WHERE b.batch=" + token_text +
+          " UNION SELECT e.dst_id FROM temp.cidx_batch_relation b "
+          "JOIN temp.cidx_batch_relation_map rm ON rm.batch=b.batch "
+          "AND rm.handle=b.handle" +
+          planned_files + "JOIN edge e ON e.id=rm.relation_id WHERE b.batch=" +
+          token_text + ") ends WHERE ends.id IS NOT NULL"));
+  static_cast<void>(execute(
+      database, result.report,
+      "INSERT OR REPLACE INTO meta(key,value) SELECT DISTINCT "
+      "'transform.change.definition.'||dm.definition_id,'1' FROM "
+      "temp.cidx_batch_definition b JOIN temp.cidx_batch_definition_map dm "
+      "ON dm.batch=b.batch AND dm.handle=b.handle" +
+          planned_files + "WHERE b.batch=" + token_text));
+  // The defined symbol and every def_edge target, as the replaced
+  // per-definition lookup did.
+  static_cast<void>(execute(
+      database, result.report,
+      "INSERT OR REPLACE INTO meta(key,value) SELECT DISTINCT "
+      "'transform.change.symbol.'||facts.id,'1' FROM (SELECT d.symbol_id AS id "
+      "FROM temp.cidx_batch_definition b JOIN temp.cidx_batch_definition_map "
+      "dm "
+      "ON dm.batch=b.batch AND dm.handle=b.handle" +
+          planned_files +
+          "JOIN definition d ON d.id=dm.definition_id WHERE b.batch=" +
+          token_text +
+          " UNION SELECT de.dst_id FROM temp.cidx_batch_definition b "
+          "JOIN temp.cidx_batch_definition_map dm ON dm.batch=b.batch "
+          "AND dm.handle=b.handle" +
+          planned_files +
+          "JOIN def_edge de ON de.src_def_id=dm.definition_id WHERE b.batch=" +
+          token_text + ") facts WHERE facts.id IS NOT NULL"));
+  static_cast<void>(execute(
+      database, result.report,
+      "INSERT OR REPLACE INTO meta(key,value) VALUES("
+      "'transform.change_generation',CAST(COALESCE((SELECT CAST(value AS "
+      "INTEGER) FROM meta WHERE key='transform.change_generation'),0)+1 AS "
+      "TEXT))"));
+  static_cast<void>(execute(database, result.report,
+                            "INSERT OR REPLACE INTO meta(key,value) VALUES("
+                            "'transform.change_trusted','1')"));
 }
 
 } // namespace
@@ -2154,6 +2362,10 @@ auto FactBatchWriter::apply(const ast::FactBatch &batch,
     -> FactBatchWriterResult {
   FactBatchWriterResult result;
   const std::int64_t token = batch_token(batch, context);
+  std::optional<StatementMeasurementScope> measurement;
+  if (context.measure_statements) {
+    measurement.emplace();
+  }
   auto transaction = storage_.transaction();
   try {
     FactBatchPublicationContext publication = context;
@@ -2242,11 +2454,13 @@ auto FactBatchWriter::apply(const ast::FactBatch &batch,
     load_types(database, result, batch, token);
     load_definitions(database, result, batch, token);
     load_relations(database, result, batch, token);
-    load_auxiliary_rows(database, result, auxiliary_rows(batch), token);
+    load_auxiliary_rows(database, result, auxiliary_rows(storage_, batch),
+                        token);
     inject(context.failure, FactBatchWriterFailurePoint::temporary_load);
 
     inject(context.failure,
            FactBatchWriterFailurePoint::natural_key_resolution);
+    reject_stale_cleanup_intents(batch, context);
     apply_lifecycle_cleanup(database, result, token);
     apply_symbols(database, result, token);
     apply_types(database, result, token);
@@ -2269,11 +2483,7 @@ auto FactBatchWriter::apply(const ast::FactBatch &batch,
     // the same seam by ending in note_transform_changes. This is not gated on
     // a configuration id: applicability publication is, and a
     // configuration-less publication still makes facts current.
-    for (const auto &[file_id, facts] :
-         collect_published_facts(database, result, token)) {
-      storage_.note_transform_changes(file_id, facts.symbols, facts.edges,
-                                      facts.definitions);
-    }
+    record_transform_changes(database, result, token);
     inject(context.failure, FactBatchWriterFailurePoint::publication);
 
     for (const ast::PlannedFileRoute &route : context.route_plan.routes()) {

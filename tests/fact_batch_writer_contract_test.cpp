@@ -202,7 +202,6 @@ TEST_CASE("FactBatchWriter publishes the golden phase contract set-wise") {
   REQUIRE(result.ok());
   CHECK(result.report.commit_attempted);
   CHECK(result.report.statements_reused > 0);
-  CHECK(result.report.statements_eliminated > 0);
   CHECK(result.report.families.at(ast::FactFamily::symbols).staged == 3);
   CHECK(result.symbol_ids.size() == 3);
   CHECK(result.relation_ids.size() == 1);
@@ -449,6 +448,321 @@ TEST_CASE(
         changes.edge_ids.end());
   CHECK(std::ranges::find(changes.definition_ids, added_definition_id) !=
         changes.definition_ids.end());
+}
+
+// PERF-002.6h: every declared failure point must roll the publication back
+// completely, not only the one the e2e sweep happens to reach.
+TEST_CASE("FactBatchWriter rolls back at every declared failure point") {
+  constexpr std::array points{
+      storage::FactBatchWriterFailurePoint::temporary_load,
+      storage::FactBatchWriterFailurePoint::natural_key_resolution,
+      storage::FactBatchWriterFailurePoint::entity_apply,
+      storage::FactBatchWriterFailurePoint::annotation_apply,
+      storage::FactBatchWriterFailurePoint::relation_apply,
+      storage::FactBatchWriterFailurePoint::site_apply,
+      storage::FactBatchWriterFailurePoint::publication,
+      storage::FactBatchWriterFailurePoint::cleanup,
+      storage::FactBatchWriterFailurePoint::before_commit,
+      storage::FactBatchWriterFailurePoint::commit};
+  for (const auto point : points) {
+    CAPTURE(static_cast<int>(point));
+    Fixture fixture;
+    storage::FactBatchWriter writer(fixture.storage);
+    const ast::FactBatch batch = fixture.batch();
+    const auto failed = writer.apply(batch, fixture.context(point));
+    CHECK_FALSE(failed.ok());
+    CHECK_FALSE(failed.report.committed);
+    // No main-table effect survives, and the connection-local staging tables
+    // are left clean for the retry.
+    CHECK(fixture.storage.lookup_symbols_by_usr("usr-main").empty());
+    CHECK(fixture.storage.lookup_symbols_by_usr("usr-header").empty());
+    CHECK(fixture.storage.edge_count() == 0);
+    auto definitions =
+        fixture.storage.raw_db().prepare("SELECT COUNT(*) FROM definition");
+    REQUIRE(definitions.step());
+    CHECK(definitions.col_int64(0) == 0);
+    auto applicability = fixture.storage.raw_db().prepare(
+        "SELECT COUNT(*) FROM fact_applicability");
+    REQUIRE(applicability.step());
+    CHECK(applicability.col_int64(0) == 0);
+
+    // The same writer instance publishes cleanly straight afterwards.
+    const auto retried = writer.apply(batch, fixture.context());
+    INFO(retried.error.value_or(""));
+    REQUIRE(retried.ok());
+    CHECK(fixture.storage.lookup_symbols_by_usr("usr-main").size() == 1);
+    CHECK(fixture.storage.edge_count() == 1);
+  }
+}
+
+// Re-expresses the deleted tests/owned_header_plan_test.cpp "stale plans are
+// rejected before lifecycle mutation" case against FactBatchWriter, which now
+// owns the guard.
+TEST_CASE("FactBatchWriter rejects a stale plan before any mutation") {
+  Fixture fixture;
+  storage::FactBatchWriter writer(fixture.storage);
+  auto stale = fixture.context();
+  stale.expected_generation = "generation-2";
+  const auto rejected = writer.apply(fixture.batch(), stale);
+  CHECK_FALSE(rejected.ok());
+  REQUIRE(rejected.error.has_value());
+  CHECK(rejected.error->find("generation is stale") != std::string::npos);
+  CHECK(fixture.storage.lookup_symbols_by_usr("usr-main").empty());
+  CHECK(fixture.storage.edge_count() == 0);
+  CHECK_FALSE(
+      fixture.storage.get_file("/tmp/cidx-s073-writer/header.hpp").has_value());
+}
+
+// A source that moved out from under the plan must be rejected the same way.
+TEST_CASE("FactBatchWriter rejects a plan whose source is no longer current") {
+  Fixture fixture;
+  storage::FactBatchWriter writer(fixture.storage);
+  auto moved = fixture.context();
+  moved.source_is_current = [](const std::string &,
+                               const ast::PlannedSourceSnapshot &) {
+    return false;
+  };
+  const auto rejected = writer.apply(fixture.batch(), moved);
+  CHECK_FALSE(rejected.ok());
+  CHECK(fixture.storage.lookup_symbols_by_usr("usr-main").empty());
+  CHECK(fixture.storage.edge_count() == 0);
+}
+
+// Re-expresses the coverage the deleted
+// tests/storage_identity_scope_test.cpp "v39 carries translation-unit identity
+// through header sinks" case and the deleted tests/storage_sink_test.cpp
+// duplicate-bucket cases provided, against FactBatchWriter instead of the
+// removed sinks. Both are acceptance evidence: AC #1702 (deterministic natural
+// key resolution across duplicate USRs, local identities, multiple semantic
+// universes and repeated declarations) and AC #1703 (per-file/configuration
+// partitions stay intact through staging, cleanup and applicability).
+struct MultiConfigFixture {
+  MultiConfigFixture() {
+    universe = storage.add_semantic_universe("workspace", "workspace");
+    const std::int64_t component =
+        storage.add_component("writer", "/tmp/cidx-s073-writer", "repo");
+    storage.set_component_semantic_universe(component, universe);
+    a_file = storage.add_file_path("/tmp/cidx-s073-writer/a.cpp");
+    b_file = storage.add_file_path("/tmp/cidx-s073-writer/b.cpp");
+  }
+
+  // One TU, one owned header, under a named normalized configuration.
+  static auto tu_partition(const std::string &tu, const std::string &config)
+      -> ast::FactPartitionKey {
+    ast::FactPartitionKey key = partition(tu, "/tmp/cidx-s073-writer/" + tu);
+    key.configuration.translation_unit = "/tmp/cidx-s073-writer/" + tu;
+    key.configuration.normalized_configuration = config;
+    return key;
+  }
+
+  static auto header_partition(const std::string &tu, const std::string &config)
+      -> ast::FactPartitionKey {
+    ast::FactPartitionKey key =
+        partition("shared.hpp", "/tmp/cidx-s073-writer/shared.hpp");
+    key.configuration.translation_unit = "/tmp/cidx-s073-writer/" + tu;
+    key.configuration.normalized_configuration = config;
+    return key;
+  }
+
+  auto plan_for(const std::string &tu, const std::string &config,
+                std::int64_t tu_file) const -> ast::OwnedHeaderRoutePlan {
+    const auto main = tu_partition(tu, config);
+    const auto header = header_partition(tu, config);
+    return ast::plan_owned_header_routes(
+        "generation-1",
+        {{.role = ast::PlannedFileRole::translation_unit,
+          .translation_unit = main.configuration.translation_unit,
+          .translation_unit_file_id = tu_file,
+          .path = main.file.portable_path(),
+          .existing_file_id = tu_file,
+          .snapshot = {.md5 = tu + "-md5"},
+          .cleanup_symbols = true,
+          .partition = main},
+         {.role = ast::PlannedFileRole::owned_header,
+          .translation_unit = main.configuration.translation_unit,
+          .translation_unit_file_id = tu_file,
+          .path = header.file.portable_path(),
+          .discovery_ordinal = 1,
+          .snapshot = {.md5 = "shared-md5"},
+          .cleanup_symbols = true,
+          .partition = header}});
+  }
+
+  // The header-local symbol both configurations declare, plus (optionally) a
+  // partition of the SAME header under a DIFFERENT configuration that this
+  // publication does not route. That foreign partition must never be
+  // published: it is the C-1490 regression seam.
+  static auto batch_for(const ast::OwnedHeaderRoutePlan &plan,
+                        const std::string &tu,
+                        const std::optional<std::string> &foreign_config)
+      -> ast::FactBatch {
+    ast::FactBatchRecorder recorder("fact-batch-writer-multi-config-test");
+    const auto route = plan.serial_route("/tmp/cidx-s073-writer/" + tu);
+    REQUIRE(route.partitions.size() == 2);
+    const auto &main = route.partitions[route.main_partition];
+    const auto &header = route.partitions[1];
+    recorder.set_partition(main.partition, main.transient_file_handle);
+    recorder.emit(symbol(main.partition, "usr-" + tu, tu));
+    recorder.set_partition(header.partition, header.transient_file_handle);
+    ast::SymbolRecord local =
+        symbol(header.partition, "c:@F@header_local", "header_local");
+    local.linkage = "internal";
+    recorder.emit(local);
+    // A repeated declaration of the same USR in the same partition must
+    // collapse onto the first-seen identity, not mint a second row.
+    recorder.emit(local);
+    if (foreign_config) {
+      const auto foreign = header_partition(tu, *foreign_config);
+      recorder.set_partition(foreign, header.transient_file_handle);
+      ast::SymbolRecord shadow =
+          symbol(foreign, "c:@F@header_local", "header_local");
+      shadow.linkage = "internal";
+      shadow.spelling = "foreign_shadow";
+      recorder.emit(shadow);
+    }
+    return recorder.canonical_batch();
+  }
+
+  static auto context_for(const ast::OwnedHeaderRoutePlan &plan,
+                          const std::string &tu,
+                          const cidx::TranslationUnitConfig &config)
+      -> storage::FactBatchPublicationContext {
+    return {.route_plan = plan,
+            .translation_unit = "/tmp/cidx-s073-writer/" + tu,
+            .expected_generation = "generation-1",
+            .source_is_current =
+                [](const std::string &, const ast::PlannedSourceSnapshot &) {
+                  return true;
+                },
+            .configuration = config};
+  }
+
+  static auto tu_config(const std::string &macro)
+      -> cidx::TranslationUnitConfig {
+    cidx::TranslationUnitConfig config;
+    config.driver = "clang++";
+    config.working_dir = "/workspace";
+    config.language = "c++";
+    config.standard = "c++23";
+    config.arguments = {"-std=c++23", "-D" + macro};
+    config.macro_state = {macro};
+    return config;
+  }
+
+  Storage storage;
+  std::int64_t universe = -1;
+  std::int64_t a_file = -1;
+  std::int64_t b_file = -1;
+};
+
+TEST_CASE("FactBatchWriter keeps header identity separate per configuration") {
+  MultiConfigFixture fixture;
+  storage::FactBatchWriter writer(fixture.storage);
+
+  const auto plan_a = fixture.plan_for("a.cpp", "config-a", fixture.a_file);
+  const auto result_a = writer.apply(
+      MultiConfigFixture::batch_for(plan_a, "a.cpp", std::nullopt),
+      MultiConfigFixture::context_for(
+          plan_a, "a.cpp", MultiConfigFixture::tu_config("CONFIG_A")));
+  INFO(result_a.error.value_or(""));
+  REQUIRE(result_a.ok());
+
+  const auto plan_b = fixture.plan_for("b.cpp", "config-b", fixture.b_file);
+  const auto result_b = writer.apply(
+      MultiConfigFixture::batch_for(plan_b, "b.cpp", std::nullopt),
+      MultiConfigFixture::context_for(
+          plan_b, "b.cpp", MultiConfigFixture::tu_config("CONFIG_B")));
+  INFO(result_b.error.value_or(""));
+  REQUIRE(result_b.ok());
+
+  // Same header-local USR, two translation-unit configurations: two rows with
+  // distinct identity keys, exactly as the deleted v39 sink case asserted.
+  const auto rows = fixture.storage.lookup_symbols_by_usr("c:@F@header_local",
+                                                          fixture.universe);
+  REQUIRE(rows.size() == 2);
+  CHECK(rows[0].identity_key != rows[1].identity_key);
+  CHECK_FALSE(rows[0].identity_key.empty());
+
+  // Each row is applicable only under the configuration that published it.
+  auto scoped = fixture.storage.raw_db().prepare(
+      "SELECT COUNT(DISTINCT fa.config_id) FROM fact_applicability fa "
+      "JOIN symbol s ON s.id=fa.fact_id WHERE fa.fact_kind='symbol' "
+      "AND s.usr='c:@F@header_local'");
+  REQUIRE(scoped.step());
+  CHECK(scoped.col_int64(0) == 2);
+  auto per_config = fixture.storage.raw_db().prepare(
+      "SELECT fa.config_id,COUNT(*) FROM fact_applicability fa "
+      "JOIN symbol s ON s.id=fa.fact_id WHERE fa.fact_kind='symbol' "
+      "AND s.usr='c:@F@header_local' GROUP BY fa.config_id");
+  while (per_config.step()) {
+    CAPTURE(per_config.col_int64(0));
+    CHECK(per_config.col_int64(1) == 1);
+  }
+}
+
+TEST_CASE("FactBatchWriter never publishes an unrouted configuration's "
+          "partition of a planned file") {
+  MultiConfigFixture fixture;
+  storage::FactBatchWriter writer(fixture.storage);
+
+  // The batch carries a partition of shared.hpp under config-b while the
+  // publication routes only config-a. Matching the planned flag on the file
+  // path alone marks the foreign partition planned and upserts+publishes it.
+  const auto plan_a = fixture.plan_for("a.cpp", "config-a", fixture.a_file);
+  const auto result = writer.apply(
+      MultiConfigFixture::batch_for(plan_a, "a.cpp", "config-b"),
+      MultiConfigFixture::context_for(
+          plan_a, "a.cpp", MultiConfigFixture::tu_config("CONFIG_A")));
+  INFO(result.error.value_or(""));
+  REQUIRE(result.ok());
+
+  auto shadow = fixture.storage.raw_db().prepare(
+      "SELECT COUNT(*) FROM symbol WHERE spelling='foreign_shadow'");
+  REQUIRE(shadow.step());
+  CHECK(shadow.col_int64(0) == 0);
+
+  auto published = fixture.storage.raw_db().prepare(
+      "SELECT COUNT(*) FROM fact_applicability fa JOIN symbol s "
+      "ON s.id=fa.fact_id WHERE fa.fact_kind='symbol' AND "
+      "s.usr='c:@F@header_local'");
+  REQUIRE(published.step());
+  CHECK(published.col_int64(0) == 1);
+}
+
+TEST_CASE(
+    "FactBatchWriter suppresses duplicate declarations deterministically") {
+  MultiConfigFixture fixture;
+  storage::FactBatchWriter writer(fixture.storage);
+  const auto plan = fixture.plan_for("a.cpp", "config-a", fixture.a_file);
+  const auto config = MultiConfigFixture::tu_config("CONFIG_A");
+
+  // The batch declares c:@F@header_local twice in the same partition.
+  const auto first =
+      writer.apply(MultiConfigFixture::batch_for(plan, "a.cpp", std::nullopt),
+                   MultiConfigFixture::context_for(plan, "a.cpp", config));
+  INFO(first.error.value_or(""));
+  REQUIRE(first.ok());
+  auto once = fixture.storage.raw_db().prepare(
+      "SELECT COUNT(*) FROM symbol WHERE usr='c:@F@header_local'");
+  REQUIRE(once.step());
+  CHECK(once.col_int64(0) == 1);
+  const auto first_id =
+      fixture.storage
+          .lookup_symbols_by_usr("c:@F@header_local", fixture.universe)
+          .front()
+          .id;
+
+  // Republishing the identical batch must reuse the first-seen persistent id
+  // rather than mint a second row.
+  const auto second =
+      writer.apply(MultiConfigFixture::batch_for(plan, "a.cpp", std::nullopt),
+                   MultiConfigFixture::context_for(plan, "a.cpp", config));
+  INFO(second.error.value_or(""));
+  REQUIRE(second.ok());
+  const auto after = fixture.storage.lookup_symbols_by_usr("c:@F@header_local",
+                                                           fixture.universe);
+  REQUIRE(after.size() == 1);
+  CHECK(after.front().id == first_id);
 }
 
 } // namespace

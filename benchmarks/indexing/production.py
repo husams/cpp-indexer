@@ -140,7 +140,6 @@ REQUIRED_PROFILE_COUNTERS = frozenset(
         "include_path_resolution_queries",
         "fact_batch_writer.statements_prepared",
         "fact_batch_writer.statements_reused",
-        "fact_batch_writer.statements_eliminated",
         "fact_batch_writer.statement_executions",
         "fact_batch_writer.virtual_machine_steps",
         "fact_batch_writer.rows_staged",
@@ -1189,7 +1188,6 @@ def aggregate_trials(trials: list[dict[str, Any]]) -> dict[str, Any]:
 WRITER_COUNTERS = (
     "fact_batch_writer.statements_prepared",
     "fact_batch_writer.statements_reused",
-    "fact_batch_writer.statements_eliminated",
     "fact_batch_writer.statement_executions",
     "fact_batch_writer.virtual_machine_steps",
     "fact_batch_writer.rows_staged",
@@ -1324,9 +1322,24 @@ def compare_commit_trials(
                             "virtual_machine_steps"
                         ]
                         - baseline_sqlite["virtual_machine_steps"],
+                        # AC #1700/#1701: statements eliminated is measured
+                        # against the replaced row-at-a-time baseline build,
+                        # never synthesized inside the writer.
+                        "statements_eliminated": baseline_sqlite["prepare_calls"]
+                        - candidate_sqlite["prepare_calls"],
+                        "virtual_machine_steps_eliminated": baseline_sqlite[
+                            "virtual_machine_steps"
+                        ]
+                        - candidate_sqlite["virtual_machine_steps"],
                     },
                 }
             )
+    eliminated_statements = sum(
+        entry["delta"]["statements_eliminated"] for entry in comparisons
+    )
+    eliminated_steps = sum(
+        entry["delta"]["virtual_machine_steps_eliminated"] for entry in comparisons
+    )
     return {
         "paired_trials": comparisons,
         "semantic_parity": not any(
@@ -1336,11 +1349,39 @@ def compare_commit_trials(
             "translation-unit order" in failure for failure in parity_failures
         ),
         "parity_failures": parity_failures,
-        "durability_profile_changed": False,
+        "statement_elimination": {
+            "statements_eliminated": eliminated_statements,
+            "virtual_machine_steps_eliminated": eliminated_steps,
+            "basis": (
+                "baseline prepare_calls/virtual_machine_steps minus candidate, "
+                "summed over every paired A/B stage in this run."
+            ),
+        },
+        # AC #1704/#1705/#1726: this A/B measures wall time, RSS, statement
+        # counts and VM steps only. It runs no durability, journal/synchronous,
+        # index write-cost, query-plan or latency experiment, so it must not
+        # report a conclusion for those criteria.
+        "durability_profile": {
+            "status": "not-qualified",
+            "reason": (
+                "compare_commit_trials runs both arms on the same SQLite "
+                "runtime profile and performs no durability, journal, "
+                "synchronous-mode or recovery experiment. Durability "
+                "qualification is the sqlite_matrix section's responsibility; "
+                "no durability conclusion is claimed here."
+            ),
+        },
         "secondary_index_decision": {
-            "binary_nocase_pairs": ["symbol.spelling", "symbol.qual_name"],
+            "status": "not-qualified",
+            "reason": (
+                "No index write-cost, EXPLAIN QUERY PLAN or latency "
+                "measurement is performed by this A/B, so redundant "
+                "binary/NOCASE and qualified-name index pairs are neither "
+                "measured nor evaluated for deferral here. AC #1704/#1726 "
+                "require that evidence before any removal or deferral "
+                "decision."
+            ),
             "removed_or_deferred": False,
-            "decision": "retain; no durability or clean-rebuild index change",
         },
     }
 
