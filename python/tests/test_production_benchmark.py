@@ -142,6 +142,39 @@ def test_profile_contract_requires_named_timings_and_counters(
     with pytest.raises(RuntimeError, match="profile is incomplete"):
         benchmark._load_profile(profile_path)
 
+    legacy_timings = {
+        key: 0.0
+        for key in benchmark.REQUIRED_PROFILE_TIMINGS
+        if not key.startswith("fact_batch_writer.")
+    }
+    legacy_counters = {
+        key: 0
+        for key in benchmark.REQUIRED_PROFILE_COUNTERS
+        if not key.startswith("fact_batch_writer.")
+    }
+    profile_path.write_text(
+        json.dumps(
+            {
+                "summary": {
+                    "timings": legacy_timings,
+                    "counters": legacy_counters,
+                },
+                "translation_units": [
+                    {
+key: 0
+                        for key in benchmark.REQUIRED_TRANSLATION_UNIT_FIELDS
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert benchmark._load_profile(
+        profile_path, require_writer_metrics=False
+    )["summary"]
+    with pytest.raises(RuntimeError, match="profile is incomplete"):
+        benchmark._load_profile(profile_path)
+
 
 def test_resolve_stage_retains_transform_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -177,7 +210,9 @@ def test_resolve_stage_retains_transform_profile(
         "_snapshot",
         lambda *_args, **_kwargs: {"page_bytes": 0, "rows": {}},
     )
-    monkeypatch.setattr(benchmark, "_load_profile", lambda _path: profile)
+    monkeypatch.setattr(
+        benchmark, "_load_profile", lambda _path, **_kwargs: profile
+    )
 
     result, _ = benchmark.run_stage(
         tmp_path / "cidx",
@@ -283,3 +318,87 @@ def test_main_requires_noindex_work_root_on_macos(
 
     with pytest.raises(SystemExit, match=r"must end in \.noindex"):
         benchmark.main()
+
+
+def test_commit_ab_reports_writer_deltas_and_parity() -> None:
+    benchmark = load_benchmark()
+
+    def stage(label: str, digest: str, prepared: int, steps: int) -> dict:
+        return {
+            "label": label,
+            "wall_seconds": 1.0,
+            "peak_rss_bytes": 1024,
+            "sqlite": {"snapshot": {"canonical_sha256": digest}},
+            "profile": {
+                "summary": {
+                    "counters": {
+                        "sqlite": {
+                            "prepare_calls": prepared,
+                            "virtual_machine_steps": steps,
+                        },
+                        "fact_batch_writer.statements_prepared": prepared,
+                        "fact_batch_writer.virtual_machine_steps": steps,
+                        "fact_batch_writer.rows_staged": 10,
+                    }
+                },
+                "translation_units": [{"path": "a.cpp"}],
+            },
+        }
+
+    baseline = [{"stages": [stage("cold", "same", 30, 300)]}]
+    candidate = [{"stages": [stage("cold", "same", 10, 100)]}]
+
+    result = benchmark.compare_commit_trials(baseline, candidate)
+
+    assert result["semantic_parity"]
+    assert result["translation_unit_order_parity"]
+    assert result["parity_failures"] == []
+    paired = result["paired_trials"][0]
+    assert paired["delta"]["statements_prepared"] == -20
+    assert paired["delta"]["virtual_machine_steps"] == -200
+    assert paired["candidate"]["statements_prepared_per_staged_fact"] == 1.0
+
+    # Elimination is measured against the baseline arm, never synthesized by
+    # the writer: 30 - 10 prepares and 300 - 100 VM steps.
+    assert paired["delta"]["statements_eliminated"] == 20
+    assert paired["delta"]["virtual_machine_steps_eliminated"] == 200
+    assert result["statement_elimination"]["statements_eliminated"] == 20
+    assert result["statement_elimination"]["virtual_machine_steps_eliminated"] == 200
+    assert result["statement_elimination"]["basis"]
+
+    # This A/B runs both arms on the same SQLite runtime profile and performs
+    # no durability, index write-cost, query-plan or latency experiment, so it
+    # must report those criteria as unqualified rather than assert a conclusion.
+    assert result["durability_profile"]["status"] == "not-qualified"
+    assert result["durability_profile"]["reason"]
+    assert result["secondary_index_decision"]["status"] == "not-qualified"
+    assert result["secondary_index_decision"]["reason"]
+    assert result["secondary_index_decision"]["removed_or_deferred"] is False
+    # The old literal fields must not come back.
+    assert "durability_profile_changed" not in result
+    assert "binary_nocase_pairs" not in result["secondary_index_decision"]
+
+
+def test_commit_ab_normalizes_synthetic_translation_unit_roots() -> None:
+    benchmark = load_benchmark()
+
+    def stage(root: str) -> dict:
+        return {
+            "label": "cold",
+            "wall_seconds": 1.0,
+            "peak_rss_bytes": 1024,
+            "sqlite": {"snapshot": {"canonical_sha256": "same"}},
+            "profile": {
+                "summary": {"counters": {}},
+                "translation_units": [
+                    {"path": f"{root}/corpus/nested/tu_0000.cpp"}
+                ],
+            },
+        }
+
+    result = benchmark.compare_commit_trials(
+        [{"stages": [stage("/tmp/baseline/trial-1")]}],
+        [{"stages": [stage("/tmp/candidate/trial-1")]}],
+    )
+
+    assert result["translation_unit_order_parity"]

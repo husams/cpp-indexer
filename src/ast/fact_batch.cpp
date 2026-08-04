@@ -75,13 +75,60 @@ auto symbol_record_key(const SymbolRecord &record) -> std::string {
          std::to_string(record.end_col) + ':' +
          optional_text(record.decl_line) + ':' +
          optional_text(record.decl_col) + ':' +
+         optional_text(record.decl_path) + ':' +
          bool_text(record.is_definition) + bool_text(record.is_pure) +
          bool_text(record.is_static) + bool_text(record.is_instantiation) +
-         '\x1f' + optional_text(record.linkage) + '\x1f' +
-         optional_text(record.access) + '\x1f' +
-         optional_text(record.parent_usr) + '\x1f' +
+         bool_text(record.is_named_instance) + '\x1f' +
+         optional_text(record.linkage) + '\x1f' + optional_text(record.access) +
+         '\x1f' + optional_text(record.parent_usr) + '\x1f' +
          optional_text(record.const_value) + '\x1f' +
          bool_text(record.resolved);
+}
+
+void merge_mint_enrichment(SymbolRecord &record, const MintRequest &request) {
+  if (!record.qual_name && !request.qual_name.empty()) {
+    record.qual_name = request.qual_name;
+  }
+  if (!record.display_name && !request.display_name.empty()) {
+    record.display_name = request.display_name;
+  }
+  if (!record.type_info && request.type_info) {
+    record.type_info = request.type_info;
+  }
+  if (!record.callable_kind && request.callable_kind) {
+    record.callable_kind = request.callable_kind;
+  }
+  if (!record.template_origin && request.template_origin) {
+    record.template_origin = request.template_origin;
+  }
+  if (!record.template_form && request.template_form) {
+    record.template_form = request.template_form;
+  }
+  if (!record.linkage && request.linkage) {
+    record.linkage = request.linkage;
+  }
+  if (!record.parent_usr && request.parent_usr) {
+    record.parent_usr = request.parent_usr;
+  }
+  if (!record.decl_path && request.decl_path) {
+    record.decl_path = request.decl_path;
+  }
+  record.is_instantiation = record.is_instantiation || request.is_instantiation;
+  record.is_named_instance =
+      record.is_named_instance || request.is_named_instance;
+}
+
+auto mint_identity_source(const MintRequest &request)
+    -> std::optional<std::string> {
+  std::optional<std::string> source = request.identity_source;
+  if ((!source || source->empty()) && request.decl_path &&
+      !request.decl_path->empty()) {
+    source = request.decl_path;
+  }
+  if (source && source->empty()) {
+    source.reset();
+  }
+  return source;
 }
 
 auto declaration_site_key(const DeclarationSiteRecord &record) -> std::string {
@@ -452,6 +499,10 @@ auto FactBatch::producer_version() const -> std::uint32_t {
 auto FactBatch::completeness() const -> FactCompleteness {
   return data_->completeness;
 }
+
+auto FactBatch::is_canonical() const -> bool {
+  return data_->canonical && has_canonical_layout();
+}
 auto FactBatch::has_canonical_layout() const -> bool {
   if (!data_->canonical ||
       !partitions_are_strictly_ordered(data_->partitions)) {
@@ -568,6 +619,11 @@ void FactBatchRecorder::set_completeness(FactCompleteness completeness) {
   completeness_ = completeness;
 }
 
+void FactBatchRecorder::set_persistent_symbol_lookup(
+    PersistentSymbolLookup lookup) {
+  persistent_symbol_lookup_ = std::move(lookup);
+}
+
 void FactBatchRecorder::set_partition(
     FactPartitionKey partition,
     std::optional<std::int64_t> transient_file_handle) {
@@ -660,6 +716,9 @@ void FactBatchRecorder::emit(const SymbolRecord &symbol) {
   const std::size_t position = symbols_.size();
   symbols_.push_back({.partition = partition, .record = symbol});
   symbol_positions_by_id_[id].push_back(position);
+  if (symbol.display_name) {
+    display_names_.insert_or_assign(id, *symbol.display_name);
+  }
 
   const std::string source = symbol.identity_source.value_or(symbol.file);
   symbol_ids_by_source_usr_.try_emplace(
@@ -739,59 +798,158 @@ void FactBatchRecorder::emit(const ApplicabilityOwnershipRecord &record) {
   counters_.note("emit_applicability");
 }
 
+auto FactBatchRecorder::source_independent_symbol_id(std::string_view usr)
+    -> std::optional<std::int64_t> {
+  const auto scoped =
+      symbol_ids_by_scope_usr_.find(scope_lookup_key(current_partition_, usr));
+  if (scoped == symbol_ids_by_scope_usr_.end() || scoped->second.size() != 1) {
+    return std::nullopt;
+  }
+  const std::int64_t candidate = *scoped->second.begin();
+  const auto positions = symbol_positions_by_id_.find(candidate);
+  if (positions == symbol_positions_by_id_.end() || positions->second.empty()) {
+    return std::nullopt;
+  }
+  const auto &linkage = symbols_.at(positions->second.front()).record.linkage;
+  if (linkage && (*linkage == "internal" || *linkage == "no-linkage")) {
+    return std::nullopt;
+  }
+  counters_.records_touched["lookup_symbol_exact"] += 2;
+  return candidate;
+}
+
 auto FactBatchRecorder::lookup_symbol_id(
     const std::string &usr, const std::optional<std::string> &identity_source)
     -> std::optional<std::int64_t> {
-  counters_.note(identity_source ? "lookup_symbol_exact"
-                                 : "lookup_symbol_sourceless");
-  if (identity_source) {
-    const auto found = symbol_ids_by_source_usr_.find(
-        source_lookup_key(current_partition_, *identity_source, usr));
-    if (found == symbol_ids_by_source_usr_.end()) {
+  const std::optional<std::string> source =
+      identity_source && !identity_source->empty() ? identity_source
+                                                   : std::nullopt;
+  counters_.note(source ? "lookup_symbol_exact" : "lookup_symbol_sourceless");
+  const auto local_lookup = [this, &usr,
+                             &source]() -> std::optional<std::int64_t> {
+    if (source) {
+      const auto found = symbol_ids_by_source_usr_.find(
+          source_lookup_key(current_partition_, *source, usr));
+      if (found != symbol_ids_by_source_usr_.end()) {
+        ++counters_.records_touched["lookup_symbol_exact"];
+        return found->second;
+      }
+      // A visitor may name an externally linked declaration through a
+      // different source spelling than the symbol pass used (for example a
+      // template primary reached from an instantiation). Its natural identity
+      // is source-independent, so reuse the sole in-batch candidate. Internal
+      // and no-linkage symbols remain source-scoped and must not fall back.
+      return source_independent_symbol_id(usr);
+    }
+    const auto found = symbol_ids_by_scope_usr_.find(
+        scope_lookup_key(current_partition_, usr));
+    if (found == symbol_ids_by_scope_usr_.end() || found->second.empty()) {
       return std::nullopt;
     }
-    ++counters_.records_touched["lookup_symbol_exact"];
-    return found->second;
+    counters_.records_touched["lookup_symbol_sourceless"] +=
+        std::min<std::size_t>(found->second.size(), 2);
+    if (found->second.size() != 1) {
+      throw std::runtime_error(
+          "ambiguous symbol USR within translation unit: " + usr);
+    }
+    return *found->second.begin();
+  };
+  if (const auto local = local_lookup()) {
+    return local;
   }
-  const auto found =
-      symbol_ids_by_scope_usr_.find(scope_lookup_key(current_partition_, usr));
-  if (found == symbol_ids_by_scope_usr_.end() || found->second.empty()) {
+  if (!persistent_symbol_lookup_) {
     return std::nullopt;
   }
-  counters_.records_touched["lookup_symbol_sourceless"] +=
-      std::min<std::size_t>(found->second.size(), 2);
-  if (found->second.size() != 1) {
-    throw std::runtime_error("ambiguous symbol USR within translation unit: " +
-                             usr);
+  const auto persisted =
+      persistent_symbol_lookup_(usr, source, current_partition_);
+  if (!persisted) {
+    return std::nullopt;
   }
-  return *found->second.begin();
+  emit(*persisted);
+  return local_lookup();
 }
 
-auto FactBatchRecorder::mint_symbol(const MintRequest &request)
+void FactBatchRecorder::add_mint_declaration(
+    const std::vector<std::size_t> &positions, const MintRequest &request) {
+  if (!request.decl_line || positions.empty() ||
+      std::ranges::any_of(positions, [this](std::size_t position) {
+        return symbols_.at(position).record.decl_line.has_value();
+      })) {
+    return;
+  }
+  const std::string declaration_file =
+      request.decl_file_id ? partition_for_file_handle(*request.decl_file_id)
+                                 .file.portable_path()
+                           : std::string{};
+  const auto local = std::ranges::find_if(
+      positions, [this, &declaration_file](std::size_t position) {
+        const SymbolRecord &record = symbols_.at(position).record;
+        return record.line > 0 &&
+               (declaration_file.empty() || record.file == declaration_file);
+      });
+  if (local != positions.end()) {
+    SymbolRecord &record = symbols_.at(*local).record;
+    record.decl_line = request.decl_line;
+    record.decl_col = request.decl_col;
+    if (*local < symbol_order_.size()) {
+      symbol_order_[*local].record_key = symbol_record_key(record);
+    }
+    return;
+  }
+  SymbolRecord declaration = symbols_.at(positions.front()).record;
+  if (!declaration_file.empty()) {
+    declaration.file = declaration_file;
+  }
+  declaration.line = 0;
+  declaration.col = 0;
+  declaration.end_line = 0;
+  declaration.end_col = 0;
+  declaration.decl_line = request.decl_line;
+  declaration.decl_col = request.decl_col;
+  declaration.is_definition = false;
+  declaration.resolved = false;
+  emit(declaration);
+}
+
+void FactBatchRecorder::enrich_minted_symbol(std::int64_t symbol_id,
+                                             const MintRequest &request) {
+  const auto positions = symbol_positions_by_id_.find(symbol_id);
+  if (positions == symbol_positions_by_id_.end()) {
+    return;
+  }
+  for (const std::size_t position : positions->second) {
+    SymbolRecord &record = symbols_.at(position).record;
+    merge_mint_enrichment(record, request);
+    if (position < symbol_order_.size()) {
+      symbol_order_[position].record_key = symbol_record_key(record);
+    }
+  }
+  add_mint_declaration(positions->second, request);
+}
+
+auto FactBatchRecorder::create_minted_symbol(
+    const MintRequest &request, const std::optional<std::string> &source)
     -> std::int64_t {
-  std::optional<std::string> source = request.identity_source;
-  if ((!source || source->empty()) && request.decl_path &&
-      !request.decl_path->empty()) {
-    source = request.decl_path;
-  }
-  if (source && source->empty()) {
-    source.reset();
-  }
-  if (const auto existing = lookup_symbol_id(request.usr, source)) {
-    return *existing;
-  }
   SymbolRecord symbol;
-  symbol.file = source.value_or("");
+  symbol.file = request.decl_file_id
+                    ? partition_for_file_handle(*request.decl_file_id)
+                          .file.portable_path()
+                    : current_partition_.file.portable_path();
   symbol.usr = request.usr;
   symbol.spelling = request.spelling;
-  symbol.kind = -1;
+  symbol.kind = cidx_kind_int_from_name(request.kind_name);
   symbol.qual_name = request.qual_name;
   symbol.display_name = request.display_name;
   symbol.type_info = request.type_info;
   symbol.decl_line = request.decl_line;
   symbol.decl_col = request.decl_col;
+  symbol.decl_path = request.decl_path;
   symbol.is_instantiation = request.is_instantiation;
+  symbol.is_named_instance = request.is_named_instance;
   symbol.linkage = request.linkage;
+  symbol.callable_kind = request.callable_kind;
+  symbol.template_origin = request.template_origin;
+  symbol.template_form = request.template_form;
   symbol.identity_source = source;
   symbol.kind_name = request.kind_name;
   emit(symbol);
@@ -800,6 +958,16 @@ auto FactBatchRecorder::mint_symbol(const MintRequest &request)
     throw std::logic_error("minted symbol is not indexed");
   }
   return *created;
+}
+
+auto FactBatchRecorder::mint_symbol(const MintRequest &request)
+    -> std::int64_t {
+  const std::optional<std::string> source = mint_identity_source(request);
+  if (const auto existing = lookup_symbol_id(request.usr, source)) {
+    enrich_minted_symbol(*existing, request);
+    return *existing;
+  }
+  return create_minted_symbol(request, source);
 }
 
 auto FactBatchRecorder::file_id_for_path(const std::string &path)
@@ -1066,6 +1234,10 @@ void FactBatchRecorder::update_display_name(std::int64_t symbol_id,
   counters_.note("update_display_name", found->second.size());
   for (const std::size_t position : found->second) {
     symbols_[position].record.display_name = display;
+    if (position < symbol_order_.size()) {
+      symbol_order_[position].record_key =
+          symbol_record_key(symbols_[position].record);
+    }
   }
 }
 
@@ -1163,6 +1335,25 @@ auto FactBatchRecorder::build_batch(bool canonical) const -> FactBatch {
   append_symbol_records(*data, memberships, canonical);
   append_type_records(*data, memberships, canonical);
   append_auxiliary_records(*data, memberships, canonical);
+  for (const auto &[partition, _] : memberships) {
+    const bool registered =
+        std::ranges::any_of(data->file_keys, [&partition](const auto &entry) {
+          return entry.second == partition;
+        });
+    if (registered) {
+      continue;
+    }
+    std::int64_t handle = -static_cast<std::int64_t>(
+        stable_fact_hash("file:" + partition.stable_string()) &
+        0x3fff'ffff'ffff'ffffULL);
+    if (handle == 0) {
+      handle = -1;
+    }
+    while (data->file_keys.contains(handle)) {
+      --handle;
+    }
+    data->file_keys.emplace(handle, partition);
+  }
   data->records.symbol_order =
       canonical ? canonical_symbol_order(symbol_order_) : symbol_order_;
   for (auto &[partition, members] : memberships) {

@@ -107,6 +107,14 @@ void emit_owner_promotion(DeclarationIdentityResolver &identity,
   if (owner == nullptr) {
     return;
   }
+  const std::string owner_usr = usr_for_decl(owner);
+  if (!owner_usr.empty()) {
+    if (auto method = mint.build(m)) {
+      method->parent_usr = owner_usr;
+      method->is_instantiation = is_template_instantiation(m);
+      static_cast<void>(identity.mint_symbol(*method));
+    }
+  }
   const auto *ospec =
       llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(owner);
   if (ospec == nullptr) {

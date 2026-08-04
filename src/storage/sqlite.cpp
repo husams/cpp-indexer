@@ -20,6 +20,8 @@ namespace {
 
 } // namespace
 
+std::atomic_int detail::statement_measurement_depth = 0;
+
 auto sqlite_profile_settings(SqliteProfile profile) -> SqliteProfileSettings {
   switch (profile) {
   case SqliteProfile::indexing:
@@ -72,7 +74,7 @@ auto sqlite_profile_name(SqliteProfile profile) -> std::string_view {
 
 // -- SqliteStmt --------------------------------------------------------------
 
-SqliteStmt::SqliteStmt(sqlite3 *db, std::string_view sql) : db_(db) {
+SqliteStmt::SqliteStmt(sqlite3 *db, std::string_view sql) : db_(db), sql_(sql) {
   const bool profiling = profile::active();
   const auto started = profiling ? std::chrono::steady_clock::now()
                                  : std::chrono::steady_clock::time_point{};
@@ -89,9 +91,10 @@ SqliteStmt::SqliteStmt(sqlite3 *db, std::string_view sql) : db_(db) {
   }
 }
 
-SqliteStmt::SqliteStmt(SqliteDb &owner, std::string sql,
-                       sqlite3_stmt *compiled) noexcept
-    : db_(owner.db_), stmt_(compiled), owner_(&owner), sql_(std::move(sql)) {}
+SqliteStmt::SqliteStmt(SqliteDb &owner, std::string sql, sqlite3_stmt *compiled,
+                       bool reused) noexcept
+    : db_(owner.db_), stmt_(compiled), owner_(&owner), sql_(std::move(sql)),
+      reused_compiled_statement_(reused) {}
 
 SqliteStmt::~SqliteStmt() {
   if (owner_ != nullptr && stmt_ != nullptr) {
@@ -103,10 +106,13 @@ SqliteStmt::~SqliteStmt() {
 
 SqliteStmt::SqliteStmt(SqliteStmt &&other) noexcept
     : db_(other.db_), stmt_(other.stmt_), owner_(other.owner_),
-      sql_(std::move(other.sql_)) {
+      sql_(std::move(other.sql_)), stats_(other.stats_),
+      execution_started_(other.execution_started_),
+      reused_compiled_statement_(other.reused_compiled_statement_) {
   other.db_ = nullptr;
   other.stmt_ = nullptr;
   other.owner_ = nullptr;
+  other.execution_started_ = false;
 }
 
 SqliteStmt &SqliteStmt::operator=(SqliteStmt &&other) noexcept {
@@ -120,28 +126,32 @@ SqliteStmt &SqliteStmt::operator=(SqliteStmt &&other) noexcept {
     stmt_ = other.stmt_;
     owner_ = other.owner_;
     sql_ = std::move(other.sql_);
+    stats_ = other.stats_;
+    execution_started_ = other.execution_started_;
+    reused_compiled_statement_ = other.reused_compiled_statement_;
     other.db_ = nullptr;
     other.stmt_ = nullptr;
     other.owner_ = nullptr;
+    other.execution_started_ = false;
   }
   return *this;
 }
 
 void SqliteStmt::bind_null(int idx) {
   if (sqlite3_bind_null(stmt_, idx) != SQLITE_OK) {
-    throw_db_error(db_, "bind_null");
+    throw_db_error(db_, "bind null for \"" + sql_ + "\"");
   }
 }
 
 void SqliteStmt::bind(int idx, int64_t value) {
   if (sqlite3_bind_int64(stmt_, idx, value) != SQLITE_OK) {
-    throw_db_error(db_, "bind int64");
+    throw_db_error(db_, "bind int64 for \"" + sql_ + "\"");
   }
 }
 
 void SqliteStmt::bind(int idx, double value) {
   if (sqlite3_bind_double(stmt_, idx, value) != SQLITE_OK) {
-    throw_db_error(db_, "bind double");
+    throw_db_error(db_, "bind double for \"" + sql_ + "\"");
   }
 }
 
@@ -149,7 +159,7 @@ void SqliteStmt::bind(int idx, std::string_view value) {
   if (sqlite3_bind_text(stmt_, idx, value.data(),
                         static_cast<int>(value.size()),
                         SQLITE_TRANSIENT) != SQLITE_OK) {
-    throw_db_error(db_, "bind text");
+    throw_db_error(db_, "bind text for \"" + sql_ + "\"");
   }
 }
 
@@ -166,20 +176,40 @@ void SqliteStmt::bind(int idx, const SqlValue &value) {
 }
 
 bool SqliteStmt::step() {
+  if (!execution_started_) {
+    execution_started_ = true;
+    ++stats_.executions;
+  }
   const bool profiling = profile::active();
-  const auto started = profiling ? std::chrono::steady_clock::now()
-                                 : std::chrono::steady_clock::time_point{};
+  if (!profiling && !statement_measurement_active()) {
+    // Uninstrumented path: no clock reads, no sqlite3_stmt_status calls.
+    const int rc = sqlite3_step(stmt_);
+    if (rc == SQLITE_ROW) {
+      return true;
+    }
+    if (rc == SQLITE_DONE) {
+      return false;
+    }
+    throw_db_error(db_, "step for \"" + sql_ + "\"");
+  }
+  const auto started = std::chrono::steady_clock::now();
   const int rc = sqlite3_step(stmt_);
+  const double step_seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - started)
+          .count();
+  const auto vm_steps = static_cast<std::uint64_t>(
+      sqlite3_stmt_status(stmt_, SQLITE_STMTSTATUS_VM_STEP, 1));
+  const auto fullscan_steps = static_cast<std::uint64_t>(
+      sqlite3_stmt_status(stmt_, SQLITE_STMTSTATUS_FULLSCAN_STEP, 1));
+  const auto reprepares = static_cast<std::uint64_t>(
+      sqlite3_stmt_status(stmt_, SQLITE_STMTSTATUS_REPREPARE, 1));
+  stats_.virtual_machine_steps += vm_steps;
+  stats_.fullscan_steps += fullscan_steps;
+  stats_.reprepares += reprepares;
+  stats_.step_seconds += step_seconds;
   if (profiling) {
-    profile::note_sqlite_step(std::chrono::duration<double>(
-                                  std::chrono::steady_clock::now() - started)
-                                  .count(),
-                              static_cast<std::uint64_t>(sqlite3_stmt_status(
-                                  stmt_, SQLITE_STMTSTATUS_VM_STEP, 1)),
-                              static_cast<std::uint64_t>(sqlite3_stmt_status(
-                                  stmt_, SQLITE_STMTSTATUS_FULLSCAN_STEP, 1)),
-                              static_cast<std::uint64_t>(sqlite3_stmt_status(
-                                  stmt_, SQLITE_STMTSTATUS_REPREPARE, 1)));
+    profile::note_sqlite_step(step_seconds, vm_steps, fullscan_steps,
+                              reprepares);
   }
   if (rc == SQLITE_ROW) {
     return true;
@@ -187,7 +217,7 @@ bool SqliteStmt::step() {
   if (rc == SQLITE_DONE) {
     return false;
   }
-  throw_db_error(db_, "step");
+  throw_db_error(db_, "step for \"" + sql_ + "\"");
 }
 
 void SqliteStmt::step_done() {
@@ -197,9 +227,15 @@ void SqliteStmt::step_done() {
 
 void SqliteStmt::reset() {
   if (sqlite3_reset(stmt_) != SQLITE_OK) {
-    throw_db_error(db_, "reset");
+    throw_db_error(db_, "reset for \"" + sql_ + "\"");
   }
-  sqlite3_clear_bindings(stmt_);
+  if (sqlite3_clear_bindings(stmt_) != SQLITE_OK) {
+    throw_db_error(db_, "clear bindings for \"" + sql_ + "\"");
+  }
+  if (execution_started_) {
+    ++stats_.reuses;
+  }
+  execution_started_ = false;
 }
 
 bool SqliteStmt::readonly() const { return sqlite3_stmt_readonly(stmt_) != 0; }
@@ -239,12 +275,13 @@ SqliteDb::SqliteDb(const std::string &path, bool read_only,
     throw StorageError("SQLite profile/open-mode mismatch for " + path);
   }
   // Design §4.2: the RETURNING upserts are the only path shipped; refuse to
-  // run against a pre-3.35 runtime with a clear message instead of a SQL
+  // run against a pre-3.37 runtime with a clear message instead of a SQL
   // syntax error later.
-  if (sqlite3_libversion_number() < 3035000) {
-    throw StorageError(std::string("cidx requires SQLite >= 3.35 (RETURNING "
-                                   "support); found ") +
-                       sqlite3_libversion());
+  if (sqlite3_libversion_number() < 3037000) {
+    throw StorageError(
+        std::string("cidx requires SQLite >= 3.37 "
+                    "(RETURNING and sqlite3_changes64 support); found ") +
+        sqlite3_libversion());
   }
   const int flags = read_only ? SQLITE_OPEN_READONLY
                               : SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE;
@@ -347,7 +384,8 @@ SqliteStmt SqliteDb::prepare(std::string_view sql) {
   const auto started = profiling ? std::chrono::steady_clock::now()
                                  : std::chrono::steady_clock::time_point{};
   sqlite3_stmt *stmt = take_cached_statement(sql);
-  if (stmt == nullptr) {
+  const bool reused = stmt != nullptr;
+  if (!reused) {
     const int rc = sqlite3_prepare_v2(
         db_, sql.data(), static_cast<int>(sql.size()), &stmt, nullptr);
     if (rc != SQLITE_OK) {
@@ -360,7 +398,7 @@ SqliteStmt SqliteDb::prepare(std::string_view sql) {
                                      .count(),
                                  sql.size());
   }
-  return {*this, std::string(sql), stmt};
+  return {*this, std::string(sql), stmt, reused};
 }
 
 void SqliteDb::exec(std::string_view sql_script) {
@@ -375,11 +413,7 @@ void SqliteDb::exec(std::string_view sql_script) {
 }
 
 int64_t SqliteDb::changes() const {
-#if SQLITE_VERSION_NUMBER >= 3037000
   return sqlite3_changes64(const_cast<sqlite3 *>(db_));
-#else
-  return static_cast<int64_t>(sqlite3_changes(const_cast<sqlite3 *>(db_)));
-#endif
 }
 
 int SqliteDb::variable_limit() const {

@@ -1387,10 +1387,11 @@ SqliteDb::SqliteDb(int source_fd, bool read_only, SqliteProfile profile)
   if (profile_is_read_only != read_only) {
     throw StorageError("SQLite profile/open-mode mismatch for descriptor");
   }
-  if (sqlite3_libversion_number() < 3035000) {
-    throw StorageError(std::string("cidx requires SQLite >= 3.35 (RETURNING "
-                                   "support); found ") +
-                       sqlite3_libversion());
+  if (sqlite3_libversion_number() < 3037000) {
+    throw StorageError(
+        std::string("cidx requires SQLite >= 3.37 "
+                    "(RETURNING and sqlite3_changes64 support); found ") +
+        sqlite3_libversion());
   }
   struct stat source_stat{};
   if (source_fd < 0 || ::fstat(source_fd, &source_stat) != 0 ||

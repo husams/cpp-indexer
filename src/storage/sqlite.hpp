@@ -12,12 +12,13 @@
 // is handed out, it is removed from the pool while in use, and the pool is
 // finalized before the connection closes.
 //
-// SQLite floor: >= 3.35 (RETURNING). Probed on the gcc-index-test box
-// (192.168.1.115, Ubuntu 24.04: libsqlite3 3.45.1) — design §4.2: the
-// RETURNING path is the ONLY path shipped; the ctor asserts the runtime
-// library version.
+// SQLite floor: >= 3.37 (RETURNING + sqlite3_changes64). Probed on the
+// gcc-index-test box (192.168.1.115, Ubuntu 24.04: libsqlite3 3.45.1) — design
+// §4.2: the RETURNING path is the ONLY path shipped; the ctor asserts the
+// runtime library version.
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -63,6 +64,47 @@ struct SqliteProfileSettings {
 
 class SqliteDb;
 
+struct SqliteStatementStats {
+  std::uint64_t executions = 0;
+  std::uint64_t reuses = 0;
+  std::uint64_t virtual_machine_steps = 0;
+  std::uint64_t fullscan_steps = 0;
+  std::uint64_t reprepares = 0;
+  double step_seconds = 0.0;
+};
+
+// Per-step VM-step / timing sampling costs two steady_clock reads and three
+// sqlite3_stmt_status calls, so it is opt-in: SqliteStmt::step() samples only
+// while an indexing profiling session is active (profile::active()) or while a
+// StatementMeasurementScope is open. Statement execution and reuse counts are
+// plain increments and are always maintained.
+namespace detail {
+extern std::atomic_int statement_measurement_depth;
+} // namespace detail
+
+[[nodiscard]] inline auto statement_measurement_active() noexcept -> bool {
+  return detail::statement_measurement_depth.load(std::memory_order_relaxed) >
+         0;
+}
+
+// RAII: turns per-step sampling on for callers that consume a statement report
+// without running a full profiling session (FactBatchWriter, benchmarks,
+// tests). Nesting is refcounted.
+class StatementMeasurementScope {
+public:
+  StatementMeasurementScope() noexcept {
+    detail::statement_measurement_depth.fetch_add(1, std::memory_order_relaxed);
+  }
+  ~StatementMeasurementScope() {
+    detail::statement_measurement_depth.fetch_sub(1, std::memory_order_relaxed);
+  }
+  StatementMeasurementScope(const StatementMeasurementScope &) = delete;
+  StatementMeasurementScope &
+  operator=(const StatementMeasurementScope &) = delete;
+  StatementMeasurementScope(StatementMeasurementScope &&) = delete;
+  StatementMeasurementScope &operator=(StatementMeasurementScope &&) = delete;
+};
+
 // Owns a sqlite3_stmt*. Movable, non-copyable. Bind indexes are 1-based,
 // column indexes 0-based (SQLite convention).
 //
@@ -73,7 +115,8 @@ class SqliteDb;
 class SqliteStmt {
 public:
   SqliteStmt(sqlite3 *db, std::string_view sql); // throws StorageError
-  SqliteStmt(SqliteDb &owner, std::string sql, sqlite3_stmt *compiled) noexcept;
+  SqliteStmt(SqliteDb &owner, std::string sql, sqlite3_stmt *compiled,
+             bool reused) noexcept;
   ~SqliteStmt();
   SqliteStmt(SqliteStmt &&other) noexcept;
   SqliteStmt &operator=(SqliteStmt &&other) noexcept;
@@ -99,12 +142,21 @@ public:
   [[nodiscard]] int64_t col_int64(int idx) const;
   [[nodiscard]] double col_double(int idx) const;
   [[nodiscard]] std::string col_text(int idx) const; // NULL -> ""
+  [[nodiscard]] auto stats() const -> const SqliteStatementStats & {
+    return stats_;
+  }
+  [[nodiscard]] auto reused_compiled_statement() const -> bool {
+    return reused_compiled_statement_;
+  }
 
 private:
   sqlite3 *db_ = nullptr;
   sqlite3_stmt *stmt_ = nullptr;
   SqliteDb *owner_ = nullptr; // non-null: return to the pool, do not finalize
   std::string sql_;
+  SqliteStatementStats stats_;
+  bool execution_started_ = false;
+  bool reused_compiled_statement_ = false;
 };
 
 // Owns a sqlite3*. Non-copyable, non-movable (Storage holds it by value).

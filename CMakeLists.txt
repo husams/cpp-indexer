@@ -101,7 +101,7 @@ endif()
 
 message(STATUS "cidx: compiler ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}, C++${CMAKE_CXX_STANDARD}")
 
-# S02: storage layer sits on the system SQLite3 (>= 3.35 enforced at runtime).
+# S02: storage layer sits on the system SQLite3 (>= 3.37 enforced at runtime).
 find_package(SQLite3 REQUIRED)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
@@ -162,6 +162,7 @@ add_library(cidx_core STATIC
   src/util/front_end_reuse.cpp
   src/profile/index_profile.cpp
   src/storage/sqlite.cpp
+  src/storage/fact_batch_writer.cpp
   src/storage/sqlite_adapters.cpp
   src/storage/storage.cpp
   src/storage/transforms.cpp
@@ -274,8 +275,8 @@ add_library(cidx_ast OBJECT
   src/ast/kind_map.cpp src/ast/usr.cpp src/ast/location.cpp
   src/ast/names.cpp src/ast/decl_flags.cpp
   src/ast/symbol_extractor.cpp src/ast/symbol_visitor.cpp
-  src/ast/storage_symbol_sink.cpp src/ast/mint_builder.cpp
-  src/ast/template_argument_encoder.cpp src/ast/storage_edge_sink.cpp
+  src/ast/mint_builder.cpp
+  src/ast/template_argument_encoder.cpp
   src/ast/declaration_edge_visitor.cpp src/ast/type_use.cpp
   src/ast/type_graph.cpp
   src/ast/value_provenance.cpp src/ast/instance_minter.cpp
@@ -285,7 +286,6 @@ add_library(cidx_ast OBJECT
   src/ast/receiver_provenance.cpp src/ast/instantiation_edges.cpp
   src/ast/namespace_use_visitor.cpp src/ast/routed_root_events.cpp
   src/ast/fact_identity.cpp src/ast/fact_batch.cpp src/ast/fact_extraction.cpp
-  src/ast/controlled_header_writer.cpp
   src/ast/owned_header_plan.cpp
   src/ast/fact_batch_artifact.cpp
   src/ast/indexing_plan.cpp src/ast/pass_registry.cpp

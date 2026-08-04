@@ -18,7 +18,7 @@
 
 namespace cidx::ast {
 
-inline constexpr std::uint32_t kFactBatchArtifactWireVersion = 1;
+inline constexpr std::uint32_t kFactBatchArtifactWireVersion = 2;
 inline constexpr std::uint32_t kFactBatchPassVersion = 1;
 inline constexpr std::uint32_t kFactBatchExtractorVersion = 1;
 inline constexpr std::uint32_t kFactBatchStorageSchemaVersion = 40;

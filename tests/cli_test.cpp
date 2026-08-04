@@ -2563,6 +2563,14 @@ TEST_SUITE("clang") {
 
     const auto outcome = cidx::ast::run_index_one(db, *file, source, true);
     REQUIRE(!outcome.parse_failed);
+    REQUIRE(outcome.publication.has_value());
+    CHECK(outcome.publication->batch.is_canonical());
+    CHECK(!outcome.publication->route_plan.routes().empty());
+    CHECK(outcome.publication->translation_unit ==
+          outcome.publication->route_plan.routes().front().translation_unit);
+    CHECK(outcome.publication->expected_generation ==
+          outcome.publication->route_plan.generation());
+    CHECK(outcome.publication->configuration_id != -1);
     const std::vector<std::string> expected{
         "symbols.main",       "symbols.headers",      "lifecycle.headers",
         "lifecycle.main",     "declarations.headers", "definitions.headers",
@@ -2878,9 +2886,9 @@ TEST_SUITE("clang") {
     const auto before = snapshot_tu_publication(db, source);
 
     cidx::ast::register_frontend_pass_provider(
-        [&db](cidx::ast::FrontendSession &,
-              cidx::ast::ExtractionPassRegistry &registry,
-              cidx::ast::IndexingPlan &plan) {
+        [](cidx::ast::FrontendSession &session,
+           cidx::ast::ExtractionPassRegistry &registry,
+           cidx::ast::IndexingPlan &plan) {
           auto descriptor = cidx::ast::ExtractionPassDescriptor{
               .id = "synthetic.over-budget",
               .version = 1,
@@ -2897,8 +2905,10 @@ TEST_SUITE("clang") {
                          .declared = true}};
           registry.register_pass(
               std::move(descriptor),
-              [&db](cidx::ast::PassExecutionContext &context) {
-                const auto symbols = db.find_symbols("budget_symbol", {}, 10);
+              [&session](cidx::ast::PassExecutionContext &context) {
+                const auto symbols =
+                    session.declaration_ports->type_arg_candidates(
+                        "budget_symbol", false);
                 if (symbols.empty()) {
                   return;
                 }
@@ -3257,13 +3267,13 @@ TEST_SUITE("clang") {
       prepared.db->stamp_index_identity();
       return prepared;
     };
-    const auto install_presentation_provider = [](Storage &db,
+    const auto install_presentation_provider = [](Storage & /*db*/,
                                                   std::size_t budget,
                                                   bool extra) {
       cidx::ast::register_frontend_pass_provider(
-          [&db, budget, extra](cidx::ast::FrontendSession &session,
-                               cidx::ast::ExtractionPassRegistry &registry,
-                               cidx::ast::IndexingPlan &plan) {
+          [budget, extra](cidx::ast::FrontendSession &session,
+                          cidx::ast::ExtractionPassRegistry &registry,
+                          cidx::ast::IndexingPlan &plan) {
             session.budget_overrides["presentation.persist"] =
                 cidx::ast::PassBudget{.max_emitted_facts = budget,
                                       .declared = true};
@@ -3283,28 +3293,23 @@ TEST_SUITE("clang") {
                            .declared = true}};
             registry.register_pass(
                 std::move(descriptor),
-                [&db, extra](cidx::ast::PassExecutionContext &context) {
-                  const auto symbols =
-                      db.lookup_symbols_by_name("presentation_budget");
-                  const auto extra_symbols =
-                      db.lookup_symbols_by_name("presentation_budget_extra");
-                  if (symbols.empty() || (extra && extra_symbols.empty())) {
-                    return;
-                  }
-                  const auto emit_intent = [&db,
-                                            &context](const Symbol &symbol,
-                                                      std::string_view name) {
-                    db.update_symbol_by_id(
-                        symbol.id,
-                        {{"display_name", std::string(name) + "<old>"}});
+                [extra](cidx::ast::PassExecutionContext &context) {
+                  const auto emit_intent = [&context](std::string_view name) {
+                    const std::int64_t symbol_id =
+                        context.session->declaration_ports->mint_symbol(
+                            cidx::ast::MintRequest{
+                                .usr = "cidx:test:" + std::string(name),
+                                .spelling = std::string(name),
+                                .qual_name = std::string(name),
+                                .display_name = std::string(name) + "<old>",
+                                .kind_name = "function"});
                     context.session->presentation_intents->emit(
-                        cidx::ast::PresentationIntent{.symbol_id = symbol.id,
+                        cidx::ast::PresentationIntent{.symbol_id = symbol_id,
                                                       .display_args = {"int"}});
                   };
-                  emit_intent(symbols.front(), "presentation_budget");
+                  emit_intent("presentation_budget");
                   if (extra) {
-                    emit_intent(extra_symbols.front(),
-                                "presentation_budget_extra");
+                    emit_intent("presentation_budget_extra");
                   }
                 });
             plan.insert_before("presentation.persist",

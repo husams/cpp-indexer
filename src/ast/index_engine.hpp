@@ -12,8 +12,10 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "ast/fact_batch.hpp"
 #include "ast/fact_records.hpp"
 #include "ast/header_stats.hpp" // HeaderStats
+#include "ast/owned_header_plan.hpp"
 #include "ast/pass_registry.hpp"
 #include "storage/records.hpp"
 #include "util/logger.hpp"
@@ -94,6 +96,19 @@ struct IndexSessionMetrics {
   std::size_t source_invalidations = 0;
 };
 
+// Application-neutral handoff from successful extraction to any publication
+// transport (the live writer today, TU-cache serialization/replay later).
+// This value contains no storage writer result/report types; consumers publish
+// it only through FactBatchWriter after rebuilding the source validator.
+struct ExtractedFactPublication {
+  FactBatch batch;
+  OwnedHeaderRoutePlan route_plan;
+  std::string translation_unit;
+  std::string expected_generation;
+  std::int64_t configuration_id = -1;
+  cidx::TranslationUnitConfig configuration;
+};
+
 struct IndexOneOutcome {
   int stored = 0;            // main-file symbols stored (index_symbols)
   cidx::HeaderStats headers; // header two-pass counters
@@ -108,6 +123,7 @@ struct IndexOneOutcome {
   std::size_t registered_whole_tu_traversal_budget = 0;
   std::size_t observed_whole_tu_traversals = 0;
   std::vector<EvidenceRecord> evidence;
+  std::optional<ExtractedFactPublication> publication;
   IndexSessionMetrics session_metrics;
 };
 

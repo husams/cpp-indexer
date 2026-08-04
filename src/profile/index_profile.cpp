@@ -339,7 +339,8 @@ void write_profile(Session::Impl &impl) {
   for (const auto &[name, value] : impl.counters) {
     if (name.starts_with("index_session.") ||
         name.starts_with("front_end_reuse.") ||
-        name.starts_with("transform.")) {
+        name.starts_with("transform.") ||
+        name.starts_with("fact_batch_writer.")) {
       output << "      " << json_string(name) << ": " << value << ",\n";
     }
   }

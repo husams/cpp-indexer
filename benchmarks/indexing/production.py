@@ -111,6 +111,9 @@ REQUIRED_PROFILE_TIMINGS = frozenset(
         "identity_reconciliation",
         "sqlite_prepare",
         "sqlite_vdbe",
+        "fact_batch_writer.prepare",
+        "fact_batch_writer.virtual_machine",
+        "fact_batch_writer.commit",
     }
 )
 REQUIRED_PROFILE_COUNTERS = frozenset(
@@ -135,6 +138,15 @@ REQUIRED_PROFILE_COUNTERS = frozenset(
         "reconciliation_calls",
         "reconciliation_rows_changed",
         "include_path_resolution_queries",
+        "fact_batch_writer.statements_prepared",
+        "fact_batch_writer.statements_reused",
+        "fact_batch_writer.statement_executions",
+        "fact_batch_writer.virtual_machine_steps",
+        "fact_batch_writer.rows_staged",
+        "fact_batch_writer.rows_inserted",
+        "fact_batch_writer.rows_updated",
+        "fact_batch_writer.rows_ignored",
+        "fact_batch_writer.rows_deleted",
     }
 )
 REQUIRED_TRANSLATION_UNIT_FIELDS = frozenset(
@@ -504,7 +516,9 @@ def _profile_path(case_root: Path, label: str) -> Path:
     return case_root / f"{label}.profile.json"
 
 
-def _load_profile(path: Path) -> dict[str, Any]:
+def _load_profile(
+    path: Path, *, require_writer_metrics: bool = True
+) -> dict[str, Any]:
     if not path.exists():
         raise RuntimeError(f"profiling output was not created: {path}")
     profile = json.loads(path.read_text(encoding="utf-8"))
@@ -515,12 +529,24 @@ def _load_profile(path: Path) -> dict[str, Any]:
     counters = summary.get("counters", {})
     missing_timings = sorted(REQUIRED_PROFILE_TIMINGS.difference(timings))
     missing_counters = sorted(REQUIRED_PROFILE_COUNTERS.difference(counters))
+    translation_units = profile.get("translation_units", [])
+    if not require_writer_metrics or not translation_units:
+        missing_timings = [
+            name
+            for name in missing_timings
+            if not name.startswith("fact_batch_writer.")
+        ]
+        missing_counters = [
+            name
+            for name in missing_counters
+            if not name.startswith("fact_batch_writer.")
+        ]
     if missing_timings or missing_counters:
         raise RuntimeError(
             f"profile is incomplete: timings={missing_timings}, "
             f"counters={missing_counters}"
         )
-    for index, translation_unit in enumerate(profile.get("translation_units", [])):
+    for index, translation_unit in enumerate(translation_units):
         missing = sorted(REQUIRED_TRANSLATION_UNIT_FIELDS.difference(translation_unit))
         if missing:
             raise RuntimeError(
@@ -552,6 +578,7 @@ def run_stage(
     profile: bool,
     sqlite_experiment: dict[str, Any] | None = None,
     require_coverage: bool = True,
+    require_writer_metrics: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     environment = dict(os.environ)
     environment["INDEXER_CACHE"] = str(cache)
@@ -569,7 +596,12 @@ def run_stage(
     database = cache / "index.db"
     current = _snapshot(database, corpus_root, require_coverage)
     stage_profile = (
-        _load_profile(profile_path)
+        _load_profile(
+            profile_path,
+            require_writer_metrics=(
+                require_writer_metrics and args[0] == "index"
+            ),
+        )
         if profile and args[0] in {"index", "resolve"}
         else None
     )
@@ -640,6 +672,7 @@ def run_synthetic_case(
     *,
     profile: bool = True,
     sqlite_experiment: dict[str, Any] | None = None,
+    require_writer_metrics: bool = True,
 ) -> dict[str, Any]:
     corpus = generate_corpus(
         case_root / "corpus", count, shape, many_header_target, order
@@ -668,6 +701,7 @@ def run_synthetic_case(
             previous=previous,
             profile=profile,
             sqlite_experiment=sqlite_experiment,
+            require_writer_metrics=require_writer_metrics,
         )
         stages.append(measured)
 
@@ -682,6 +716,7 @@ def run_synthetic_case(
         previous=previous,
         profile=profile,
         sqlite_experiment=sqlite_experiment,
+        require_writer_metrics=require_writer_metrics,
     )
     stages.append(measured)
 
@@ -698,6 +733,7 @@ def run_synthetic_case(
             previous=previous,
             profile=profile,
             sqlite_experiment=sqlite_experiment,
+            require_writer_metrics=require_writer_metrics,
         )
         stages.append(measured)
 
@@ -712,6 +748,7 @@ def run_synthetic_case(
         previous=previous,
         profile=profile,
         sqlite_experiment=sqlite_experiment,
+        require_writer_metrics=require_writer_metrics,
     )
     stages.append(measured)
 
@@ -730,6 +767,7 @@ def run_synthetic_case(
         previous=previous,
         profile=profile,
         sqlite_experiment=sqlite_experiment,
+        require_writer_metrics=require_writer_metrics,
     )
     stages.append(measured)
 
@@ -750,6 +788,7 @@ def run_synthetic_case(
         previous=previous,
         profile=profile,
         sqlite_experiment=sqlite_experiment,
+        require_writer_metrics=require_writer_metrics,
     )
     stages.append(measured)
     mutate_header(generated, 2)
@@ -763,6 +802,7 @@ def run_synthetic_case(
         previous=previous,
         profile=profile,
         sqlite_experiment=sqlite_experiment,
+        require_writer_metrics=require_writer_metrics,
     )
     stages.append(measured)
 
@@ -786,6 +826,8 @@ def run_self_index_case(
     checkout: Path,
     compile_database: Path,
     case_root: Path,
+    *,
+    require_writer_metrics: bool = True,
 ) -> dict[str, Any]:
     cache = case_root / "cache"
     cache.mkdir()
@@ -821,6 +863,7 @@ def run_self_index_case(
             previous=previous,
             profile=profile,
             require_coverage=coverage,
+            require_writer_metrics=require_writer_metrics,
         )
         stages.append(measured)
     return {
@@ -1139,6 +1182,207 @@ def aggregate_trials(trials: list[dict[str, Any]]) -> dict[str, Any]:
         "trial_count": len(trials),
         "stages": stages,
         "parity_failures": parity_failures,
+    }
+
+
+WRITER_COUNTERS = (
+    "fact_batch_writer.statements_prepared",
+    "fact_batch_writer.statements_reused",
+    "fact_batch_writer.statement_executions",
+    "fact_batch_writer.virtual_machine_steps",
+    "fact_batch_writer.rows_staged",
+    "fact_batch_writer.rows_inserted",
+    "fact_batch_writer.rows_updated",
+    "fact_batch_writer.rows_ignored",
+    "fact_batch_writer.rows_deleted",
+)
+
+SQLITE_COUNTERS = ("prepare_calls", "virtual_machine_steps")
+
+
+def _writer_counters(stage: Mapping[str, Any]) -> dict[str, float]:
+    profile = stage.get("profile")
+    if not isinstance(profile, Mapping):
+        return {name: 0.0 for name in WRITER_COUNTERS}
+    summary = profile.get("summary")
+    counters = summary.get("counters", {}) if isinstance(summary, Mapping) else {}
+    return {
+        name: float(counters.get(name, 0.0))
+        if isinstance(counters, Mapping)
+        else 0.0
+        for name in WRITER_COUNTERS
+    }
+
+
+def _sqlite_counters(stage: Mapping[str, Any]) -> dict[str, float]:
+    profile = stage.get("profile")
+    if not isinstance(profile, Mapping):
+        return {name: 0.0 for name in SQLITE_COUNTERS}
+    summary = profile.get("summary")
+    counters = summary.get("counters", {}) if isinstance(summary, Mapping) else {}
+    sqlite = counters.get("sqlite", {}) if isinstance(counters, Mapping) else {}
+    return {
+        name: float(sqlite.get(name, 0.0)) if isinstance(sqlite, Mapping) else 0.0
+        for name in SQLITE_COUNTERS
+    }
+
+
+def _translation_unit_order(stage: Mapping[str, Any]) -> list[str]:
+    profile = stage.get("profile")
+    if not isinstance(profile, Mapping):
+        return []
+    units = profile.get("translation_units")
+    if not isinstance(units, list):
+        return []
+    order = []
+    for unit in units:
+        if not isinstance(unit, Mapping):
+            continue
+        path = Path(str(unit.get("path", unit.get("source", unit.get("file", "")))))
+        parts = path.parts
+        order.append(
+            Path(*parts[parts.index("corpus") + 1 :]).as_posix()
+            if "corpus" in parts
+            else path.as_posix()
+        )
+    return order
+
+
+def compare_commit_trials(
+    baseline_trials: list[dict[str, Any]], candidate_trials: list[dict[str, Any]]
+) -> dict[str, Any]:
+    if len(baseline_trials) != len(candidate_trials):
+        raise ValueError("baseline and candidate trial counts differ")
+    comparisons: list[dict[str, Any]] = []
+    parity_failures: list[str] = []
+    for trial, (baseline, candidate) in enumerate(
+        zip(baseline_trials, candidate_trials, strict=True), start=1
+    ):
+        baseline_labels = [stage["label"] for stage in baseline["stages"]]
+        candidate_labels = [stage["label"] for stage in candidate["stages"]]
+        if baseline_labels != candidate_labels:
+            parity_failures.append(f"trial {trial}: stage order differs")
+            continue
+        for label in baseline_labels:
+            baseline_stage = _stage(baseline, label)
+            candidate_stage = _stage(candidate, label)
+            baseline_digest = baseline_stage["sqlite"]["snapshot"]["canonical_sha256"]
+            candidate_digest = candidate_stage["sqlite"]["snapshot"]["canonical_sha256"]
+            semantic_match = baseline_digest == candidate_digest
+            baseline_order = _translation_unit_order(baseline_stage)
+            candidate_order = _translation_unit_order(candidate_stage)
+            order_match = not baseline_order or baseline_order == candidate_order
+            if not semantic_match:
+                parity_failures.append(
+                    f"trial {trial} {label}: canonical semantic digest differs"
+                )
+            if not order_match:
+                parity_failures.append(
+                    f"trial {trial} {label}: translation-unit order differs"
+                )
+            baseline_counters = _writer_counters(baseline_stage)
+            candidate_counters = _writer_counters(candidate_stage)
+            baseline_sqlite = _sqlite_counters(baseline_stage)
+            candidate_sqlite = _sqlite_counters(candidate_stage)
+            staged = candidate_counters["fact_batch_writer.rows_staged"]
+            comparisons.append(
+                {
+                    "trial": trial,
+                    "stage": label,
+                    "semantic_parity": semantic_match,
+                    "translation_unit_order_parity": order_match,
+                    "baseline": {
+                        "wall_seconds": baseline_stage["wall_seconds"],
+                        "peak_rss_bytes": baseline_stage["peak_rss_bytes"],
+                        "writer_counters": baseline_counters,
+                        "sqlite_counters": baseline_sqlite,
+                    },
+                    "candidate": {
+                        "wall_seconds": candidate_stage["wall_seconds"],
+                        "peak_rss_bytes": candidate_stage["peak_rss_bytes"],
+                        "writer_counters": candidate_counters,
+                        "sqlite_counters": candidate_sqlite,
+                        "statements_prepared_per_staged_fact": (
+                            candidate_counters[
+                                "fact_batch_writer.statements_prepared"
+                            ]
+                            / staged
+                            if staged
+                            else 0.0
+                        ),
+                    },
+                    "delta": {
+                        "wall_seconds": candidate_stage["wall_seconds"]
+                        - baseline_stage["wall_seconds"],
+                        "peak_rss_bytes": candidate_stage["peak_rss_bytes"]
+                        - baseline_stage["peak_rss_bytes"],
+                        "statements_prepared": candidate_sqlite["prepare_calls"]
+                        - baseline_sqlite["prepare_calls"],
+                        "virtual_machine_steps": candidate_sqlite[
+                            "virtual_machine_steps"
+                        ]
+                        - baseline_sqlite["virtual_machine_steps"],
+                        # AC #1700/#1701: statements eliminated is measured
+                        # against the replaced row-at-a-time baseline build,
+                        # never synthesized inside the writer.
+                        "statements_eliminated": baseline_sqlite["prepare_calls"]
+                        - candidate_sqlite["prepare_calls"],
+                        "virtual_machine_steps_eliminated": baseline_sqlite[
+                            "virtual_machine_steps"
+                        ]
+                        - candidate_sqlite["virtual_machine_steps"],
+                    },
+                }
+            )
+    eliminated_statements = sum(
+        entry["delta"]["statements_eliminated"] for entry in comparisons
+    )
+    eliminated_steps = sum(
+        entry["delta"]["virtual_machine_steps_eliminated"] for entry in comparisons
+    )
+    return {
+        "paired_trials": comparisons,
+        "semantic_parity": not any(
+            "semantic digest" in failure for failure in parity_failures
+        ),
+        "translation_unit_order_parity": not any(
+            "translation-unit order" in failure for failure in parity_failures
+        ),
+        "parity_failures": parity_failures,
+        "statement_elimination": {
+            "statements_eliminated": eliminated_statements,
+            "virtual_machine_steps_eliminated": eliminated_steps,
+            "basis": (
+                "baseline prepare_calls/virtual_machine_steps minus candidate, "
+                "summed over every paired A/B stage in this run."
+            ),
+        },
+        # AC #1704/#1705/#1726: this A/B measures wall time, RSS, statement
+        # counts and VM steps only. It runs no durability, journal/synchronous,
+        # index write-cost, query-plan or latency experiment, so it must not
+        # report a conclusion for those criteria.
+        "durability_profile": {
+            "status": "not-qualified",
+            "reason": (
+                "compare_commit_trials runs both arms on the same SQLite "
+                "runtime profile and performs no durability, journal, "
+                "synchronous-mode or recovery experiment. Durability "
+                "qualification is the sqlite_matrix section's responsibility; "
+                "no durability conclusion is claimed here."
+            ),
+        },
+        "secondary_index_decision": {
+            "status": "not-qualified",
+            "reason": (
+                "No index write-cost, EXPLAIN QUERY PLAN or latency "
+                "measurement is performed by this A/B, so redundant "
+                "binary/NOCASE and qualified-name index pairs are neither "
+                "measured nor evaluated for deferral here. AC #1704/#1726 "
+                "require that evidence before any removal or deferral "
+                "decision."
+            ),
+            "removed_or_deferred": False,
+        },
     }
 
 
@@ -1877,6 +2121,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cidx", type=Path, required=True)
     parser.add_argument(
+        "--baseline-cidx",
+        type=Path,
+        help=(
+            "pre-writer executable for paired commit A/B qualification; "
+            "separate from --uninstrumented-cidx"
+        ),
+    )
+    parser.add_argument(
         "--uninstrumented-cidx",
         type=Path,
         help=(
@@ -1916,6 +2168,9 @@ def main() -> int:
 
     checkout = args.checkout.resolve()
     executable = args.cidx.resolve()
+    baseline_executable = (
+        args.baseline_cidx.resolve() if args.baseline_cidx is not None else None
+    )
     uninstrumented = (
         args.uninstrumented_cidx.resolve()
         if args.uninstrumented_cidx is not None
@@ -1942,6 +2197,8 @@ def main() -> int:
         raise SystemExit(f"cidx executable not found: {executable}")
     if uninstrumented is not None and not uninstrumented.is_file():
         raise SystemExit(f"uninstrumented cidx executable not found: {uninstrumented}")
+    if baseline_executable is not None and not baseline_executable.is_file():
+        raise SystemExit(f"baseline cidx executable not found: {baseline_executable}")
     if not args.skip_self_index and not self_compile_db.is_file():
         raise SystemExit(f"self compile database not found: {self_compile_db}")
 
@@ -1972,8 +2229,29 @@ def main() -> int:
         "attribution_experiments": ATTRIBUTION_EXPERIMENTS,
         "individual_trials": {},
         "aggregates": {},
-        "sqlite_matrix": {},
-        "disabled_profiling_overhead": None,
+        "sqlite_matrix": (
+            {
+                "status": "skipped",
+                "reason": (
+                    "--skip-sqlite-matrix was selected; no SQLite runtime "
+                    "configuration experiment is claimed by this run."
+                ),
+            }
+            if args.skip_sqlite_matrix
+            else {}
+        ),
+        "disabled_profiling_overhead": (
+            None
+            if uninstrumented is not None
+            else {
+                "status": "skipped",
+                "reason": (
+                    "No otherwise-equivalent uninstrumented executable was "
+                    "provided; disabled-overhead qualification is not claimed."
+                ),
+            }
+        ),
+        "commit_ab": {"cases": {}, "parity_failures": []},
         "parity_failures": [],
         "front_end_reuse": qualification_contract(
             trials=args.trials, disabled=args.no_front_end_reuse
@@ -1985,8 +2263,14 @@ def main() -> int:
             "sha256": _sha256(uninstrumented),
             "version": _command_text([str(uninstrumented), "--version"]),
         }
+    if baseline_executable is not None:
+        report["identity"]["baseline_executable"] = {
+            "path": str(baseline_executable),
+            "sha256": _sha256(baseline_executable),
+            "version": _command_text([str(baseline_executable), "--version"]),
+        }
 
-    case_specs = [
+    case_specs = list(dict.fromkeys([
         ("baseline", args.representative_files, "forward"),
         ("baseline", args.scale_files, "forward"),
         ("baseline", args.representative_files, "reverse"),
@@ -1994,7 +2278,7 @@ def main() -> int:
         ("header-heavy", args.representative_files, "forward"),
         ("many-headers", args.representative_files, "forward"),
         ("fan-in", args.representative_files, "forward"),
-    ]
+    ]))
     for shape, files, order in case_specs:
         case_key = f"{shape}:{files}:{order}"
         trials = []
@@ -2016,6 +2300,38 @@ def main() -> int:
         report["parity_failures"].extend(
             f"{case_key}: {failure}" for failure in aggregate["parity_failures"]
         )
+        if baseline_executable is not None:
+            baseline_trials = []
+            for trial in range(1, args.trials + 1):
+                baseline_root = (
+                    args.work_root
+                    / "commit-ab"
+                    / case_key
+                    / f"trial-{trial}"
+                    / "baseline"
+                )
+                baseline_root.mkdir(parents=True)
+                baseline_trials.append(
+                    run_synthetic_case(
+                        baseline_executable,
+                        files,
+                        shape,
+                        args.many_header_target,
+                        order,
+                        baseline_root,
+                        require_writer_metrics=False,
+                    )
+                )
+            comparison = compare_commit_trials(baseline_trials, trials)
+            report["commit_ab"]["cases"][case_key] = {
+                "baseline": aggregate_trials(baseline_trials),
+                "candidate": aggregate,
+                "comparison": comparison,
+            }
+            report["commit_ab"]["parity_failures"].extend(
+                f"{case_key}: {failure}"
+                for failure in comparison["parity_failures"]
+            )
 
     if not args.skip_self_index:
         self_trials = []
@@ -2032,6 +2348,36 @@ def main() -> int:
         report["parity_failures"].extend(
             f"self-index: {failure}" for failure in aggregate["parity_failures"]
         )
+        if baseline_executable is not None:
+            baseline_self_trials = []
+            for trial in range(1, args.trials + 1):
+                baseline_root = (
+                    args.work_root
+                    / "commit-ab"
+                    / "self-index"
+                    / f"trial-{trial}"
+                    / "baseline"
+                )
+                baseline_root.mkdir(parents=True)
+                baseline_self_trials.append(
+                    run_self_index_case(
+                        baseline_executable,
+                        checkout,
+                        self_compile_db,
+                        baseline_root,
+                        require_writer_metrics=False,
+                    )
+                )
+            comparison = compare_commit_trials(baseline_self_trials, self_trials)
+            report["commit_ab"]["cases"]["self-index"] = {
+                "baseline": aggregate_trials(baseline_self_trials),
+                "candidate": aggregate,
+                "comparison": comparison,
+            }
+            report["commit_ab"]["parity_failures"].extend(
+                f"self-index: {failure}"
+                for failure in comparison["parity_failures"]
+            )
 
     if not args.skip_sqlite_matrix:
         for name, configuration in SQLITE_EXPERIMENTS.items():
@@ -2087,6 +2433,7 @@ def main() -> int:
         )
         report["disabled_profiling_overhead"] = comparison
         report["parity_failures"].extend(comparison["parity_failures"])
+    report["parity_failures"].extend(report["commit_ab"]["parity_failures"])
 
     report["attribution_results"] = attribution_summary(
         report["aggregates"], args.representative_files, args.scale_files

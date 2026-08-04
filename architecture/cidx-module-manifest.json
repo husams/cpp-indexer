@@ -491,23 +491,13 @@
       "removalIssue": "HSE-63"
     },
     {
-      "source": "src/ast/storage_edge_sink.cpp",
-      "fromModule": "extraction.ast",
-      "toModule": "persistence.sqlite",
-      "boundary": "extraction -> persistence",
+      "source": "src/storage/fact_batch_writer.hpp",
+      "fromModule": "persistence.sqlite",
+      "toModule": "extraction.ast",
+      "boundary": "persistence -> immutable extraction artifact",
       "owner": "Platform M1 storage maintainers",
-      "rationale": "This adapter is the legacy bridge from typed edge records to the monolithic Storage facade.",
-      "expiresOn": "2026-12-31",
-      "removalIssue": "HSE-62"
-    },
-    {
-      "source": "src/ast/storage_symbol_sink.cpp",
-      "fromModule": "extraction.ast",
-      "toModule": "persistence.sqlite",
-      "boundary": "extraction -> persistence",
-      "owner": "Platform M1 storage maintainers",
-      "rationale": "This adapter is the legacy bridge from typed symbol records to the monolithic Storage facade.",
-      "expiresOn": "2026-12-31",
+      "rationale": "The controlled SQLite publication adapter consumes the immutable FactBatch and owned-file publication plan produced by extraction.",
+      "expiresOn": "2027-08-03",
       "removalIssue": "HSE-62"
     },
     {

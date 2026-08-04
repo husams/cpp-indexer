@@ -11,9 +11,6 @@
 #include <unistd.h>
 #include <vector>
 
-#include "ast/storage_edge_sink.hpp"
-#include "ast/storage_symbol_sink.hpp"
-#include "storage/ports.hpp"
 #include "storage/sqlite.hpp"
 #include "storage/storage.hpp"
 #include "util/errors.hpp"
@@ -329,20 +326,12 @@ TEST_CASE("v39 isolates unrelated universes and merges declared sharing") {
     CHECK(banking_symbol->identity_key != composed_symbol->identity_key);
   }
 
-  cidx::storage::AstStoragePorts ports{db.workspace_catalog_read(),
-                                       db.source_read(),
-                                       db.source_write(),
-                                       db.symbol_read(),
-                                       db.symbol_write(),
-                                       db.type_write(),
-                                       db.fact_write(),
-                                       db.definition_write(),
-                                       db.unit_of_work()};
-  cidx::ast::StorageEdgeSink sink(ports);
-  sink.set_current_file_id(banking_file);
-  check_condition(sink.lookup_symbol_id("c:@N@collision") == banking_id);
-  sink.set_current_file_id(composed_file);
-  check_condition(sink.lookup_symbol_id("c:@N@collision") == composed_id);
+  const auto banking_lookup = db.lookup_symbol("c:@N@collision", banking);
+  const auto composed_lookup = db.lookup_symbol("c:@N@collision", composed);
+  REQUIRE(banking_lookup.has_value());
+  REQUIRE(composed_lookup.has_value());
+  check_condition(banking_lookup->id == banking_id);
+  check_condition(composed_lookup->id == composed_id);
 
   const auto preserved = db.add_repository("composed", "repo", std::nullopt);
   check_condition(preserved == composed_repo);
@@ -391,112 +380,6 @@ TEST_CASE("source identity cache follows component repository ownership") {
   db.set_component_repository(component, std::nullopt);
   const auto detached = db.portable_source_identity_for_path(source_path);
   CHECK(detached == ungrouped);
-}
-
-TEST_CASE("v39 carries translation-unit identity through header sinks") {
-  cidx::Storage db(":memory:");
-  const auto universe = db.add_semantic_universe("program:banking");
-  const auto repo =
-      db.add_repository("banking", "repo", std::nullopt, universe);
-  const auto component = db.add_component("banking", "/tmp/cidx-banking");
-  db.set_component_repository(component, repo);
-  const auto dir = db.add_directory(component, "");
-  const auto header = db.add_file(dir, "shared.hpp");
-  const auto tu_a =
-      db.add_file(dir, "a.cpp", std::nullopt, std::nullopt,
-                  std::vector<std::string>{"-DCONFIG_A"}, "clang++");
-  const auto tu_b =
-      db.add_file(dir, "b.cpp", std::nullopt, std::nullopt,
-                  std::vector<std::string>{"-DCONFIG_B"}, "clang++");
-  const auto header_path = db.file_abs_path(header);
-  REQUIRE(header_path.has_value());
-  cidx::TranslationUnitConfig config_a;
-  config_a.driver = "clang++";
-  config_a.working_dir = "/workspace";
-  config_a.language = "c++";
-  config_a.standard = "c++23";
-  config_a.target = "x86_64-linux-gnu";
-  config_a.sysroot = "/sdk/x86";
-  config_a.resource_dir = "/clang/resource";
-  config_a.include_paths = {"/workspace/include"};
-  config_a.macro_state = {"CONFIG_A"};
-  config_a.relevant_environment = {"SDKROOT=/sdk"};
-  config_a.generated_inputs = {"generated/config.h"};
-  config_a.diagnostics_policy = "error-limit=0";
-  config_a.arguments = {"-std=c++23", "-DCONFIG_A"};
-  auto config_b = config_a;
-  config_b.target = "aarch64-linux-gnu";
-  config_b.sysroot = "/sdk/arm64";
-  config_b.macro_state = {"CONFIG_B"};
-  config_b.generated_inputs = {"generated/config-arm.h"};
-  const auto config_a_id = db.add_translation_unit_config(config_a);
-  const auto config_b_id = db.add_translation_unit_config(config_b);
-
-  cidx::ast::SymbolRecord record;
-  record.file = *header_path;
-  record.usr = "c:@F@header_local";
-  record.spelling = "header_local";
-  record.kind = 8; // CXCursor_FunctionDecl
-  record.line = 1;
-  record.col = 1;
-  record.end_line = 1;
-  record.end_col = 13;
-  record.linkage = "internal";
-  record.is_definition = true;
-  record.resolved = true;
-
-  cidx::storage::AstStoragePorts ports{db.workspace_catalog_read(),
-                                       db.source_read(),
-                                       db.source_write(),
-                                       db.symbol_read(),
-                                       db.symbol_write(),
-                                       db.type_write(),
-                                       db.fact_write(),
-                                       db.definition_write(),
-                                       db.unit_of_work()};
-  cidx::ast::StorageSymbolSink symbols(ports);
-  symbols.set_current_file_id(tu_a);
-  symbols.set_identity_translation_unit_config_id(config_a_id, tu_a);
-  symbols.emit(record);
-  symbols.set_current_file_id(tu_b);
-  symbols.set_identity_translation_unit_config_id(config_b_id, tu_b);
-  symbols.emit(record);
-  const auto rows = db.lookup_symbols_by_usr(record.usr, universe);
-  REQUIRE(rows.size() == 2);
-  CHECK(rows[0].identity_key != rows[1].identity_key);
-
-  cidx::ast::StorageEdgeSink edges(ports);
-  edges.set_current_file_id(tu_a);
-  edges.set_identity_translation_unit_config_id(config_a_id, tu_a);
-  const auto a_id = edges.lookup_symbol_id(record.usr, *header_path);
-  edges.set_current_file_id(tu_b);
-  edges.set_identity_translation_unit_config_id(config_b_id, tu_b);
-  const auto b_id = edges.lookup_symbol_id(record.usr, *header_path);
-  REQUIRE(a_id.has_value());
-  REQUIRE(b_id.has_value());
-  CHECK(*a_id != *b_id);
-  CHECK(db.update_symbol(
-      record.usr, {{"spelling", std::string("A")}}, universe, *header_path,
-      db.portable_translation_unit_identity_for_config(config_a_id, tu_a)));
-  CHECK(db.lookup_symbol_by_id(*a_id)->spelling == "A");
-  CHECK(db.lookup_symbol_by_id(*b_id)->spelling == "header_local");
-
-  cidx::ast::MintRequest request;
-  request.usr = "c:@F@header_stub";
-  request.spelling = "header_stub";
-  request.kind_name = "function";
-  request.decl_file_id = header;
-  request.decl_line = 2;
-  request.decl_col = 1;
-  request.identity_source = *header_path;
-  request.linkage = "no-linkage";
-  edges.set_current_file_id(tu_a);
-  edges.set_identity_translation_unit_config_id(config_a_id, tu_a);
-  const auto stub_a = edges.mint_symbol(request);
-  edges.set_current_file_id(tu_b);
-  edges.set_identity_translation_unit_config_id(config_b_id, tu_b);
-  const auto stub_b = edges.mint_symbol(request);
-  CHECK(stub_a != stub_b);
 }
 
 TEST_CASE(

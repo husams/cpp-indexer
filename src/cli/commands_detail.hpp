@@ -275,8 +275,6 @@ inline int index_one(Storage &db, ast::IndexSession &session, const File &rec,
       *ctx.err << "error: " << out.error << "\n";
       return 1;
     }
-    db.replace_diagnostics(rec.id, out.diagnostics);
-    db.mark_file_indexed(rec.id, out.source_mtime, out.source_md5);
     *ctx.out << "  -> " << out.stored
              << " symbols; headers: " << out.headers.indexed << " indexed (+"
              << out.headers.symbols << " symbols), " << out.headers.already

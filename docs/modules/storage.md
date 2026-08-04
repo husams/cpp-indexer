@@ -11,6 +11,7 @@ by both indexing engines, and the resolve pass. ~5.5k LOC.
 |---|---|
 | `storage.hpp` / `storage.cpp` | the `Storage` class, schema DDL, migrations, `resolve_pass()` |
 | `sqlite.hpp` / `sqlite.cpp` | a thin RAII wrapper over libsqlite3 (`Db`, `Stmt`) |
+| `fact_batch_writer.hpp` / `fact_batch_writer.cpp` | the sole production one-TU FactBatch publication path |
 | `artifacts.hpp` / `artifacts.cpp` | manifest-governed sidecar publication, validation, read-only attachment, leases, pins, and recovery |
 | `records.hpp` | plain-data row structs — no clang types leak here |
 
@@ -45,17 +46,55 @@ read adapters.
 
 ### `Transaction` (`storage.hpp:45`)
 
-RAII commit/rollback. The LibTooling translation-unit pipeline obtains a
-`UnitOfWork` from the focused port factory and wraps symbol, edge, definition,
-include, and header publication in one transaction. An explicit `commit()`
-surfaces COMMIT failures instead of swallowing them; destruction after an
-injected adapter/transform failure rolls the whole TU back.
+RAII commit/rollback. `FactBatchWriter` opens the production transaction only
+after extraction, planning, and source verification have completed. An
+explicit `commit()` surfaces COMMIT failures; any staging, resolution, apply,
+publication, cleanup, revalidation, or commit error rolls the whole TU back.
+
+### `FactBatchWriter`
+
+The writer consumes one immutable canonical `FactBatch` plus the frozen owned
+file route plan. Its authoritative phase order is plan validation, file-row
+resolution, connection-local TEMP staging, natural-key maps, entity and
+annotation apply, relation/site/external-identity apply, include and
+applicability publication, stale cleanup, source revalidation, currentness,
+and commit. Extraction does not mutate persistent storage.
+
+Staging is TEMP-only and does not change the schema. One reusable prepared
+statement loads each family; target writes use set-based joins against stable
+file/symbol/type/relation/definition maps. The writer report separates prepared,
+reused, and eliminated statements; executions and VM steps; prepare, VM, and
+commit time; and staged/inserted/updated/ignored/deleted rows per family.
+Deterministic failure points cover every apply boundary plus pre-commit and
+commit, and TEMP tables are cleared for connection reuse.
+
+The production comparison harness accepts `--baseline-cidx` for paired
+pre-writer/candidate trials. S-073 does not change PRAGMAs or recovery policy,
+and it retains both binary/NOCASE spelling and qualified-name index pairs.
+
+TEMP staging and observed per-family outcome accounting add a fixed cost on
+very small cold translation units. Qualification therefore reports cold and
+hot one-file/four-file shapes separately from the 16-file scale shape: the
+small cold shapes may regress modestly while hot per-TU publication and scale
+must remain within the story's measured gates. This is an explicit throughput
+tradeoff for atomic set-based publication and truthful insert/update/ignore
+telemetry, not an unmeasured change.
+
+`ast::ExtractedFactPublication` is the stable application-neutral seam used by
+the live writer and by future TU-cache serialization/replay. It carries the
+canonical batch and frozen route/configuration context without exposing this
+module's report types. A cached artifact must also validate the persistent
+symbol-identity state described by the
+[FactBatch compatibility contract](../fact-batch.md#identity-and-partitioning);
+on mismatch the caller re-extracts, and every successful publication still
+passes through `FactBatchWriter`.
 
 ### `sqlite.hpp`
 
 A minimal wrapper: `Db` (open/exec/prepare), prepared `Stmt` with
-`bind`/`step`/`col_*`, `RETURNING`-based upserts. Requires **SQLite ≥ 3.35**
-(for `RETURNING`) — on RHEL 9 this is why the build uses a static SQLite
+`bind`/`reset`/`step`/`col_*`, reusable prepared statements, and
+`RETURNING`-based upserts. Requires **SQLite ≥ 3.37** (for `RETURNING` and
+`sqlite3_changes64`) — on RHEL 9 this is why the build uses a static SQLite
 amalgamation (see [build](../build.md)).
 
 ### `records.hpp`
