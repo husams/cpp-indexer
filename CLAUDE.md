@@ -135,17 +135,24 @@ layering rules.
   Do not commit generated artifacts (build dirs, caches, `__pycache__`, temp
   databases, local virtualenvs). The one exception is the checked-in semantic
   index `index.db` (see below).
-- The semantic index `index.db` is committed to the repo. Keep it current: after
-  any change that alters what the index would contain (source under `src/` or
-  `python/indexer/`, schema version, or indexing/query semantics), regenerate
-  `index.db` and commit the refreshed database in the same change. Regenerate
-  from the **canonical checkout** (`/Users/husam/workspace/cpp-indexer`, never a
-  feature worktree — absolute paths get baked into the DB), running the **full
-  three-pass pipeline**: `rm index.db` then `INDEXER_CACHE=$(pwd) ./build/cidx
-  import --db "$(pwd)/build" --name cpp-indexer` → `./build/cidx index` →
-  `./build/cidx resolve`. Skipping `resolve` leaves Layer-1 empty (`entity_node`
-  / `entity_edge` / `dispatch_calls` = 0, no `meta.graph_resolved_at`). Verify:
-  `sqlite3 index.db "SELECT value FROM meta WHERE key='schema_version';"` matches
-  the current schema version; `SELECT COUNT(*) FROM entity_edge;` is non-zero;
+- **Re-indexing is manual and on request only.** The semantic index `index.db`
+  is committed to the repo, but regenerating it takes far too long to sit on the
+  critical path of a change. Do **not** regenerate or commit `index.db` as part
+  of ordinary work, and never make it an acceptance criterion, an exit gate, or
+  a merge blocker — a change that alters what the index would contain is
+  complete without it, and `index.db` may legitimately lag `main` (including its
+  `schema_version`). Regenerate only when the user explicitly asks. Revisit this
+  once indexing performance is fixed.
+- When a re-index **is** requested, run it from the **canonical checkout**
+  (`/Users/husam/workspace/cpp-indexer`, never a feature worktree — absolute
+  paths get baked into the DB) as the **full three-pass pipeline**:
+  `export INDEXER_CACHE="$(pwd)"`, then `rm index.db` → `./build/cidx import --db
+  "$(pwd)/build" --name cpp-indexer` → `./build/cidx index` → `./build/cidx
+  resolve`. Export `INDEXER_CACHE` once for all three passes; a per-command
+  prefix leaves `index`/`resolve` pointed at the global `~/.cache/cidx/index.db`.
+  Skipping `resolve` leaves Layer-1 empty (`entity_node` / `entity_edge` /
+  `dispatch_calls` = 0, no `meta.graph_resolved_at`). Verify: `sqlite3 index.db
+  "SELECT value FROM meta WHERE key='schema_version';"` matches the current
+  schema version; `SELECT COUNT(*) FROM entity_edge;` is non-zero;
   `meta.graph_resolved_at` is set; and no worktree paths leaked
   (`strings index.db | grep -c cpp-indexer- ` → 0).

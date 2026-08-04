@@ -106,12 +106,15 @@ task:
   Do not commit generated artifacts (build dirs, caches, `__pycache__`, temp
   databases, local virtualenvs). The one exception is the checked-in semantic
   index `index.db` (see below).
-- The semantic index `index.db` is committed to the repo. Keep it current: after
-  any change that alters what the index would contain (source under `src/` or
-  `python/indexer/`, schema version, or indexing/query semantics), re-run the
-  indexer to regenerate `index.db` and commit the refreshed database in the same
-  change. Verify with `sqlite3 index.db "SELECT value FROM meta WHERE
-  key='schema_version';"` — it must match the current schema version.
+- **Re-indexing is manual and on request only.** The semantic index `index.db`
+  is committed to the repo, but regenerating it takes far too long to sit on the
+  critical path of a change. Do **not** regenerate or commit `index.db` as part
+  of ordinary work, and never make it an acceptance criterion, an exit gate, or
+  a merge blocker — a change that alters what the index would contain is
+  complete without it, and `index.db` may legitimately lag `main` (including its
+  `schema_version`). Regenerate only when the user explicitly asks; see
+  `CLAUDE.md` for the three-pass recipe. Revisit this once indexing performance
+  is fixed.
 
 ## Agent workflow preferences
 

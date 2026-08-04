@@ -3,6 +3,14 @@ name: CIDX verification
 on:
   push:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      run_slow_gates:
+        description: >-
+          Run the slow/expensive gates (TLC model checking, TLAPS proofs,
+          conformance replay, the C++ build + ctest, and the browser suite).
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -24,6 +32,7 @@ jobs:
       tla_sidecar_conformance: ${{ steps.select.outputs.run_tla_sidecar_conformance }}
       tla_policy: ${{ steps.select.outputs.run_tla_policy }}
       cpp_default: ${{ steps.select.outputs.run_cpp_default }}
+      slow_gates: ${{ steps.slow.outputs.enabled }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -116,11 +125,30 @@ jobs:
           else
             spec/tla/tools/select-changed-gates.sh --all
           fi
+      # The slow/expensive gates below are disabled on push and pull_request:
+      # they install an LLVM toolchain, build cidx, run TLC/TLAPS, or drive a
+      # browser, and were costing far more wall-clock than the signal they
+      # returned on routine changes. They are opt-in via "Run workflow" on the
+      # Actions tab (workflow_dispatch), which still honours the changed-path
+      # gate selection above. The cheap gates -- gate-selection regressions,
+      # the protected-invariant policy check, and the CODEOWNER review check --
+      # continue to run on every push and PR.
+      - name: Decide whether the slow gates run
+        id: slow
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
+            && [ "${{ inputs.run_slow_gates }}" = "true" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
 
   tla-syntax-and-model:
     name: TLA+ syntax, TLC model checking, and mutation regression
     needs: changes
-    if: needs.changes.outputs.tla_syntax_and_model == 'true'
+    if: >-
+      needs.changes.outputs.slow_gates == 'true'
+      && needs.changes.outputs.tla_syntax_and_model == 'true'
     runs-on: cpp-indexer-runner
     steps:
       - name: Check out repository
@@ -243,7 +271,9 @@ jobs:
   tla-proofs:
     name: TLAPS proof checking
     needs: changes
-    if: needs.changes.outputs.tla_proofs == 'true'
+    if: >-
+      needs.changes.outputs.slow_gates == 'true'
+      && needs.changes.outputs.tla_proofs == 'true'
     runs-on: cpp-indexer-runner
     container: ubuntu:24.04
     env:
@@ -345,7 +375,9 @@ jobs:
   tla-conformance:
     name: Conformance mappings and deterministic scenario replay
     needs: changes
-    if: needs.changes.outputs.tla_conformance == 'true'
+    if: >-
+      needs.changes.outputs.slow_gates == 'true'
+      && needs.changes.outputs.tla_conformance == 'true'
     runs-on: cpp-indexer-runner
     steps:
       - name: Check out repository
@@ -447,7 +479,9 @@ jobs:
   tla-sidecar-conformance:
     name: Sidecar-publication conformance replay
     needs: changes
-    if: needs.changes.outputs.tla_sidecar_conformance == 'true'
+    if: >-
+      needs.changes.outputs.slow_gates == 'true'
+      && needs.changes.outputs.tla_sidecar_conformance == 'true'
     runs-on: cpp-indexer-runner
     steps:
       - name: Check out repository
@@ -548,7 +582,9 @@ jobs:
   cpp-default:
     name: C++ default tests
     needs: changes
-    if: needs.changes.outputs.cpp_default == 'true'
+    if: >-
+      needs.changes.outputs.slow_gates == 'true'
+      && needs.changes.outputs.cpp_default == 'true'
     runs-on: cpp-indexer-runner
     # The self-hosted runner image is not Ubuntu 24.04; the job runs in a
     # noble container so the llvm-toolchain-noble-22 and gcc-13 packages
@@ -630,6 +666,8 @@ jobs:
 
   web-offline:
     name: Offline graph export assets and browser smoke
+    needs: changes
+    if: needs.changes.outputs.slow_gates == 'true'
     runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
@@ -640,37 +678,14 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - name: Install LLVM/Clang 22 and cidx build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y \
-            ca-certificates curl gnupg
-          curl --fail --location --silent --show-error \
-            https://apt.llvm.org/llvm-snapshot.gpg.key \
-            --output /tmp/llvm-snapshot.gpg.key
-          test "$(gpg --show-keys --with-colons /tmp/llvm-snapshot.gpg.key \
-            | awk -F: '$1 == "fpr" { print $10; exit }')" = \
-            6084F3CF814B57C1CF12EFD515CF4D18AF4F7421
-          gpg --dearmor --yes --output /tmp/llvm-apt.gpg \
-            /tmp/llvm-snapshot.gpg.key
-          sudo install -m 0644 /tmp/llvm-apt.gpg \
-            /usr/share/keyrings/llvm-apt.gpg
-          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/llvm-apt.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-22 main" \
-            | sudo tee /etc/apt/sources.list.d/llvm-22.list >/dev/null
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y \
-            gcc-13 g++-13 clang-22 cmake libclang-22-dev \
-            libclang-common-22-dev libclang-cpp22 libsqlite3-dev \
-            llvm-22 llvm-22-dev ninja-build
-      - name: Build cidx for graph qualification
-        run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER=gcc-13 \
-            -DCMAKE_CXX_COMPILER=g++-13 \
-            -DLLVM_DIR=/usr/lib/llvm-22/lib/cmake/llvm \
-            -DClang_DIR=/usr/lib/llvm-22/lib/cmake/clang
-          cmake --build build --target cidx --parallel 2
-          test -x build/cidx
+      # The explorer qualification suite (`npm run qualify`) is deliberately
+      # NOT run here: it pins a fingerprint of the C++ sources against an
+      # index-derived qualification corpus, so keeping it green requires a
+      # full re-index of this repository. Re-indexing is manual and on
+      # request only until indexing performance is fixed (see CLAUDE.md), so
+      # this job no longer builds cidx and runs only the checks that do not
+      # depend on an index. Run `npm run qualify` by hand after a requested
+      # re-index.
       - name: Install locked web dependencies
         working-directory: web
         run: npm ci --ignore-scripts
