@@ -9,6 +9,7 @@
 // only catch-site (D23). -h/--help fills help_text; --version sets version.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -163,7 +164,22 @@ struct ParsedArgs {
   std::optional<std::string> analyze_rules_file; // --rules-file FILE
   bool analyze_list = false;                     // --list
   std::optional<std::string> analyze_export;     // --export-facts DIR
-  int analyze_jobs = 1;                          // --jobs N (default 1)
+  // Bounded numeric options are captured verbatim and validated after the
+  // parse, so this grammar rejects them with exactly the message the typed
+  // adapter emits instead of CLI11's own conversion diagnostic (S-074).
+  // -- index parallel extraction (S-074) --------------------------------
+  // Grouped largest-alignment-first so these additions do not widen the
+  // struct's padding: optionals, then 8-byte scalars, then the 4-byte ints.
+  std::optional<std::string> analyze_jobs_text;          // analyze --jobs N
+  std::optional<std::string> index_jobs_text;            // --jobs N
+  std::optional<std::string> index_max_queue_bytes_text; // --max-queue-bytes N
+  std::optional<std::string> index_max_queue_items_text; // --max-queue-items N
+  std::optional<std::string> index_memory_budget_text; // --memory-budget-bytes
+  std::uint64_t index_max_queue_bytes = 0;
+  std::uint64_t index_memory_budget_bytes = 0;
+  std::size_t index_max_queue_items = 0;
+  int analyze_jobs = 1; // resolved analyze --jobs N
+  int index_jobs = 0;   // resolved index --jobs N; 0 = automatic policy
 };
 
 // argv WITHOUT the program name. Throws UsageError on misuse.

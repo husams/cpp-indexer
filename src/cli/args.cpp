@@ -9,13 +9,17 @@
 // transcription is retired.
 #include "cli/args.hpp"
 
+#include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "CLI11.hpp"
 #include "application/requests.hpp"
+#include "cli/numeric_option.hpp"
 #include "util/errors.hpp"
 #include "util/pathutil.hpp"
 
@@ -156,6 +160,15 @@ void build_top_level(CLI::App &app, ParsedArgs &pa) {
                     "write opt-in indexing telemetry to PATH");
   index->add_option("--profile-sqlite-config", pa.profile_sqlite_configuration,
                     "apply benchmark-only SQLite settings from PATH");
+  index->add_option("--jobs", pa.index_jobs_text,
+                    "parallel translation-unit extraction workers "
+                    "(default: automatic from cores and memory budget)");
+  index->add_option("--max-queue-bytes", pa.index_max_queue_bytes_text,
+                    "extracted-but-unpublished payload budget in bytes");
+  index->add_option("--max-queue-items", pa.index_max_queue_items_text,
+                    "extracted-but-unpublished translation-unit budget");
+  index->add_option("--memory-budget-bytes", pa.index_memory_budget_text,
+                    "resident-memory ceiling used to derive the worker count");
   index->callback([&pa] { pa.command = "index"; });
   CLI::App *index_status =
       index->add_subcommand("status", "show transform readiness");
@@ -225,7 +238,7 @@ void build_top_level(CLI::App &app, ParsedArgs &pa) {
   analyze->add_option("--export-facts", pa.analyze_export,
                       "write TSV fact files and the cidx_facts.dl prelude to "
                       "DIR");
-  analyze->add_option("--jobs", pa.analyze_jobs,
+  analyze->add_option("--jobs", pa.analyze_jobs_text,
                       "Souffle worker count (default 1)");
   analyze->add_option("--db", pa.index_db, kDbHelpText);
   analyze->callback([&pa] { pa.command = "analyze"; });
@@ -924,6 +937,41 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
                          "\n",
                      2);
   }
+  // Bounded numeric options, validated with the same predicate and the same
+  // message the typed adapter uses (S-074 AC #1719). Captured as text above so
+  // CLI11's own conversion cannot answer first with a different diagnostic.
+  auto resolve_integer = [](const std::optional<std::string> &text,
+                            const char *option, auto &sink) {
+    if (!text) {
+      return;
+    }
+    const std::optional<int> parsed = parse_positive_integer(*text);
+    if (!parsed) {
+      throw UsageError("cidx: error: " + positive_integer_error(option) + "\n",
+                       2);
+    }
+    sink = static_cast<std::decay_t<decltype(sink)>>(*parsed);
+  };
+  auto resolve_bytes = [](const std::optional<std::string> &text,
+                          const char *option, std::uint64_t &sink) {
+    if (!text) {
+      return;
+    }
+    const std::optional<std::uint64_t> parsed = parse_positive_bytes(*text);
+    if (!parsed) {
+      throw UsageError("cidx: error: " + positive_integer_error(option) + "\n",
+                       2);
+    }
+    sink = *parsed;
+  };
+  resolve_integer(pa.analyze_jobs_text, "--jobs", pa.analyze_jobs);
+  resolve_integer(pa.index_jobs_text, "--jobs", pa.index_jobs);
+  resolve_integer(pa.index_max_queue_items_text, "--max-queue-items",
+                  pa.index_max_queue_items);
+  resolve_bytes(pa.index_max_queue_bytes_text, "--max-queue-bytes",
+                pa.index_max_queue_bytes);
+  resolve_bytes(pa.index_memory_budget_text, "--memory-budget-bytes",
+                pa.index_memory_budget_bytes);
   return pa;
 }
 

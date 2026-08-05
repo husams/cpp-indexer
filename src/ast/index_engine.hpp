@@ -18,6 +18,7 @@
 #include "ast/include_facts.hpp"
 #include "ast/owned_header_plan.hpp"
 #include "ast/pass_registry.hpp"
+#include "index/header_claims.hpp"
 #include "storage/records.hpp"
 #include "util/logger.hpp"
 
@@ -179,10 +180,11 @@ public:
 private:
   class Impl;
   std::unique_ptr<Impl> impl_;
-  friend IndexOneOutcome
-  run_index_one(cidx::Storage &db, IndexSession &session, const cidx::File &rec,
-                const std::string &path, bool graph_enabled,
-                IndexFailurePoint failure, bool no_front_end_reuse);
+  friend IndexOneOutcome run_index_one(cidx::Storage &db, IndexSession &session,
+                                       const cidx::File &rec,
+                                       const std::string &path,
+                                       bool graph_enabled,
+                                       const struct ExtractionControl &control);
 };
 
 // Deterministic fault points used by the production TU pipeline tests. The
@@ -205,6 +207,26 @@ enum class IndexFailurePoint : std::uint8_t {
   main_association,
 };
 
+// Everything that varies between a serial in-place index and one bounded
+// parallel extraction worker (S-074). The defaults reproduce the serial
+// contract exactly, so every existing caller is unchanged.
+struct ExtractionControl {
+  IndexFailurePoint failure = IndexFailurePoint::none;
+  bool no_front_end_reuse = false;
+  // true: this call publishes through the controlled writer itself, which is
+  // the serial contract. false: extraction stops at `IndexOneOutcome::
+  // publication` and the CALLER publishes it, in the legacy apply order,
+  // through the single controlled writer. A worker must never publish: worker
+  // completion order must not become persistence order.
+  bool publish = true;
+  // Scheduler-owned owned-header assignment. Null asks the database directly,
+  // which is correct only when nothing else is extracting concurrently.
+  cidx::index::HeaderClaimOracle *claims = nullptr;
+  // This translation unit's position in the legacy apply order. Only meaningful
+  // with `claims`.
+  std::size_t rank = 0;
+};
+
 IndexOneOutcome
 run_index_one(cidx::Storage &db, const cidx::File &rec, const std::string &path,
               bool graph_enabled,
@@ -216,5 +238,10 @@ run_index_one(cidx::Storage &db, IndexSession &session, const cidx::File &rec,
               const std::string &path, bool graph_enabled,
               IndexFailurePoint failure = IndexFailurePoint::none,
               bool no_front_end_reuse = false);
+
+IndexOneOutcome run_index_one(cidx::Storage &db, IndexSession &session,
+                              const cidx::File &rec, const std::string &path,
+                              bool graph_enabled,
+                              const ExtractionControl &control);
 
 } // namespace cidx::ast

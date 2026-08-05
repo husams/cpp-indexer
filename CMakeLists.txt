@@ -163,6 +163,9 @@ add_library(cidx_core STATIC
   src/util/files.cpp
   src/util/front_end_reuse.cpp
   src/profile/index_profile.cpp
+  src/index/parallel_policy.cpp
+  src/index/header_claims.cpp
+  src/index/parallel_index.cpp
   src/storage/sqlite.cpp
   src/storage/database_verification.cpp
   src/storage/fact_batch_writer.cpp

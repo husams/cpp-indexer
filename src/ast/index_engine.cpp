@@ -172,6 +172,13 @@ struct EngineState {
   IndexFailurePoint requested_failure = IndexFailurePoint::none;
   std::optional<FactBatch> batch;
   OwnedHeaderRoutePlan route_plan;
+  // S-074: scheduler-owned owned-header assignment. Null keeps the serial
+  // contract of asking the committed database directly.
+  cidx::index::HeaderClaimOracle *claims = nullptr;
+  std::size_t rank = 0;
+  // Set once the oracle has answered, so a translation unit that fails after
+  // discovery does not release the ordered gate twice.
+  bool claimed = false;
 };
 
 // Severity map mirroring CXDiagnosticSeverity (collect_diagnostics parity).
@@ -907,13 +914,19 @@ private:
     visitor.TraverseDecl(tu_);
   }
 
-  [[nodiscard]] auto translation_unit_route_key() const -> std::string {
+  // The stable identity of this translation unit's normalized configuration.
+  // Used as the owned-header claim key because a configuration ID is transient
+  // until the writer mints its row, while this hash is not (S-074).
+  [[nodiscard]] auto translation_unit_configuration_hash() const
+      -> std::string {
     if (state_.publication_config == nullptr) {
       throw std::logic_error("publication configuration is unavailable");
     }
-    return "config:" +
-           translation_unit_config_hash(*state_.publication_config) +
-           "\x1fsource:" +
+    return translation_unit_config_hash(*state_.publication_config);
+  }
+
+  [[nodiscard]] auto translation_unit_route_key() const -> std::string {
+    return "config:" + translation_unit_configuration_hash() + "\x1fsource:" +
            db_.portable_source_identity_for_file(state_.rec->id);
   }
 
@@ -1210,48 +1223,105 @@ private:
 
   std::vector<PendingHeader>
   discover_owned_headers(double &persistence_seconds) {
-    std::vector<PendingHeader> plan;
+    // Classification is identical in both modes; only WHO answers "is this
+    // header already someone else's job" differs. Serially the committed
+    // database answers, because the previous translation unit has already
+    // published. Under parallel extraction the database has not yet seen the
+    // in-flight translation units, so the scheduler's ordered oracle answers
+    // instead -- with exactly the answer the serial run would have given.
+    std::vector<PendingHeader> candidates;
+    std::vector<cidx::index::HeaderClaimCandidate> claims;
     std::unordered_set<std::string> seen;
-    cidx::HeaderStats &counts = state_.out->headers;
     for (const IncludeFact &f : state_.includes.includes) {
       if (!f.resolved) {
         continue; // no file was opened: nothing to index
       }
-      const std::string &inc = f.dst_path;
-      const std::string abs = cidx::pathutil::abspath(inc);
+      const std::string abs = cidx::pathutil::abspath(f.dst_path);
       if (!seen.insert(abs).second) {
         continue;
       }
-      if (is_system_header(inc)) {
-        ++counts.system;
-        continue;
+      classify_included_header(f.dst_path, abs, persistence_seconds, candidates,
+                               claims);
+    }
+    if (state_.claims == nullptr) {
+      return candidates;
+    }
+    return resolve_header_claims(std::move(candidates), claims);
+  }
+
+  // One inclusion: system / unowned / already-current / candidate. Split out of
+  // the discovery loop so neither function carries both the iteration and the
+  // classification.
+  void classify_included_header(
+      const std::string &inc, const std::string &abs,
+      double &persistence_seconds, std::vector<PendingHeader> &candidates,
+      std::vector<cidx::index::HeaderClaimCandidate> &claims) {
+    cidx::HeaderStats &counts = state_.out->headers;
+    if (is_system_header(inc)) {
+      ++counts.system;
+      return;
+    }
+    if (state_.ownership == nullptr || state_.session_metrics == nullptr ||
+        !state_.ownership->owns(abs, *state_.session_metrics)) {
+      ++counts.unowned;
+      return;
+    }
+    ++state_.session_metrics->file_hash_reads;
+    const std::optional<std::string> current_md5 = cidx::md5_of(abs);
+    const std::optional<cidx::File> existing =
+        read_header_file_row(abs, persistence_seconds);
+    const bool covered_by_current_config =
+        header_covered_by_current_config(existing);
+    const std::optional<std::string> parsed_md5 =
+        parsed_file_md5(context_.getSourceManager(), abs);
+    const bool already_in_database =
+        current_md5 && parsed_md5 && current_md5 == parsed_md5 &&
+        header_is_already_indexed(existing, current_md5,
+                                  covered_by_current_config);
+    // Serially the committed row is the whole answer. Under parallel
+    // extraction the oracle still has to see the candidate, because it -- not
+    // the database -- decides who owns it.
+    if (already_in_database && state_.claims == nullptr) {
+      ++counts.already;
+      return;
+    }
+    ++state_.session_metrics->file_stat_reads;
+    candidates.push_back(
+        {.path = abs,
+         .mtime = file_mtime(abs),
+         .md5 = parsed_md5,
+         .covered_by_current_config = covered_by_current_config,
+         .stored = 0});
+    if (state_.claims != nullptr) {
+      claims.push_back({.path = abs,
+                        .parsed_md5 = parsed_md5,
+                        .already_indexed_in_database = already_in_database});
+    }
+  }
+
+  // The parallel half of owned-header discovery, kept out of the classification
+  // loop so neither function carries both concerns.
+  //
+  // Exactly one call per translation unit, and it blocks until every
+  // lower-ranked translation unit has claimed. That ordered gate is what makes
+  // the answer independent of completion order.
+  std::vector<PendingHeader> resolve_header_claims(
+      std::vector<PendingHeader> candidates,
+      const std::vector<cidx::index::HeaderClaimCandidate> &claims) {
+    const std::vector<bool> owned = state_.claims->claim(
+        state_.rank, translation_unit_configuration_hash(), claims);
+    state_.claimed = true;
+    std::vector<PendingHeader> plan;
+    plan.reserve(candidates.size());
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+      if (owned[i]) {
+        plan.push_back(std::move(candidates[i]));
+      } else {
+        // Owned by a lower-ranked translation unit, or already current in the
+        // database: either way this translation unit reuses that assignment and
+        // reports it exactly as serial does.
+        ++state_.out->headers.already;
       }
-      if (state_.ownership == nullptr || state_.session_metrics == nullptr ||
-          !state_.ownership->owns(abs, *state_.session_metrics)) {
-        ++counts.unowned;
-        continue;
-      }
-      ++state_.session_metrics->file_hash_reads;
-      const std::optional<std::string> current_md5 = cidx::md5_of(abs);
-      const std::optional<cidx::File> existing =
-          read_header_file_row(abs, persistence_seconds);
-      const bool covered_by_current_config =
-          header_covered_by_current_config(existing);
-      const std::optional<std::string> parsed_md5 =
-          parsed_file_md5(context_.getSourceManager(), abs);
-      if (current_md5 && parsed_md5 && current_md5 == parsed_md5 &&
-          header_is_already_indexed(existing, current_md5,
-                                    covered_by_current_config)) {
-        ++counts.already;
-        continue;
-      }
-      ++state_.session_metrics->file_stat_reads;
-      const std::optional<double> mtime = file_mtime(abs);
-      plan.push_back({.path = abs,
-                      .mtime = mtime,
-                      .md5 = parsed_md5,
-                      .covered_by_current_config = covered_by_current_config,
-                      .stored = 0});
     }
     return plan;
   }
@@ -2153,6 +2223,50 @@ bool prepare_front_end_reuse(const TranslationUnitConfig &resolved,
   return true;
 }
 
+// The publication half of finalize_index_one, kept separate so the serial
+// in-place path and the extraction-only path differ by one call rather than by
+// a branch threaded through the whole function.
+void publish_extracted_batch(cidx::Storage &db, EngineState &state,
+                             const ExtractedFactPublication &publication,
+                             IndexOneOutcome &out, bool profiling) {
+  cidx::storage::FactBatchWriter writer(db);
+  const cidx::storage::FactBatchPublicationContext context{
+      .route_plan = publication.route_plan,
+      .translation_unit = publication.translation_unit,
+      .expected_generation = publication.expected_generation,
+      .source_is_current =
+          [](const std::string &candidate,
+             const PlannedSourceSnapshot &snapshot) {
+            return SourceSnapshot{.mtime = snapshot.mtime, .md5 = snapshot.md5}
+                .matches(candidate);
+          },
+      .configuration_id = publication.configuration_id,
+      .configuration = publication.configuration,
+      .failure = writer_failure(state.requested_failure)};
+  const cidx::storage::FactBatchWriterResult result =
+      writer.apply(publication.batch, context);
+  record_writer_profile(result.report, profiling);
+  if (result.ok()) {
+    if (profiling) {
+      profile::note_transaction_commit();
+      profile::add_timing("commit", result.report.commit_seconds);
+    }
+    return;
+  }
+  out.dependency_facts = {};
+  note_index_one_rollback(profiling);
+  if (state.requested_failure != IndexFailurePoint::none) {
+    throw std::runtime_error(
+        result.error.value_or("injected FactBatch publication failure"));
+  }
+  if (result.error && (result.error->contains("readonly") ||
+                       result.error->contains("read-only"))) {
+    throw std::runtime_error(*result.error);
+  }
+  out.parse_failed = true;
+  out.error = result.error.value_or("FactBatch publication failed");
+}
+
 IndexOneOutcome finalize_index_one(
     cidx::Storage &db, IndexSession &session, const std::string &path,
     const SourceSnapshot &source, const std::vector<std::string> &args,
@@ -2163,7 +2277,7 @@ IndexOneOutcome finalize_index_one(
     std::uint64_t start_position,
     const std::pair<std::int64_t, std::int64_t> &cardinality_before,
     ProfileClock::time_point wall_started, std::clock_t cpu_started,
-    double child_wall_before) {
+    double child_wall_before, bool publish) {
 
   if (!state.tu_handled) {
     out.parse_failed = true;
@@ -2215,40 +2329,13 @@ IndexOneOutcome finalize_index_one(
       // failure branch below drops it so a rolled-back TU never leaves
       // evidence a cache entry could be built from.
       out.dependency_facts = state.includes;
-      cidx::storage::FactBatchWriter writer(db);
-      cidx::storage::FactBatchPublicationContext context{
-          .route_plan = out.publication->route_plan,
-          .translation_unit = out.publication->translation_unit,
-          .expected_generation = out.publication->expected_generation,
-          .source_is_current =
-              [](const std::string &candidate,
-                 const PlannedSourceSnapshot &snapshot) {
-                return SourceSnapshot{.mtime = snapshot.mtime,
-                                      .md5 = snapshot.md5}
-                    .matches(candidate);
-              },
-          .configuration_id = out.publication->configuration_id,
-          .configuration = out.publication->configuration,
-          .failure = writer_failure(state.requested_failure)};
-      cidx::storage::FactBatchWriterResult result =
-          writer.apply(out.publication->batch, context);
-      record_writer_profile(result.report, profiling);
-      if (!result.ok()) {
-        out.dependency_facts = {};
-        note_index_one_rollback(profiling);
-        if (state.requested_failure != IndexFailurePoint::none) {
-          throw std::runtime_error(
-              result.error.value_or("injected FactBatch publication failure"));
-        }
-        if (result.error && (result.error->contains("readonly") ||
-                             result.error->contains("read-only"))) {
-          throw std::runtime_error(*result.error);
-        }
-        out.parse_failed = true;
-        out.error = result.error.value_or("FactBatch publication failed");
-      } else if (profiling) {
-        profile::note_transaction_commit();
-        profile::add_timing("commit", result.report.commit_seconds);
+      // Extraction-only stops here: the batch, its route plan and its
+      // configuration are complete and immutable, and the SCHEDULER publishes
+      // them through the single controlled writer in legacy apply order. A
+      // worker that published here would make completion order into
+      // persistence order.
+      if (publish) {
+        publish_extracted_batch(db, state, *out.publication, out, profiling);
       }
     }
   } else {
@@ -2264,8 +2351,10 @@ IndexOneOutcome finalize_index_one(
 
 IndexOneOutcome run_index_one(cidx::Storage &db, IndexSession &session,
                               const cidx::File &rec, const std::string &path,
-                              bool graph_enabled, IndexFailurePoint failure,
-                              bool no_front_end_reuse) {
+                              bool graph_enabled,
+                              const ExtractionControl &control) {
+  const IndexFailurePoint failure = control.failure;
+  const bool no_front_end_reuse = control.no_front_end_reuse;
   const IndexSessionMetrics session_before = session.impl_->profiled_metrics_;
   const bool profiling = profile::active();
   const auto wall_started =
@@ -2311,19 +2400,39 @@ IndexOneOutcome run_index_one(cidx::Storage &db, IndexSession &session,
   EngineState &state = prepared.state;
   const std::vector<std::string> &args = prepared.resolved.arguments;
   state.normalized_config_id = session.impl_->configuration_id(descriptor);
+  state.claims = control.claims;
+  state.rank = control.rank;
 
   if (profiling) {
     profile::note_transaction_begin();
   }
 
   execute_index_one_frontend(setup, state, out, profiling);
-  return finalize_index_one(
+  IndexOneOutcome result = finalize_index_one(
       db, session, path, source, args, state, out, profiling, session_before,
       session.impl_->metrics_, session.impl_->profiled_metrics_,
       [&session](IndexInvalidationReason reason) {
         session.impl_->rebuild(reason);
       },
       start_position, cardinality_before, wall_started, cpu_started,
-      child_wall_before);
+      child_wall_before, control.publish);
+  // A translation unit that never reached owned-header discovery -- a failed
+  // parse, a source that changed under us -- still holds its place in the
+  // ordered gate. Release it here so its successors are not stalled by work
+  // that will never claim.
+  if (control.claims != nullptr && !state.claimed) {
+    control.claims->release_unclaimed(control.rank);
+  }
+  return result;
+}
+
+IndexOneOutcome run_index_one(cidx::Storage &db, IndexSession &session,
+                              const cidx::File &rec, const std::string &path,
+                              bool graph_enabled, IndexFailurePoint failure,
+                              bool no_front_end_reuse) {
+  return run_index_one(
+      db, session, rec, path, graph_enabled,
+      ExtractionControl{.failure = failure,
+                        .no_front_end_reuse = no_front_end_reuse});
 }
 } // namespace cidx::ast

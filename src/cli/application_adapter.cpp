@@ -4,12 +4,15 @@
 #include <sys/stat.h>
 
 #include <cerrno>
-#include <charconv>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <type_traits>
 
 #include "application/services.hpp"
+#include "cli/numeric_option.hpp"
 #include "query/exec.hpp"
 #include "storage/storage.hpp"
 #include "util/errors.hpp"
@@ -28,6 +31,30 @@ std::string require_value(const std::vector<std::string> &argv,
     usage_error(option + " requires a value");
   }
   return argv[++index];
+}
+
+// The shared bounded-numeric contract. `analyze --jobs` defined it; `index
+// --jobs` and the extraction budgets reuse it verbatim so both commands, in
+// both parser implementations, reject the same values with the same text.
+int require_positive_integer(const std::vector<std::string> &argv,
+                             std::size_t &index, const std::string &option) {
+  const std::string value = require_value(argv, index, option);
+  const std::optional<int> parsed = parse_positive_integer(value);
+  if (!parsed) {
+    usage_error(positive_integer_error(option));
+  }
+  return *parsed;
+}
+
+std::uint64_t require_positive_bytes(const std::vector<std::string> &argv,
+                                     std::size_t &index,
+                                     const std::string &option) {
+  const std::string value = require_value(argv, index, option);
+  const std::optional<std::uint64_t> parsed = parse_positive_bytes(value);
+  if (!parsed) {
+    usage_error(positive_integer_error(option));
+  }
+  return *parsed;
 }
 
 void ensure_directory(const std::string &path) {
@@ -268,6 +295,17 @@ parse_typed_index(const std::vector<std::string> &argv) {
       request.profile_sqlite_configuration =
           pathutil::abspath(pathutil::expanduser(
               require_value(argv, i, "--profile-sqlite-config")));
+    } else if (argv[i] == "--jobs") {
+      request.jobs = require_positive_integer(argv, i, "--jobs");
+    } else if (argv[i] == "--max-queue-bytes") {
+      request.max_queue_bytes =
+          require_positive_bytes(argv, i, "--max-queue-bytes");
+    } else if (argv[i] == "--max-queue-items") {
+      request.max_queue_items = static_cast<std::size_t>(
+          require_positive_integer(argv, i, "--max-queue-items"));
+    } else if (argv[i] == "--memory-budget-bytes") {
+      request.memory_budget_bytes =
+          require_positive_bytes(argv, i, "--memory-budget-bytes");
     } else if (argv[i].starts_with('-')) {
       usage_error("unrecognized index option " + argv[i]);
     } else {
@@ -312,15 +350,7 @@ parse_typed_analysis(const std::vector<std::string> &argv) {
       request.index = pathutil::abspath(
           pathutil::expanduser(require_value(argv, i, "--db")));
     } else if (argv[i] == "--jobs") {
-      const std::string value = require_value(argv, i, "--jobs");
-      int jobs = 0;
-      const auto [end, error] =
-          std::from_chars(value.data(), value.data() + value.size(), jobs);
-      if (error != std::errc{} || end != value.data() + value.size() ||
-          jobs < 1) {
-        usage_error("--jobs must be a positive integer");
-      }
-      request.jobs = jobs;
+      request.jobs = require_positive_integer(argv, i, "--jobs");
     } else {
       usage_error("unrecognized analysis option " + argv[i]);
     }

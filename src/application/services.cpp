@@ -643,6 +643,23 @@ StorageApplicationOperations::execute(const IndexRequest &request,
                               {"edges", json_out::Value::of(stats.edges)}});
     return result;
   }
+  // S-074: bounded parallel extraction is refused, not silently downgraded --
+  // an operator who asked for it must never be told the run succeeded when it
+  // ran serially. See kIndexParallelUnavailable for why the mode is not
+  // reachable yet even though its scheduler is complete.
+  //
+  // Refused here, at the one entry point, rather than inside run_index_pass:
+  // both the in-place and clean-rebuild paths funnel through this, and a clean
+  // rebuild creates and replays a candidate database BEFORE it reaches the
+  // index pass. Checking downstream would do all of that work and then refuse.
+  //
+  // Refused whenever it is ASKED FOR, not only when there happens to be work,
+  // so an operator gets the same answer about an unavailable mode on an
+  // up-to-date index as on a cold one.
+  if (request.jobs > 1) {
+    return service_error("index", context, "unsupported",
+                         kIndexParallelUnavailable);
+  }
   if (request.clean) {
     return run_clean_rebuild(index_path_, request, context);
   }
