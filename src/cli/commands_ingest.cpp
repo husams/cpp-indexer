@@ -414,6 +414,13 @@ int cmd_import(const ParsedArgs &args, Context &ctx) {
 // Python tool, whose cindex library loads lazily on the first parse.
 int cmd_index(const ParsedArgs &args, Context &ctx) {
   Logger &log = ctx.logger != nullptr ? *ctx.logger : Logger::root();
+  if (args.clean_rebuild) {
+    // Clean rebuild is a whole-index publication contract and is served by the
+    // typed `index rebuild --clean` path; this in-place path has no rebuild
+    // action and must not approximate one.
+    *ctx.err << "error: " << application::kIndexCleanRequiresRebuild << "\n";
+    return 2;
+  }
   int rc = 0;
   {
     Storage db(ctx.index_path);

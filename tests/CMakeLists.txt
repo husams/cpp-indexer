@@ -35,6 +35,7 @@ set(CIDX_DEFAULT_TESTS
   ui_graph_view_test
   ui_server_test
   application_services_test
+  clean_rebuild_test
   extraction_plan_test
   extraction_engine_test
   tla_counterexample_regression_test
@@ -88,6 +89,18 @@ target_link_libraries(application_process_test PRIVATE cidx_core)
 add_test(NAME application_process_test
          COMMAND application_process_test $<TARGET_FILE:cidx>)
 set_tests_properties(application_process_test PROPERTIES LABELS "default")
+
+# S-101: process-level clean-rebuild failure atomicity. It drives the real
+# binary over a real corpus (real parses), so it carries the "clang" label; the
+# binary path is handed over as argv[1] and a missing one skips via 77.
+add_executable(clean_rebuild_process_test clean_rebuild_process_test.cpp)
+target_compile_options(clean_rebuild_process_test PRIVATE -Wall -Wextra)
+target_link_libraries(clean_rebuild_process_test PRIVATE cidx_core)
+add_test(NAME clean_rebuild_process_test
+         COMMAND clean_rebuild_process_test $<TARGET_FILE:cidx>)
+set_tests_properties(clean_rebuild_process_test PROPERTIES
+  LABELS "clang"
+  SKIP_RETURN_CODE 77)
 
 add_executable(front_end_reuse_identity_test front_end_reuse_identity_test.cpp)
 target_compile_options(front_end_reuse_identity_test PRIVATE -Wall -Wextra)
