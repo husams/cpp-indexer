@@ -55,24 +55,6 @@ constexpr auto kTimingNames = std::to_array<std::string_view>({
     "sqlite_vdbe",
 });
 
-constexpr auto kTuCacheCounterNames = std::to_array<std::string_view>({
-    "tu_fact_cache.hit",
-    "tu_fact_cache.miss",
-    "tu_fact_cache.stale",
-    "tu_fact_cache.corrupt",
-    "tu_fact_cache.incompatible",
-    "tu_fact_cache.incomplete_evidence",
-    "tu_fact_cache.parser_calls_avoided",
-    "tu_fact_cache.replay_bytes",
-    "tu_fact_cache.cache_size_bytes",
-    "tu_fact_cache.evictions",
-    "tu_fact_cache.fallbacks",
-    "tu_dependency.affected_configurations",
-    "tu_dependency.proven_unaffected_configurations",
-    "tu_dependency.visited_nodes",
-    "tu_dependency.visited_edges",
-});
-
 auto json_string(std::string_view value) -> std::string {
   std::ostringstream output;
   output << '"';
@@ -172,11 +154,13 @@ struct Session::Impl {
   };
 
   explicit Impl(std::string path) : output_path(std::move(path)) {
+    // Counters are registered by the subsystem that owns their taxonomy, not
+    // here: the TU cache derives its decision names from the status enum, so a
+    // second hand-maintained copy of them in this file could only ever drift
+    // out of it (it did: it spelled the `missing` decision "miss", a field no
+    // code ever incremented).
     for (const std::string_view name : kTimingNames) {
       timings.emplace(name, 0.0);
-    }
-    for (const std::string_view name : kTuCacheCounterNames) {
-      counters.emplace(name, 0);
     }
   }
 

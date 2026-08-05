@@ -91,11 +91,18 @@ ATTRIBUTION_EXPERIMENTS = {
         "profile_fields": [
             "summary.timings.tu_fact_cache.replay",
             "summary.timings.tu_fact_cache.extraction_rebuild",
+            # Decision names come from the TuFactCacheStatus taxonomy; the
+            # miss decision is spelled "missing" there, and this manifest is
+            # the published telemetry contract, so it has to agree.
             "summary.counters.tu_fact_cache.hit",
-            "summary.counters.tu_fact_cache.miss",
+            "summary.counters.tu_fact_cache.missing",
             "summary.counters.tu_fact_cache.stale",
             "summary.counters.tu_fact_cache.corrupt",
             "summary.counters.tu_fact_cache.incompatible",
+            "summary.counters.tu_fact_cache.partial",
+            "summary.counters.tu_fact_cache.truncated",
+            "summary.counters.tu_fact_cache.untrusted",
+            "summary.counters.tu_fact_cache.unavailable",
             "summary.counters.tu_fact_cache.incomplete_evidence",
             "summary.counters.tu_fact_cache.parser_calls_avoided",
             "summary.counters.tu_fact_cache.replay_bytes",

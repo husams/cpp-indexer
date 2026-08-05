@@ -75,14 +75,11 @@ public:
   Impl(cidx::Storage &db, ast::IndexSession &session,
        TuFactCacheOptions options)
       : db_(&db), session_(&session), options_(std::move(options)) {
+    // Also registered here so a profiled run that ends up indexing nothing
+    // still publishes the decision taxonomy at zero.
     register_counters();
     if (options_.enabled) {
       cache_.emplace(db, options_.artifact_root);
-      // One reclamation pass per run, before anything is published: replaced,
-      // unleased, unpinned objects from earlier runs are the cache's only
-      // growth source, and reporting the count here is what makes retention
-      // observable in a benchmark profile.
-      profile::add_counter("tu_fact_cache.evictions", cache_->recover());
     }
   }
 
@@ -90,6 +87,12 @@ public:
                  bool graph_enabled, ast::IndexFailurePoint failure,
                  bool no_front_end_reuse) -> ast::IndexOneOutcome {
     decision_ = {};
+    // Registered per translation unit rather than in the constructor: a
+    // profiling session may start after this object is built, and a taxonomy
+    // that exists only when the construction order happens to be right is not
+    // a contract a report can be read against.
+    register_counters();
+    reclaim_once();
     // A deliberately injected engine failure exercises the extraction
     // pipeline; routing it through the cache would test the wrong thing.
     if (!cache_ || failure != ast::IndexFailurePoint::none) {
@@ -109,8 +112,16 @@ public:
     if (replayed) {
       return *replayed;
     }
-    ast::IndexOneOutcome outcome = ast::run_index_one(
-        *db_, *session_, rec, path, graph_enabled, failure, no_front_end_reuse);
+    // What the miss cost: the extraction the cache could not avoid. Reported
+    // next to tu_fact_cache.replay so a benchmark can state replay-vs-rebuild
+    // cost instead of inferring it.
+    double rebuild_seconds = 0.0;
+    ast::IndexOneOutcome outcome = [&] {
+      const profile::ScopedAccumulator rebuild(rebuild_seconds);
+      return ast::run_index_one(*db_, *session_, rec, path, graph_enabled,
+                                failure, no_front_end_reuse);
+    }();
+    profile::add_timing("tu_fact_cache.extraction_rebuild", rebuild_seconds);
     publish(cache, path, outcome);
     return outcome;
   }
@@ -180,6 +191,17 @@ private:
           "tu_dependency.fallbacks"}) {
       profile::add_counter(name, 0);
     }
+  }
+
+  // One reclamation pass per indexer: replaced, unleased, unpinned objects
+  // from earlier runs are the cache's only growth source, and reporting the
+  // count is what makes retention observable in a benchmark profile.
+  void reclaim_once() {
+    if (reclaimed_ || !cache_) {
+      return;
+    }
+    reclaimed_ = true;
+    profile::add_counter("tu_fact_cache.evictions", cache_->recover());
   }
 
   struct ValidatedIdentity {
@@ -347,8 +369,15 @@ private:
                        storage::DependencyFallbackReason::incomplete_evidence,
                        "cache object did not validate");
     }
-    std::optional<ast::IndexOneOutcome> outcome =
-        replay(rec, path, inputs, lookup);
+    double replay_seconds = 0.0;
+    std::optional<ast::IndexOneOutcome> outcome;
+    {
+      const profile::ScopedAccumulator elapsed(replay_seconds);
+      outcome = replay(rec, path, inputs, lookup);
+    }
+    // Timed whether or not it succeeded: a replay that rolls back still spent
+    // the time, and hiding that would flatter the cache.
+    profile::add_timing("tu_fact_cache.replay", replay_seconds);
     if (!outcome) {
       // The replay transaction rolled back; the translation unit is untouched
       // and extraction below is what makes it current.
@@ -596,7 +625,11 @@ private:
     decision_.reason = std::move(reason);
     decision_.parser_invoked = true;
     profile::add_counter(counter_name(status));
-    if (fallback != storage::DependencyFallbackReason::none) {
+    // A slot that has never been published is not a fallback: nothing was
+    // reused conservatively, there was simply nothing there. Counting it as
+    // one would make every cold run look like a cache in trouble.
+    if (fallback != storage::DependencyFallbackReason::none &&
+        fallback != storage::DependencyFallbackReason::missing_generation) {
       profile::add_counter("tu_fact_cache.fallbacks");
     }
     if (fallback == storage::DependencyFallbackReason::incomplete_evidence ||
@@ -613,6 +646,7 @@ private:
   std::optional<ast::TranslationUnitCacheInputs> inputs_;
   std::unordered_map<std::string, std::optional<std::string>> digests_;
   bool graph_enabled_ = true;
+  bool reclaimed_ = false;
   TuCacheDecision decision_;
   std::string replay_error_;
 };

@@ -13,6 +13,7 @@
 #include "util/files.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -171,14 +172,35 @@ private:
   int runs_ = 0;
 };
 
-auto counter(const std::string &profile, std::string_view name)
-    -> std::optional<std::int64_t> {
+// Matches the whole JSON key, so "tu_fact_cache.miss" cannot be answered by
+// the "tu_fact_cache.missing" field that contains it as a prefix.
+auto field(const std::string &profile, std::string_view name)
+    -> std::optional<std::string> {
   const std::string key = '"' + std::string(name) + "\": ";
   const std::size_t at = profile.find(key);
   if (at == std::string::npos) {
     return std::nullopt;
   }
-  return std::stoll(profile.substr(at + key.size()));
+  const std::size_t start = at + key.size();
+  return profile.substr(start, profile.find_first_of(",\n", start) - start);
+}
+
+auto counter(const std::string &profile, std::string_view name)
+    -> std::optional<std::int64_t> {
+  const std::optional<std::string> value = field(profile, name);
+  if (!value) {
+    return std::nullopt;
+  }
+  return std::stoll(*value);
+}
+
+auto timing(const std::string &profile, std::string_view name)
+    -> std::optional<double> {
+  const std::optional<std::string> value = field(profile, name);
+  if (!value) {
+    return std::nullopt;
+  }
+  return std::stod(*value);
 }
 
 } // namespace
@@ -194,6 +216,10 @@ TEST_CASE("a validated cache entry replays without invoking the parser") {
   // A cold run reports its decision classes at zero rather than omitting
   // them, so "no hits" is readable from the profile (AC #1382).
   CHECK(counter(first.profile, "tu_fact_cache.missing") == 1);
+  // The decision taxonomy has exactly one spelling. A second, hand-maintained
+  // copy of these names once spelled this one "miss", which no code ever
+  // incremented, so every published profile carried a permanently dead field.
+  CHECK_FALSE(field(first.profile, "tu_fact_cache.miss").has_value());
   CHECK(counter(first.profile, "tu_fact_cache.hit") == 0);
   CHECK(counter(first.profile, "tu_fact_cache.parser_calls_avoided") == 0);
   CHECK(counter(first.profile, "tu_fact_cache.evictions") == 0);
@@ -211,6 +237,11 @@ TEST_CASE("a validated cache entry replays without invoking the parser") {
   CHECK(counter(second.profile, "root_traverse_decl_calls") == 0);
   CHECK(counter(second.profile, "tu_fact_cache.hit") == 1);
   CHECK(counter(second.profile, "tu_fact_cache.parser_calls_avoided") == 1);
+  // Rebuild cost is only comparable if both sides are actually measured.
+  CHECK(timing(second.profile, "tu_fact_cache.replay") > 0.0);
+  CHECK(timing(second.profile, "tu_fact_cache.extraction_rebuild") == 0.0);
+  CHECK(timing(first.profile, "tu_fact_cache.extraction_rebuild") > 0.0);
+  CHECK(timing(first.profile, "tu_fact_cache.replay") == 0.0);
   // AC #1370/#1377: the replay republishes the same facts, and the observable
   // per-file counters the product surfaces print are preserved.
   CHECK(second.facts == first.facts);
@@ -219,6 +250,9 @@ TEST_CASE("a validated cache entry replays without invoking the parser") {
   CHECK(second.stored == first.stored);
   CHECK(second.headers.indexed == first.headers.indexed);
   CHECK(second.headers.symbols == first.headers.symbols);
+  CHECK(second.headers.already == first.headers.already);
+  CHECK(second.headers.system == first.headers.system);
+  CHECK(second.headers.unowned == first.headers.unowned);
 }
 
 TEST_CASE(
@@ -336,6 +370,22 @@ TEST_CASE("a symlinked path is a different identity, never a silent hit") {
     // own slot instead of silently reusing another path's facts.
     CHECK(indexer.last_decision().action != app::TuCacheAction::replayed);
   }
+  {
+    // ...and that own slot is a real one: the second run through the link
+    // replays, so the miss above was isolation, not a permanently dead entry.
+    cidx::Storage db(workspace.database().string());
+    const std::optional<cidx::File> file = db.get_file(linked_source.string());
+    REQUIRE(file.has_value());
+    ast::IndexSession session(db);
+    app::TuFactCacheIndexer indexer(
+        db, session,
+        {.enabled = true,
+         .artifact_root = workspace.artifacts().string(),
+         .fault = app::TuCacheFaultInjection::none});
+    static_cast<void>(indexer.index_one(*file, linked_source.string(), true,
+                                        ast::IndexFailurePoint::none, false));
+    CHECK(indexer.last_decision().action == app::TuCacheAction::replayed);
+  }
 }
 
 TEST_CASE("deleting the sidecar forces re-extraction and keeps index.db "
@@ -364,10 +414,12 @@ TEST_CASE("a corrupt sidecar object is a miss, not a hit") {
   const RunResult first = workspace.index();
   REQUIRE(first.decision.action == app::TuCacheAction::extracted_and_published);
 
+  // Every published object is damaged; there is nothing to skip, because the
+  // manifest is a table inside index.db (ADR-016), not a file in this tree.
   std::size_t damaged = 0;
   for (const auto &entry :
        std::filesystem::recursive_directory_iterator(workspace.artifacts())) {
-    if (!entry.is_regular_file() || entry.path().filename() == "manifest.db") {
+    if (!entry.is_regular_file() || entry.path().extension() != ".db") {
       continue;
     }
     std::ofstream output(entry.path(), std::ios::binary | std::ios::trunc);
@@ -396,6 +448,7 @@ TEST_CASE("a failing replay rolls back and falls back to extraction") {
   const RunResult decode_failure =
       workspace.index(false, app::TuCacheFaultInjection::decode_failure);
   CHECK(decode_failure.decision.action != app::TuCacheAction::replayed);
+  CHECK(decode_failure.decision.parser_invoked);
   CHECK(decode_failure.facts == first.facts);
 }
 
@@ -439,6 +492,128 @@ TEST_CASE("a --no-graph run does not consume a graph-enabled entry") {
   // The cached batch carries graph facts this run must not publish, so the
   // extraction policy belongs to the identity.
   CHECK(indexer.last_decision().action != app::TuCacheAction::replayed);
+  // The --no-graph run gets its own entry rather than being permanently
+  // uncacheable.
+  static_cast<void>(indexer.index_one(*file, workspace.main_source().string(),
+                                      false, ast::IndexFailurePoint::none,
+                                      false));
+  CHECK(indexer.last_decision().action == app::TuCacheAction::replayed);
+}
+
+TEST_CASE("a conditionally included header participates in invalidation") {
+  Workspace workspace("conditional");
+  const std::filesystem::path extra = workspace.component() / "extra.h";
+  Workspace::write(extra,
+                   "#pragma once\ninline int extra_value() { return 5; }\n");
+  Workspace::write(workspace.main_source(),
+                   "#include \"api.h\"\n"
+                   "#if FEATURE_LEVEL >= 2\n"
+                   "#include \"extra.h\"\n"
+                   "#endif\n"
+                   "int main_entry() { return api_value(); }\n");
+  Workspace::write(workspace.generated_header(),
+                   "static const int kApiValue = 1;\n"
+                   "#define FEATURE_LEVEL 1\n");
+  REQUIRE(workspace.index().decision.action ==
+          app::TuCacheAction::extracted_and_published);
+  REQUIRE(workspace.index().decision.action == app::TuCacheAction::replayed);
+
+  // Turning the condition on opens a header the previous entry never saw.
+  Workspace::write(workspace.generated_header(),
+                   "static const int kApiValue = 1;\n"
+                   "#define FEATURE_LEVEL 2\n");
+  CHECK(workspace.index().decision.action ==
+        app::TuCacheAction::extracted_and_published);
+  REQUIRE(workspace.index().decision.action == app::TuCacheAction::replayed);
+  {
+    cidx::Storage db(workspace.database().string());
+    cidx::storage::TuFactCache cache(db, workspace.artifacts().string());
+    bool recorded = false;
+    bool conditional = false;
+    for (const auto &evidence : cache.dependency_evidence()) {
+      for (const auto &edge : evidence.edges) {
+        if (edge.destination != extra.string()) {
+          continue;
+        }
+        recorded = true;
+        conditional = conditional || !edge.conditional_context.empty();
+      }
+    }
+    // The edge is recorded together with the conditional region that opened
+    // it, which is what lets the reverse planner reach this TU from the
+    // header without re-parsing.
+    CHECK(recorded);
+    CHECK(conditional);
+  }
+
+  // Editing the conditionally included header now invalidates the entry: the
+  // dependency set the entry was built over really does include it.
+  Workspace::write(extra,
+                   "#pragma once\ninline int extra_value() { return 6; }\n");
+  const RunResult edited = workspace.index();
+  CHECK(edited.decision.action != app::TuCacheAction::replayed);
+  CHECK(edited.decision.status == cidx::storage::TuFactCacheStatus::stale);
+}
+
+TEST_CASE("an object that no longer matches its manifest is a miss") {
+  Workspace workspace("manifest_divergence");
+  const RunResult first = workspace.index();
+  REQUIRE(first.decision.action == app::TuCacheAction::extracted_and_published);
+
+  // The manifest is a table in index.db, not a file here, so the way to make
+  // the two disagree is to change the object behind its recorded size/digest
+  // while leaving both the manifest row and the file present.
+  std::size_t altered = 0;
+  for (const auto &entry :
+       std::filesystem::recursive_directory_iterator(workspace.artifacts())) {
+    if (!entry.is_regular_file() || entry.path().extension() != ".db") {
+      continue;
+    }
+    std::ofstream output(entry.path(), std::ios::binary | std::ios::app);
+    output << "trailing bytes the manifest never recorded";
+    ++altered;
+  }
+  REQUIRE(altered > 0);
+
+  const RunResult after = workspace.index();
+  CHECK(after.decision.action != app::TuCacheAction::replayed);
+  CHECK(after.decision.parser_invoked);
+  CHECK(after.facts == first.facts);
+  CHECK(after.file_current);
+}
+
+TEST_CASE("evidence published as incomplete is never replayed") {
+  Workspace workspace("incomplete_evidence");
+  const RunResult published =
+      workspace.index(false, app::TuCacheFaultInjection::incomplete_evidence);
+  REQUIRE(published.decision.action ==
+          app::TuCacheAction::extracted_and_published);
+  // The entry exists and its payload is intact; only its dependency evidence
+  // is marked incomplete, and that alone must keep it from ever being used.
+  const RunResult after = workspace.index();
+  CHECK(after.decision.action != app::TuCacheAction::replayed);
+  CHECK(after.decision.parser_invoked);
+  CHECK(after.facts == published.facts);
+}
+
+TEST_CASE("touching a source without changing it still replays") {
+  Workspace workspace("mtime_only");
+  const RunResult first = workspace.index();
+  REQUIRE(first.decision.action == app::TuCacheAction::extracted_and_published);
+
+  // AC #1375: main-file timestamp tracking is not the validity contract, so a
+  // rebuild, a checkout, or a restored backup that leaves content identical
+  // must still be served from the cache.
+  const auto later = std::filesystem::last_write_time(workspace.main_source()) +
+                     std::chrono::hours(1);
+  std::filesystem::last_write_time(workspace.main_source(), later);
+  std::filesystem::last_write_time(workspace.api_header(), later);
+  std::filesystem::last_write_time(workspace.generated_header(), later);
+
+  const RunResult touched = workspace.index();
+  CHECK(touched.decision.action == app::TuCacheAction::replayed);
+  CHECK_FALSE(touched.decision.parser_invoked);
+  CHECK(touched.facts == first.facts);
 }
 
 TEST_CASE("the cache can be turned off and indexing is unchanged") {
