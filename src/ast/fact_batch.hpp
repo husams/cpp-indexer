@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <functional>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -76,6 +75,37 @@ struct FileFactPartition {
   std::map<FactFamily, std::vector<std::size_t>> members;
 };
 
+// A cross-translation-unit symbol identity that extraction could not answer
+// from the facts it produced itself.
+//
+// Extraction records the question against a batch handle rather than reading
+// the authoritative database mid-parse: the answer depends on what other
+// translation units have published, so resolving it during extraction makes
+// identity a function of parse timing. The controlled writer answers it at
+// publication instead, where batches are applied serially in the legacy apply
+// order, which makes the answer a function of that order alone.
+//
+// A reference that still does not resolve at publication is not an error: it
+// is the deferred form of the serial lookup returning nothing, and the facts
+// that depend on it are dropped exactly as the serial visitor never emitted
+// them.
+struct PendingSymbolReference {
+  std::int64_t handle = 0;
+  std::string usr;
+  // Empty when the probe was source-independent.
+  std::string identity_source;
+  std::string semantic_universe;
+  std::string translation_unit;
+
+  [[nodiscard]] auto stable_string() const -> std::string;
+  // clang-format off
+  // clang-format 22 rewrites `operator<=>` to `operator<= >`, which does not
+  // compile; this is a formatter defect, not a style choice.
+  friend auto operator<=>(const PendingSymbolReference &,
+                          const PendingSymbolReference &) = default;
+  // clang-format on
+};
+
 class FactBatch {
 public:
   FactBatch();
@@ -97,6 +127,8 @@ public:
       -> const std::map<std::int64_t, std::string> &;
   [[nodiscard]] auto file_keys() const
       -> const std::map<std::int64_t, FactPartitionKey> &;
+  [[nodiscard]] auto pending_symbol_references() const
+      -> const std::vector<PendingSymbolReference> &;
 
 private:
   struct Data {
@@ -111,6 +143,7 @@ private:
     std::map<std::int64_t, std::string> type_keys;
     std::map<std::int64_t, std::string> definition_keys;
     std::map<std::int64_t, FactPartitionKey> file_keys;
+    std::vector<PendingSymbolReference> pending_symbol_references;
   };
 
   explicit FactBatch(std::shared_ptr<const Data> data);
@@ -175,16 +208,26 @@ class FactBatchRecorder final : public SymbolFactEmitter,
                                 public PresentationNormalizer,
                                 public PresentationIntentEmitter {
 public:
-  using PersistentSymbolLookup = std::function<std::optional<SymbolRecord>(
-      const std::string &, const std::optional<std::string> &,
-      const FactPartitionKey &)>;
+  // Cross-translation-unit identity resolution deferred to the controlled
+  // writer. With this enabled the recorder answers an unresolved lookup with a
+  // batch handle and a recorded PendingSymbolReference, and performs no
+  // database access of any kind.
+  struct DeferredExternalIdentity {
+    bool enabled = false;
+    // The main file of the translation unit being extracted, in the identity
+    // spelling the visitors use. The database-backed lookup deliberately
+    // refused to answer for this unit's own declarations -- a previous
+    // publication of the unit being replaced is stale input, not an external
+    // identity oracle -- and deferral preserves that refusal without a read.
+    std::string translation_unit_path;
+  };
 
   explicit FactBatchRecorder(std::string producer = {},
                              const CollisionSafeHandleIndex::Hasher
                                  &primary_hasher = stable_fact_hash);
 
   void set_completeness(FactCompleteness completeness);
-  void set_persistent_symbol_lookup(PersistentSymbolLookup lookup);
+  void set_deferred_external_identity(DeferredExternalIdentity deferral);
   void set_partition(
       FactPartitionKey partition,
       std::optional<std::int64_t> transient_file_handle = std::nullopt);
@@ -302,6 +345,14 @@ private:
   create_minted_symbol(const MintRequest &request,
                        const std::optional<std::string> &source)
       -> std::int64_t;
+  [[nodiscard]] auto
+  defer_external_symbol(const std::string &usr,
+                        const std::optional<std::string> &source)
+      -> std::optional<std::int64_t>;
+  [[nodiscard]] auto
+  resolve_symbol_id(const std::string &usr,
+                    const std::optional<std::string> &identity_source,
+                    bool allow_deferral) -> std::optional<std::int64_t>;
   [[nodiscard]] static auto edge_key(const EdgeRecord &edge) -> std::string;
   [[nodiscard]] auto build_batch(bool canonical) const -> FactBatch;
   void append_symbol_records(FactBatch::Data &data, Memberships &memberships,
@@ -344,7 +395,9 @@ private:
   CollisionSafeHandleIndex type_handles_;
   CollisionSafeHandleIndex definition_handles_;
   CollisionSafeHandleIndex file_handles_;
-  PersistentSymbolLookup persistent_symbol_lookup_;
+  DeferredExternalIdentity deferred_external_identity_;
+  std::vector<PendingSymbolReference> pending_symbol_references_;
+  std::unordered_map<std::string, std::int64_t> external_ids_by_key_;
   std::unordered_map<std::string, std::int64_t> symbol_ids_by_source_usr_;
   std::unordered_map<std::string, std::set<std::int64_t>>
       symbol_ids_by_scope_usr_;

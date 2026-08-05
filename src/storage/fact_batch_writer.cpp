@@ -252,6 +252,11 @@ CREATE TEMP TABLE IF NOT EXISTS cidx_batch_symbol(
 CREATE TEMP TABLE IF NOT EXISTS cidx_batch_symbol_map(
   batch INTEGER NOT NULL, handle INTEGER NOT NULL, symbol_id INTEGER NOT NULL,
   PRIMARY KEY(batch, handle));
+CREATE TEMP TABLE IF NOT EXISTS cidx_batch_external_ref(
+  batch INTEGER NOT NULL, handle INTEGER NOT NULL, universe_id INTEGER NOT NULL,
+  usr TEXT NOT NULL, local_key TEXT, portable_key TEXT NOT NULL,
+  local_prefix TEXT,
+  PRIMARY KEY(batch, handle));
 CREATE TEMP TABLE IF NOT EXISTS cidx_batch_type(
   batch INTEGER NOT NULL, ordinal INTEGER NOT NULL, handle INTEGER NOT NULL,
   type_key TEXT NOT NULL, spelling TEXT NOT NULL, kind INTEGER NOT NULL,
@@ -302,22 +307,23 @@ CREATE TEMP TABLE IF NOT EXISTS cidx_batch_aux(
   PRIMARY KEY(batch,family,ordinal));
 )SQL";
   database.exec(schema);
-  // 13 statements are compiled and stepped on every call: CREATE TEMP TABLE IF
+  // 14 statements are compiled and stepped on every call: CREATE TEMP TABLE IF
   // NOT EXISTS is a semantic no-op once the table exists, but SQLite still
   // prepares and runs each one, so counting them every publication is the
   // truthful figure, not an inflation.
-  report.statements_prepared += 13;
-  report.statement_executions += 13;
+  report.statements_prepared += 14;
+  report.statement_executions += 14;
 }
 
 void clear_temporary_rows(SqliteDb &database, FactBatchWriterReport &report,
                           std::int64_t batch_token) {
   for (const std::string_view table :
        {"cidx_batch_file_map", "cidx_batch_symbol", "cidx_batch_symbol_map",
-        "cidx_batch_type", "cidx_batch_type_map", "cidx_batch_relation",
-        "cidx_batch_relation_map", "cidx_batch_definition",
-        "cidx_batch_definition_map", "cidx_batch_edge_site",
-        "cidx_batch_call_arg", "cidx_batch_diagnostic", "cidx_batch_aux"}) {
+        "cidx_batch_external_ref", "cidx_batch_type", "cidx_batch_type_map",
+        "cidx_batch_relation", "cidx_batch_relation_map",
+        "cidx_batch_definition", "cidx_batch_definition_map",
+        "cidx_batch_edge_site", "cidx_batch_call_arg", "cidx_batch_diagnostic",
+        "cidx_batch_aux"}) {
     auto statement = prepare_statement(
         database, report,
         "DELETE FROM temp." + std::string(table) + " WHERE batch = ?");
@@ -503,6 +509,65 @@ void load_symbols(cidx::SqliteStorageService &storage, SqliteDb &database,
   rows.staged += ordinal;
   result.report.statement_executions += ordinal;
   result.report.statements_reused += ordinal > 0 ? ordinal - 1 : 0;
+  note_statement_stats(result.report, insert);
+}
+
+// Stages the cross-translation-unit identity questions extraction deferred.
+// The two candidate keys are exactly the two
+// SqliteStorageService::lookup_symbol probes -- the translation-unit-local key
+// first, then the portable one -- so the answer the writer computes here is the
+// answer the serial in-parse lookup computed, moved to the one place that owns
+// the database.
+void load_external_references(cidx::SqliteStorageService &storage,
+                              SqliteDb &database, FactBatchWriterResult &result,
+                              const ast::FactBatch &batch, std::int64_t token) {
+  if (batch.pending_symbol_references().empty()) {
+    return;
+  }
+  auto insert = prepare_statement(
+      database, result.report,
+      "INSERT OR IGNORE INTO temp.cidx_batch_external_ref("
+      "batch,handle,universe_id,usr,local_key,portable_key,local_prefix) "
+      "VALUES (?,?,?,?,?,?,?)");
+  std::uint64_t staged = 0;
+  for (const ast::PendingSymbolReference &reference :
+       batch.pending_symbol_references()) {
+    const std::string universe_key = reference.semantic_universe;
+    const std::int64_t universe_id = universe_id_for(storage, universe_key);
+    insert.bind(1, token);
+    insert.bind(2, reference.handle);
+    insert.bind(3, universe_id);
+    insert.bind(4, std::string_view(reference.usr));
+    const bool scoped = !reference.identity_source.empty() &&
+                        !reference.translation_unit.empty();
+    const std::string local_prefix =
+        universe_key + '\x1f' + "local:" + reference.translation_unit + '\x1f';
+    const std::string local_key =
+        scoped ? local_prefix +
+                     storage.portable_source_identity_for_path(
+                         reference.identity_source) +
+                     '\x1f' + reference.usr
+               : std::string{};
+    if (scoped) {
+      insert.bind(5, std::string_view(local_key));
+    } else {
+      insert.bind_null(5);
+    }
+    const std::string portable_key = universe_key + '\x1f' + reference.usr;
+    insert.bind(6, std::string_view(portable_key));
+    if (!scoped && !reference.translation_unit.empty()) {
+      insert.bind(7, std::string_view(local_prefix));
+    } else {
+      insert.bind_null(7);
+    }
+    insert.step_done();
+    ++staged;
+    if (staged != batch.pending_symbol_references().size()) {
+      insert.reset();
+    }
+  }
+  result.report.statement_executions += staged;
+  result.report.statements_reused += staged > 0 ? staged - 1 : 0;
   note_statement_stats(result.report, insert);
 }
 
@@ -1126,6 +1191,44 @@ void reject_stale_cleanup_intents(const ast::FactBatch &batch,
   }
 }
 
+// Answers the deferred cross-translation-unit identity questions against the
+// database this writer alone owns, and binds each answer to the batch handle
+// extraction issued. It runs after apply_symbols so a reference can also bind
+// to a symbol this very batch published, and before every consumer of
+// cidx_batch_symbol_map.
+//
+// The four probes reproduce SqliteStorageService::lookup_symbol in order:
+// the translation-unit-local identity key, the portable one, and -- for a
+// source-independent question -- the unique row scoped to this translation
+// unit, then the unique row for the USR. A question with no unique answer
+// stays unbound, which is the deferred form of the serial lookup returning
+// nothing.
+void resolve_external_references(SqliteDb &database,
+                                 FactBatchWriterResult &result,
+                                 std::int64_t token) {
+  auto resolve = prepare_statement(
+      database, result.report,
+      "INSERT OR IGNORE INTO temp.cidx_batch_symbol_map(batch,handle,symbol_id)"
+      " SELECT batch,handle,symbol_id FROM (SELECT x.batch AS batch,"
+      "x.handle AS handle,COALESCE("
+      "(SELECT s.id FROM symbol s WHERE x.local_key IS NOT NULL AND "
+      "s.semantic_universe_id=x.universe_id AND s.identity_key=x.local_key),"
+      "(SELECT s.id FROM symbol s WHERE x.local_key IS NOT NULL AND "
+      "s.semantic_universe_id=x.universe_id AND s.identity_key=x.portable_key),"
+      "(SELECT MIN(s.id) FROM symbol s WHERE x.local_prefix IS NOT NULL AND "
+      "s.semantic_universe_id=x.universe_id AND s.usr=x.usr AND "
+      "substr(s.identity_key,1,length(x.local_prefix))=x.local_prefix "
+      "HAVING COUNT(*)=1),"
+      "(SELECT MIN(s.id) FROM symbol s WHERE x.local_key IS NULL AND "
+      "s.semantic_universe_id=x.universe_id AND s.usr=x.usr HAVING COUNT(*)=1)"
+      ") AS symbol_id FROM temp.cidx_batch_external_ref x WHERE x.batch=?) "
+      "WHERE symbol_id IS NOT NULL");
+  resolve.bind(1, token);
+  resolve.step_done();
+  note_statement_stats(result.report, resolve);
+  ++result.report.statement_executions;
+}
+
 void apply_lifecycle_cleanup(SqliteDb &database, FactBatchWriterResult &result,
                              std::int64_t token) {
   const std::string cleanup =
@@ -1334,13 +1437,23 @@ void apply_relations(SqliteDb &database, FactBatchWriterResult &result,
   note_statement_stats(result.report, map);
   ++result.report.statement_executions;
 
+  // Every endpoint minted by this extraction must resolve; that invariant is
+  // what makes a silent join miss a bug rather than a data-dependent drop.
+  // A deferred cross-translation-unit reference is the one endpoint allowed
+  // not to resolve: the serial lookup answered the same question with nothing
+  // and the visitor then never emitted the edge, so dropping it here is that
+  // same outcome reached one stage later.
   auto unresolved = prepare_statement(
       database, result.report,
       "SELECT r.src_handle,r.dst_handle FROM temp.cidx_batch_relation r "
       "LEFT JOIN temp.cidx_batch_symbol_map src ON src.batch=r.batch AND "
       "src.handle=r.src_handle LEFT JOIN temp.cidx_batch_symbol_map dst ON "
       "dst.batch=r.batch AND dst.handle=r.dst_handle WHERE r.batch=? AND "
-      "(src.symbol_id IS NULL OR dst.symbol_id IS NULL) LIMIT 1");
+      "((src.symbol_id IS NULL AND NOT EXISTS(SELECT 1 FROM "
+      "temp.cidx_batch_external_ref x WHERE x.batch=r.batch AND "
+      "x.handle=r.src_handle)) OR (dst.symbol_id IS NULL AND NOT EXISTS("
+      "SELECT 1 FROM temp.cidx_batch_external_ref x WHERE x.batch=r.batch AND "
+      "x.handle=r.dst_handle))) LIMIT 1");
   unresolved.bind(1, token);
   if (unresolved.step()) {
     throw StorageError("relation endpoint did not resolve: " +
@@ -2547,6 +2660,7 @@ auto FactBatchWriter::apply(const ast::FactBatch &batch,
     clear_temporary_rows(database, result.report, token);
     load_file_map(database, result, batch, context, token);
     load_symbols(storage_, database, result, batch, token);
+    load_external_references(storage_, database, result, batch, token);
     load_types(database, result, batch, token);
     load_definitions(database, result, batch, token);
     load_relations(database, result, batch, token);
@@ -2559,6 +2673,7 @@ auto FactBatchWriter::apply(const ast::FactBatch &batch,
     reject_stale_cleanup_intents(batch, context);
     apply_lifecycle_cleanup(database, result, token);
     apply_symbols(database, result, token);
+    resolve_external_references(database, result, token);
     apply_types(database, result, token);
     apply_definitions(database, result, token);
     inject(context.failure, FactBatchWriterFailurePoint::entity_apply);

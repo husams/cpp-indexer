@@ -347,8 +347,8 @@ void write_profile(Session::Impl &impl) {
     if (name.starts_with("index_session.") ||
         name.starts_with("front_end_reuse.") ||
         name.starts_with("tu_fact_cache.") ||
-        name.starts_with("tu_dependency.") ||
-        name.starts_with("transform.") ||
+        name.starts_with("tu_dependency.") || name.starts_with("transform.") ||
+        name.starts_with("parallel.") ||
         name.starts_with("fact_batch_writer.")) {
       output << "      " << json_string(name) << ": " << value << ",\n";
     }

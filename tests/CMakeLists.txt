@@ -122,6 +122,17 @@ set_tests_properties(front_end_reuse_parse_test PROPERTIES
 add_test(NAME front_end_reuse_probe_test COMMAND front_end_reuse_probe)
 set_tests_properties(front_end_reuse_probe_test PROPERTIES LABELS "clang")
 
+# S-074: the database end of bounded parallel extraction. It indexes a real
+# corpus twice -- serially, and in parallel with worker completion forced into
+# the reverse of the dispatch order -- so it performs real parses and carries
+# the "clang" label.
+add_executable(parallel_index_database_test parallel_index_database_test.cpp)
+target_compile_options(parallel_index_database_test PRIVATE -Wall -Wextra)
+target_link_libraries(parallel_index_database_test PRIVATE cidx_core)
+add_test(NAME parallel_index_database_test
+         COMMAND parallel_index_database_test)
+set_tests_properties(parallel_index_database_test PROPERTIES LABELS "clang")
+
 # The TU fact-cache integration suite runs real toolchain-resolved parses and
 # then proves the second run does not parse at all, so it carries the heavier
 # "clang" label rather than "default".

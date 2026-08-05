@@ -602,6 +602,16 @@ auto FactBatch::file_keys() const
   return data_->file_keys;
 }
 
+auto FactBatch::pending_symbol_references() const
+    -> const std::vector<PendingSymbolReference> & {
+  return data_->pending_symbol_references;
+}
+
+auto PendingSymbolReference::stable_string() const -> std::string {
+  return semantic_universe + '\x1f' + translation_unit + '\x1f' +
+         identity_source + '\x1f' + usr;
+}
+
 void FactBatchOperationCounters::note(std::string_view operation,
                                       std::uint64_t touched) {
   ++calls[std::string(operation)];
@@ -619,9 +629,9 @@ void FactBatchRecorder::set_completeness(FactCompleteness completeness) {
   completeness_ = completeness;
 }
 
-void FactBatchRecorder::set_persistent_symbol_lookup(
-    PersistentSymbolLookup lookup) {
-  persistent_symbol_lookup_ = std::move(lookup);
+void FactBatchRecorder::set_deferred_external_identity(
+    DeferredExternalIdentity deferral) {
+  deferred_external_identity_ = std::move(deferral);
 }
 
 void FactBatchRecorder::set_partition(
@@ -821,6 +831,12 @@ auto FactBatchRecorder::source_independent_symbol_id(std::string_view usr)
 auto FactBatchRecorder::lookup_symbol_id(
     const std::string &usr, const std::optional<std::string> &identity_source)
     -> std::optional<std::int64_t> {
+  return resolve_symbol_id(usr, identity_source, true);
+}
+
+auto FactBatchRecorder::resolve_symbol_id(
+    const std::string &usr, const std::optional<std::string> &identity_source,
+    bool allow_deferral) -> std::optional<std::int64_t> {
   const std::optional<std::string> source =
       identity_source && !identity_source->empty() ? identity_source
                                                    : std::nullopt;
@@ -857,16 +873,38 @@ auto FactBatchRecorder::lookup_symbol_id(
   if (const auto local = local_lookup()) {
     return local;
   }
-  if (!persistent_symbol_lookup_) {
+  return allow_deferral ? defer_external_symbol(usr, source) : std::nullopt;
+}
+
+auto FactBatchRecorder::defer_external_symbol(
+    const std::string &usr, const std::optional<std::string> &source)
+    -> std::optional<std::int64_t> {
+  if (!deferred_external_identity_.enabled) {
     return std::nullopt;
   }
-  const auto persisted =
-      persistent_symbol_lookup_(usr, source, current_partition_);
-  if (!persisted) {
+  // The database-backed lookup refused to answer from a previous publication
+  // of the unit being replaced. Deferral must refuse the same question, or a
+  // stale row would out-rank the declaration this extraction is about to emit.
+  if (source && *source == deferred_external_identity_.translation_unit_path) {
     return std::nullopt;
   }
-  emit(*persisted);
-  return local_lookup();
+  PendingSymbolReference reference{
+      .handle = 0,
+      .usr = usr,
+      .identity_source = source.value_or(std::string{}),
+      .semantic_universe = current_partition_.configuration.semantic_universe,
+      .translation_unit = current_partition_.configuration.translation_unit};
+  const std::string key = reference.stable_string();
+  if (const auto found = external_ids_by_key_.find(key);
+      found != external_ids_by_key_.end()) {
+    ++counters_.records_touched["defer_external_symbol"];
+    return found->second;
+  }
+  reference.handle = symbol_handles_.find_or_insert("external:" + key);
+  external_ids_by_key_.emplace(key, reference.handle);
+  pending_symbol_references_.push_back(std::move(reference));
+  counters_.note("defer_external_symbol");
+  return external_ids_by_key_.at(key);
 }
 
 void FactBatchRecorder::add_mint_declaration(
@@ -953,7 +991,7 @@ auto FactBatchRecorder::create_minted_symbol(
   symbol.identity_source = source;
   symbol.kind_name = request.kind_name;
   emit(symbol);
-  const auto created = lookup_symbol_id(request.usr, source);
+  const auto created = resolve_symbol_id(request.usr, source, false);
   if (!created) {
     throw std::logic_error("minted symbol is not indexed");
   }
@@ -963,7 +1001,12 @@ auto FactBatchRecorder::create_minted_symbol(
 auto FactBatchRecorder::mint_symbol(const MintRequest &request)
     -> std::int64_t {
   const std::optional<std::string> source = mint_identity_source(request);
-  if (const auto existing = lookup_symbol_id(request.usr, source)) {
+  // Minting never accepts a deferred cross-translation-unit reference. The
+  // caller is asking for a symbol record it can enrich and own; a deferred
+  // handle carries no record, so satisfying a mint with one would drop the
+  // authored declaration entirely. The mint is emitted instead and converges
+  // on the same database row at publication through its identity key.
+  if (const auto existing = resolve_symbol_id(request.usr, source, false)) {
     enrich_minted_symbol(*existing, request);
     return *existing;
   }
@@ -1331,6 +1374,10 @@ auto FactBatchRecorder::build_batch(bool canonical) const -> FactBatch {
   data->definition_keys = definition_handles_.entries();
   data->file_keys.insert(partitions_by_file_handle_.begin(),
                          partitions_by_file_handle_.end());
+  data->pending_symbol_references = pending_symbol_references_;
+  if (canonical) {
+    std::ranges::sort(data->pending_symbol_references);
+  }
   Memberships memberships;
   append_symbol_records(*data, memberships, canonical);
   append_type_records(*data, memberships, canonical);

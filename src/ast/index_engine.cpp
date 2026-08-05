@@ -237,67 +237,19 @@ public:
       : context_(context), state_(state), db_(*state.db),
         recorder_("production-index"), symbol_emitter_(recorder_),
         tu_(context.getTranslationUnitDecl()) {
-    recorder_.set_persistent_symbol_lookup(
-        [this](
-            const std::string &usr,
-            const std::optional<std::string> &identity_source,
-            const FactPartitionKey &partition) -> std::optional<SymbolRecord> {
-          const auto universe = db_.get_semantic_universe_by_key(
-              partition.configuration.semantic_universe);
-          if (!universe) {
-            return std::nullopt;
-          }
-          const auto symbol =
-              db_.lookup_symbol(usr, universe->id, identity_source,
-                                partition.configuration.translation_unit);
-          if (!symbol) {
-            return std::nullopt;
-          }
-          const std::string file =
-              symbol->file_id
-                  ? db_.file_abs_path(*symbol->file_id).value_or("")
-                  : identity_source.value_or(symbol->decl_path.value_or(""));
-          // A previous publication of the TU being replaced is stale input,
-          // not an external identity oracle. Its authored declaration will be
-          // emitted by this extraction and must remain authoritative (notably
-          // when an instantiation becomes an explicit specialization).
-          if (file == state_.path ||
-              (identity_source && *identity_source == state_.path)) {
-            return std::nullopt;
-          }
-          return SymbolRecord{
-              .file = file,
-              .usr = symbol->usr,
-              .spelling = symbol->spelling,
-              .kind = cidx_kind_int_from_name(symbol->kind),
-              .qual_name = symbol->qual_name,
-              .display_name = symbol->display_name,
-              .type_info = symbol->type_info,
-              .line = 0,
-              .col = 0,
-              .end_line = 0,
-              .end_col = 0,
-              .decl_path = symbol->decl_path,
-              .is_definition = false,
-              .is_pure = symbol->is_pure,
-              .is_static = symbol->is_static,
-              .is_instantiation = symbol->is_instantiation,
-              .callable_kind = symbol->callable_kind,
-              .template_origin = symbol->template_origin,
-              .template_form = symbol->template_form,
-              .linkage = symbol->linkage,
-              .access = symbol->access,
-              .parent_usr = symbol->parent_usr,
-              .const_value = symbol->const_value,
-              .resolved = false,
-              .semantic_universe = partition.configuration.semantic_universe,
-              .normalized_configuration =
-                  partition.configuration.normalized_configuration,
-              .identity_source = identity_source,
-              .identity_translation_unit =
-                  partition.configuration.translation_unit,
-              .kind_name = symbol->kind};
-        });
+    // Cross-translation-unit symbol identity is NOT resolved here. It used to
+    // be: a batch-local miss asked the authoritative database for the symbol
+    // mid-parse. That made identity depend on what other translation units had
+    // already published at that instant, and it held a SQLite read lock inside
+    // extraction, which under rollback journaling cannot coexist with the
+    // controlled writer's exclusive lock.
+    //
+    // The recorder now records the question against a batch handle and the
+    // controlled writer answers it at publication, in the legacy apply order.
+    // Extraction performs no database read of symbol identity at all, which is
+    // what makes bounded parallel extraction both possible and deterministic.
+    recorder_.set_deferred_external_identity(
+        {.enabled = true, .translation_unit_path = state_.path});
   }
 
   void run() {

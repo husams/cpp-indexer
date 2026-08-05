@@ -18,7 +18,9 @@
 
 namespace cidx::ast {
 
-inline constexpr std::uint32_t kFactBatchArtifactWireVersion = 2;
+// 3: carries the deferred cross-translation-unit symbol references a worker's
+// extraction could not answer, so a transferred artifact is self-describing.
+inline constexpr std::uint32_t kFactBatchArtifactWireVersion = 3;
 inline constexpr std::uint32_t kFactBatchPassVersion = 1;
 inline constexpr std::uint32_t kFactBatchExtractorVersion = 1;
 inline constexpr std::uint32_t kFactBatchStorageSchemaVersion = 40;

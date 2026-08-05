@@ -226,7 +226,7 @@ TEST_CASE("FactBatchWriter publishes the golden phase contract set-wise") {
   auto temporary = fixture.storage.raw_db().prepare(
       "SELECT COUNT(*) FROM sqlite_temp_schema WHERE name LIKE 'cidx_batch_%'");
   REQUIRE(temporary.step());
-  CHECK(temporary.col_int64(0) == 13);
+  CHECK(temporary.col_int64(0) == 14);
   auto persisted = fixture.storage.raw_db().prepare(
       "SELECT COUNT(*) FROM sqlite_schema WHERE name LIKE 'cidx_batch_%'");
   REQUIRE(persisted.step());

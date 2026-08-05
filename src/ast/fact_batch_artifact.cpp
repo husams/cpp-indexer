@@ -1141,6 +1141,43 @@ auto read_file_map(FactBatchArtifactInput &reader)
   return values;
 }
 
+// A worker-produced artifact must describe the identity questions its
+// extraction deferred, or the writer that replays it would silently publish a
+// batch whose cross-translation-unit endpoints can never bind.
+void write_pending_references(
+    BinaryWriter &writer,
+    const std::vector<PendingSymbolReference> &references) {
+  writer.u64(references.size());
+  for (const PendingSymbolReference &reference : references) {
+    writer.i64(reference.handle);
+    writer.string(reference.usr);
+    writer.string(reference.identity_source);
+    writer.string(reference.semantic_universe);
+    writer.string(reference.translation_unit);
+  }
+}
+
+auto read_pending_references(FactBatchArtifactInput &reader)
+    -> std::vector<PendingSymbolReference> {
+  const auto count = reader.count();
+  std::vector<PendingSymbolReference> references;
+  references.reserve(count);
+  for (std::uint64_t index = 0; index < count; ++index) {
+    PendingSymbolReference reference;
+    reference.handle = reader.i64();
+    reference.usr = reader.string();
+    reference.identity_source = reader.string();
+    reference.semantic_universe = reader.string();
+    reference.translation_unit = reader.string();
+    if (!references.empty() && !(references.back() < reference)) {
+      fail(FactBatchArtifactErrorCode::corrupt,
+           "FactBatch deferred symbol references are not canonically ordered");
+    }
+    references.push_back(std::move(reference));
+  }
+  return references;
+}
+
 void write_partitions(BinaryWriter &writer,
                       const std::vector<FileFactPartition> &partitions) {
   writer.u64(partitions.size());
@@ -1479,6 +1516,7 @@ public:
     write_string_map(writer, batch.type_keys());
     write_string_map(writer, batch.definition_keys());
     write_file_map(writer, batch.file_keys());
+    write_pending_references(writer, batch.pending_symbol_references());
 
     const auto digest = spool.digest_prefix();
     writer.bytes(kDigestMagic);
@@ -1522,6 +1560,7 @@ public:
     data->type_keys = read_string_map(reader);
     data->definition_keys = read_string_map(reader);
     data->file_keys = read_file_map(reader);
+    data->pending_symbol_references = read_pending_references(reader);
     if (reader.offset() != payload_size) {
       fail(FactBatchArtifactErrorCode::corrupt,
            "FactBatch artifact has unrecognized trailing payload bytes");
