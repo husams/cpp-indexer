@@ -49,6 +49,8 @@ constexpr auto kTimingNames = std::to_array<std::string_view>({
     "transforms",
     "verification",
     "identity_reconciliation",
+    "tu_fact_cache.replay",
+    "tu_fact_cache.extraction_rebuild",
     "sqlite_prepare",
     "sqlite_vdbe",
 });
@@ -152,6 +154,11 @@ struct Session::Impl {
   };
 
   explicit Impl(std::string path) : output_path(std::move(path)) {
+    // Counters are registered by the subsystem that owns their taxonomy, not
+    // here: the TU cache derives its decision names from the status enum, so a
+    // second hand-maintained copy of them in this file could only ever drift
+    // out of it (it did: it spelled the `missing` decision "miss", a field no
+    // code ever incremented).
     for (const std::string_view name : kTimingNames) {
       timings.emplace(name, 0.0);
     }
@@ -339,6 +346,8 @@ void write_profile(Session::Impl &impl) {
   for (const auto &[name, value] : impl.counters) {
     if (name.starts_with("index_session.") ||
         name.starts_with("front_end_reuse.") ||
+        name.starts_with("tu_fact_cache.") ||
+        name.starts_with("tu_dependency.") ||
         name.starts_with("transform.") ||
         name.starts_with("fact_batch_writer.")) {
       output << "      " << json_string(name) << ": " << value << ",\n";

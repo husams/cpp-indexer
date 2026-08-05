@@ -464,10 +464,14 @@ int cmd_index(const ParsedArgs &args, Context &ctx) {
     // snapshot, Toolchain, and semantic-configuration caches for every TU.
     const bool graph_enabled = !args.no_graph;
     ast::IndexSession session(db, log);
+    // The optional TU fact cache decides per translation unit whether the
+    // parse is needed at all; every failure mode falls back to extraction.
+    application::TuFactCacheIndexer indexer(
+        db, session, application::tu_fact_cache_options_from_environment());
     rc = !args.files.empty()
-             ? index_files(db, args.files, root, graph_enabled, session,
+             ? index_files(db, args.files, root, graph_enabled, indexer,
                            args.no_front_end_reuse, ctx)
-             : index_pending(db, graph_enabled, session,
+             : index_pending(db, graph_enabled, indexer,
                              args.no_front_end_reuse, ctx);
     if (rc == 0) {
       const bool current = all_files_current(db);

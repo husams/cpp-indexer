@@ -6,15 +6,7 @@
 # checker introduced by THIS chain of PRs (HSE-89) and therefore genuinely
 # absent from some earlier base commit: check.sh, check-conformance.sh,
 # check-sidecar-conformance.sh, check-proofs.sh, check-proofs-binding.sh,
-# check-gate-selection.sh, check-gate-selection-defense-regression.sh, and
-# check-protected-review.sh.
-#
-# check-protected-review.sh also uses this helper. Its first-introduction
-# bootstrap is fail-closed: the extracted checker requires an independent
-# current-head reviewer before accepting bootstrap, so extraction is never an
-# approval or a self-approval escape hatch. This does not make the first
-# introduction immutable: the helper and checker are both head-controlled
-# until external enforcement accepts the change.
+# check-gate-selection.sh, and check-gate-selection-defense-regression.sh.
 #
 # HSE-89 round-6 security fix (internal-critic + review): a bootstrap
 # fallback that falls back to the head copy on ANY nonzero
@@ -35,12 +27,6 @@
 # influence. The helper canonicalizes the destination and rejects any path
 # inside the checkout; verification.yml also pins every caller to
 # $RUNNER_TEMP, which check-verification-tamper-regression.sh checks.
-#
-# The protected-review checker also uses this helper. Its first-introduction
-# bootstrap is not an approval: check-protected-review.sh requires an
-# independent current-head reviewer before accepting the bootstrap path, but
-# external enforcement is still required because the new files are head-
-# controlled until they merge.
 #
 # Usage: extract-trusted-checker.sh <base-sha> <repo-relative-checker-path> <dest-path>
 # Prints, on success: TLA_TRUSTED_EXTRACT_STATUS=PASS mode=(base|bootstrap) ref=<base-sha-or-empty>

@@ -63,6 +63,15 @@ sequenceDiagram
 `ast::run_index_one` implements steps 4–10; the per-TU stages are the named
 methods of `TranslationUnitIndexer` ([ast](modules/ast.md)).
 
+Before parsing, the application-layer TU coordinator computes the versioned
+content identity from the normalized descriptor, front-end reuse identity, and
+the prior complete path-based dependency generation. A validated S-100
+FactBatch hit replays transactionally and bypasses Clang. A miss, changed input,
+or incomplete/corrupt dependency generation schedules the exact affected
+TU/configuration set, conservatively falling back to all candidates when proof
+is incomplete. Only successful replay or fresh extraction may update core
+currentness; optional cache state never does.
+
 ## The per-file interleave
 
 The ordering in steps 6–10 is **load-bearing**, not incidental:

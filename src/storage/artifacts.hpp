@@ -98,6 +98,8 @@ private:
 class ArtifactStore {
 public:
   using SidecarWriter = std::function<void(SqliteDb &)>;
+  using SidecarReader =
+      std::function<void(SqliteDb &, std::string_view attachment_name)>;
 
   explicit ArtifactStore(Storage &storage, std::filesystem::path root = {},
                          std::size_t max_attached = 8);
@@ -120,6 +122,7 @@ public:
                                   const IdentityMappingWriter &mapping_writer);
   [[nodiscard]] std::unique_ptr<ArtifactAttachment>
   attach_current(std::string_view logical_id);
+  void read_current(std::string_view logical_id, const SidecarReader &reader);
 
   void record_identity_mapping(std::string_view logical_id,
                                std::string_view local_identity,

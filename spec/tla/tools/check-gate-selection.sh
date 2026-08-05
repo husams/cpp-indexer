@@ -41,7 +41,7 @@
 # sidecar-publication flow -- IF that same PR also deletes or neuters the
 # matching run_case assertion below. verification.yml therefore extracts
 # THIS file from GITHUB_BASE_SHA and executes that copy, not the PR's own,
-# exactly as it already does for check-protected-review.sh. CIDX_REPO_ROOT
+# rather than the PR's own checkout. CIDX_REPO_ROOT
 # lets that extracted copy -- which no longer lives inside the repository
 # tree -- find the real checkout's spec/tla/ci-dependency-map.json and
 # spec/tla/tools/select-changed-gates.sh. Deliberately, those two files are

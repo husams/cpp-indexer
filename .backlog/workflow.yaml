@@ -213,6 +213,52 @@ transitions:
     action: review.submitted
     to: in_review
 
+  # Pull-request activity that is not the merge. Opening a pull request (draft
+  # or ready), pushing to it, marking it ready and reopening it all mean the
+  # same thing: there is delivery in flight, and it belongs under review. The
+  # GitHub mirror only records the event - this table, not the sync script,
+  # chooses the state, so a later push after an approval pulls the task back
+  # out of Accepted instead of being silently dropped.
+  - task_types: [story, bug, subtask]
+    from: created
+    action: pr.created
+    to: in_review
+
+  - task_types: [story, bug, subtask]
+    from: created
+    action: pr.updated
+    to: in_review
+
+  - task_types: [story, bug, subtask]
+    from: created
+    action: pr.marked_ready
+    to: in_review
+
+  - task_types: [story, bug, subtask]
+    from: created
+    action: pr.reopened
+    to: in_review
+
+  - task_types: [story, bug, subtask]
+    from: ready
+    action: pr.created
+    to: in_review
+
+  - task_types: [story, bug, subtask]
+    from: ready
+    action: pr.updated
+    to: in_review
+
+  - task_types: [story, bug, subtask]
+    from: ready
+    action: pr.marked_ready
+    to: in_review
+
+  - task_types: [story, bug, subtask]
+    from: ready
+    action: pr.reopened
+    to: in_review
+
   - task_types: [story, bug, subtask]
     from: in_progress
     action: pr.created
@@ -220,7 +266,57 @@ transitions:
 
   - task_types: [story, bug, subtask]
     from: in_progress
+    action: pr.updated
+    to: in_review
+
+  - task_types: [story, bug, subtask]
+    from: in_progress
     action: pr.marked_ready
+    to: in_review
+
+  - task_types: [story, bug, subtask]
+    from: in_progress
+    action: pr.reopened
+    to: in_review
+
+  - task_types: [story, bug, subtask]
+    from: needs_work
+    action: pr.created
+    to: in_review
+
+  - task_types: [story, bug, subtask]
+    from: needs_work
+    action: pr.updated
+    to: in_review
+
+  - task_types: [story, bug, subtask]
+    from: needs_work
+    action: pr.marked_ready
+    to: in_review
+
+  - task_types: [story, bug, subtask]
+    from: needs_work
+    action: pr.reopened
+    to: in_review
+
+  - task_types: [story, bug, subtask]
+    from: accepted
+    action: pr.created
+    to: in_review
+
+  - task_types: [story, bug, subtask]
+    from: accepted
+    action: pr.updated
+    to: in_review
+
+  - task_types: [story, bug, subtask]
+    from: accepted
+    action: pr.marked_ready
+    to: in_review
+
+  - task_types: [story, bug, subtask]
+    from: accepted
+    action: pr.reopened
     to: in_review
 
   # Review requested more work
@@ -285,8 +381,18 @@ transitions:
     to: done
     gates: [children_complete]
 
+  # The merge is the only pull-request event that completes delivery, and it
+  # completes it from wherever the task sits when GitHub reports the merge -
+  # In Review for work merged straight off review, Accepted for work that was
+  # accepted first.
   - task_types: [story, bug, subtask]
     from: accepted
+    action: pr.merged
+    to: done
+    gates: [review_threads_closed, children_complete, pr_merged]
+
+  - task_types: [story, bug, subtask]
+    from: in_review
     action: pr.merged
     to: done
     gates: [review_threads_closed, children_complete, pr_merged]

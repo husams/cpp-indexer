@@ -17,6 +17,7 @@ from backlog_cli.hooks import Action
 
 _ACTIVE_MARKER_ATTRIBUTE = "_cidx_backlog_delivery_validation_markers"
 _MAX_REASON_CHARS = 2048
+_MERGEABLE_STATES = frozenset({"accepted", "in_review"})
 _CHECK_ACTIONS = {
     Action.CHECK_STARTED,
     Action.CHECK_PASSED,
@@ -250,7 +251,13 @@ def pre_transition(
     new_state: str,
     backlog: Backlog,
 ) -> str:
-    """Gate only the configured Story Accepted-to-Done merge transition."""
+    """Gate every configured Story merge transition into Done.
+
+    The merge is the only pull-request event that reaches Done, and it reaches
+    it from In Review as well as from Accepted, so both source states are
+    validated - gating Accepted alone would let a merge straight off review
+    skip the acceptance checks entirely.
+    """
 
     task_key = str(trigger.get("task_key") or "")
     marker = (task_key, threading.get_ident())
@@ -259,7 +266,7 @@ def pre_transition(
 
     if not (
         action == Action.PR_MERGED
-        and current_state == "accepted"
+        and current_state in _MERGEABLE_STATES
         and new_state == "done"
         and task_key
     ):

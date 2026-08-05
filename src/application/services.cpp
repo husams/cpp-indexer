@@ -1,5 +1,7 @@
 #include "application/services.hpp"
 
+#include "application/tu_fact_cache_service.hpp"
+
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -253,6 +255,10 @@ StorageApplicationOperations::execute(const IndexRequest &request,
   }
 
   ast::IndexSession session(db);
+  // Same cache orchestration as the CLI: one decision path, one set of
+  // counters, one conservative fallback.
+  TuFactCacheIndexer indexer(db, session,
+                             tu_fact_cache_options_from_environment());
   for (std::size_t position = 0; position < targets.size(); ++position) {
     const auto &[file, path] = targets[position];
     if (context.cancellation().cancelled()) {
@@ -267,8 +273,8 @@ StorageApplicationOperations::execute(const IndexRequest &request,
     if (context.cancellation().cancelled()) {
       break;
     }
-    const ast::IndexOneOutcome outcome = ast::run_index_one(
-        db, session, file, path, request.graph, ast::IndexFailurePoint::none,
+    const ast::IndexOneOutcome outcome = indexer.index_one(
+        file, path, request.graph, ast::IndexFailurePoint::none,
         request.no_front_end_reuse);
     std::vector<Diagnostic> persisted_diagnostics = outcome.diagnostics;
     if ((outcome.parse_failed || outcome.source_changed) &&
