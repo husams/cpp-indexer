@@ -334,6 +334,32 @@ TEST_CASE("changed header content re-grants rather than reporting current") {
             .at(0));
 }
 
+TEST_CASE("a retrying rank re-grants its own headers, not loses them") {
+  // A translation unit whose source changed under the parse is re-extracted.
+  // The second pass asks the oracle again for the SAME rank; if the oracle
+  // treated that as a competing claimant the retry would silently drop every
+  // header the first attempt owned.
+  SequencedHeaderClaimOracle oracle;
+  const std::vector<HeaderClaimCandidate> candidates{
+      {.path = "/repo/include/a.hpp",
+       .parsed_md5 = std::string("a"),
+       .already_indexed_in_database = false},
+      {.path = "/repo/include/b.hpp",
+       .parsed_md5 = std::string("b"),
+       .already_indexed_in_database = false}};
+  const std::vector<bool> first = oracle.claim(0, "config-a", candidates);
+  CHECK(first.at(0));
+  CHECK(first.at(1));
+  const std::vector<bool> retry = oracle.claim(0, "config-a", candidates);
+  CHECK(retry.at(0));
+  CHECK(retry.at(1));
+  CHECK(oracle.metrics().regranted_on_retry == 2);
+  // A DIFFERENT rank is still denied, so the retry did not release ownership.
+  const std::vector<bool> other = oracle.claim(1, "config-a", candidates);
+  CHECK_FALSE(other.at(0));
+  CHECK_FALSE(other.at(1));
+}
+
 TEST_CASE("an abandoned rank never stalls its successors") {
   SequencedHeaderClaimOracle oracle;
   std::atomic_bool finished{false};

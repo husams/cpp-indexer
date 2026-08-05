@@ -5,6 +5,7 @@
 #include "storage/fact_batch_writer.hpp"
 #include "storage/storage.hpp"
 
+#include <atomic>
 #include <exception>
 #include <memory>
 #include <stdexcept>
@@ -75,6 +76,10 @@ auto run_parallel_index(cidx::Storage &db, const std::string &index_path,
   }
 
   SequencedHeaderClaimOracle oracle;
+  // Incremented from worker threads, so they cannot be plain members of the
+  // report until the pool has joined.
+  std::atomic<std::size_t> retries{0};
+  std::atomic<std::size_t> retry_exhausted{0};
   // One isolated context per worker, created lazily on the worker's first
   // dispatch so a plan that never uses its last worker never pays for it.
   std::vector<std::unique_ptr<ExtractionWorker>> workers(report.plan.workers);
@@ -86,14 +91,31 @@ auto run_parallel_index(cidx::Storage &db, const std::string &index_path,
     }
     ExtractionWorker &worker = *workers[worker_index];
     const ParallelIndexTarget &target = targets[rank];
-    ast::IndexOneOutcome outcome = ast::run_index_one(
-        worker.database(), worker.session(), target.file, target.path,
-        graph_enabled,
-        ast::ExtractionControl{.failure = ast::IndexFailurePoint::none,
-                               .no_front_end_reuse = no_front_end_reuse,
-                               .publish = false,
-                               .claims = &oracle,
-                               .rank = rank});
+    const ast::ExtractionControl control{
+        .failure = ast::IndexFailurePoint::none,
+        .no_front_end_reuse = no_front_end_reuse,
+        .publish = false,
+        .claims = &oracle,
+        .rank = rank};
+    ast::IndexOneOutcome outcome =
+        ast::run_index_one(worker.database(), worker.session(), target.file,
+                           target.path, graph_enabled, control);
+    // Bounded retry for the one transient failure: the source changed while it
+    // was being parsed. The re-extraction re-captures the snapshot, and the
+    // oracle re-grants this rank its own owned headers, so a retry cannot lose
+    // headers to itself or double-count them.
+    for (std::size_t attempt = 0;
+         outcome.source_changed && attempt < kDefaultSourceChangeRetries &&
+         !cancelled();
+         ++attempt) {
+      retries.fetch_add(1, std::memory_order_relaxed);
+      outcome =
+          ast::run_index_one(worker.database(), worker.session(), target.file,
+                             target.path, graph_enabled, control);
+    }
+    if (outcome.source_changed) {
+      retry_exhausted.fetch_add(1, std::memory_order_relaxed);
+    }
     const std::uint64_t bytes = approximate_batch_bytes(outcome);
     return ParallelResult<ast::IndexOneOutcome>{
         .payload = std::move(outcome), .bytes = bytes, .error = std::nullopt};
@@ -171,6 +193,8 @@ auto run_parallel_index(cidx::Storage &db, const std::string &index_path,
       report.run);
   oracle.cancel();
   report.claims = oracle.metrics();
+  report.retries = retries.load(std::memory_order_relaxed);
+  report.retry_exhausted = retry_exhausted.load(std::memory_order_relaxed);
   return report;
 }
 
@@ -200,6 +224,10 @@ void record_parallel_index_profile(const ParallelIndexReport &report) {
                        report.claims.denied_already_indexed);
   profile::add_counter("parallel.header_claim_denied_in_flight_owner",
                        report.claims.denied_in_flight_owner);
+  profile::add_counter("parallel.header_claim_regranted_on_retry",
+                       report.claims.regranted_on_retry);
+  profile::add_counter("parallel.source_change_retries", report.retries);
+  profile::add_counter("parallel.retry_exhausted", report.retry_exhausted);
   profile::add_counter("parallel.peak_rss_bytes",
                        profile::process_peak_rss_bytes());
   profile::add_timing("parallel.wall", report.run.wall_seconds);

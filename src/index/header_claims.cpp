@@ -20,6 +20,9 @@ using Clock = std::chrono::steady_clock;
 // fails.
 struct Grant {
   std::optional<std::string> parsed_md5;
+  // The rank that owns it. Retained so a RETRY of that same rank re-grants
+  // rather than being told its own header is already someone else's.
+  std::size_t owner = 0;
 };
 
 using ClaimKey = std::pair<std::string, std::string>;
@@ -60,11 +63,17 @@ public:
         const auto existing = granted_.find(key);
         if (existing != granted_.end() &&
             existing->second.parsed_md5 == candidate.parsed_md5) {
+          if (existing->second.owner == rank) {
+            // Same translation unit asking again after a retry.
+            owned[i] = true;
+            ++metrics_.regranted_on_retry;
+            continue;
+          }
           ++metrics_.denied_in_flight_owner;
           continue;
         }
-        granted_.insert_or_assign(key,
-                                  Grant{.parsed_md5 = candidate.parsed_md5});
+        granted_.insert_or_assign(
+            key, Grant{.parsed_md5 = candidate.parsed_md5, .owner = rank});
         owned[i] = true;
         ++metrics_.granted;
       }

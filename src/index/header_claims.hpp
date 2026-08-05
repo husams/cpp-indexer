@@ -66,8 +66,9 @@ public:
   // it, false = a lower-ranked translation unit already owns it (counted
   // "already", exactly as in serial).
   //
-  // Exactly one call per translation unit. The rank is its position in the
-  // legacy apply order.
+  // Normally one call per translation unit. A RETRY of the same rank may call
+  // again: the oracle re-grants that rank's own previous grants, so a retried
+  // translation unit does not lose the headers it already owns to itself.
   [[nodiscard]] virtual auto
   claim(std::size_t rank, std::string_view configuration_identity,
         const std::vector<HeaderClaimCandidate> &candidates)
@@ -90,6 +91,8 @@ struct HeaderClaimMetrics {
   // Denied because a lower-ranked translation unit in THIS run owns it. This is
   // the counter that must equal the serial "already" amortisation.
   std::uint64_t denied_in_flight_owner = 0;
+  // Re-granted to the same rank on a retry.
+  std::uint64_t regranted_on_retry = 0;
   // Longest time a worker spent waiting for its turn at the ordered gate.
   double max_gate_wait_seconds = 0.0;
   double total_gate_wait_seconds = 0.0;

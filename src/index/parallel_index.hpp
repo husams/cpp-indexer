@@ -40,6 +40,14 @@ struct ParallelIndexTarget {
   std::string path;
 };
 
+// Bounded retry policy. A translation unit whose source changed UNDER the parse
+// is the one genuinely transient failure the engine reports: the remedy the
+// serial path documents is to index it again. Everything else -- a parse
+// failure, a worker crash, a writer or commit failure -- is deterministic, so
+// retrying it would burn a full parse to reach the same answer and would hide
+// the defect. Those are reported, never retried.
+inline constexpr std::size_t kDefaultSourceChangeRetries = 2;
+
 struct ParallelIndexReport {
   ParallelRunMetrics run;
   HeaderClaimMetrics claims;
@@ -49,6 +57,11 @@ struct ParallelIndexReport {
   // publication committed.
   std::size_t published = 0;
   std::size_t failed = 0;
+  // Extractions re-run because the source changed under the parse.
+  std::size_t retries = 0;
+  // Translation units that exhausted the retry budget and still saw a changed
+  // source; reported as failures, never as published.
+  std::size_t retry_exhausted = 0;
 };
 
 // Invoked on the calling thread, in legacy apply order, once per translation
