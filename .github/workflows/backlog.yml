@@ -54,7 +54,7 @@ jobs:
     env:
       BACKLOG_DB: postgres
       BACKLOG_PROJECT: ${{ vars.BACKLOG_PROJECT }}
-      BACKLOG_PLUGIN_REVISION: 40739f8b6ce7615705ee3eb7bf0dcb986ed6adb2
+      BACKLOG_PLUGIN_REVISION: a4a69e187805161e2feac08d9a3c0eaaaa483fc0
 
     steps:
       - name: Install prerequisites
