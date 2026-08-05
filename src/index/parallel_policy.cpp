@@ -76,8 +76,8 @@ auto plan_parallel_extraction(const ParallelBudgets &budgets,
     // the pool to zero, so the ceiling is at least one worker.
     std::size_t memory_workers = cores;
     if (plan.memory_budget_bytes != 0 && plan.reserved_bytes_per_worker != 0) {
-      memory_workers = static_cast<std::size_t>(
-          plan.memory_budget_bytes / plan.reserved_bytes_per_worker);
+      memory_workers = static_cast<std::size_t>(plan.memory_budget_bytes /
+                                                plan.reserved_bytes_per_worker);
       memory_workers = std::max<std::size_t>(memory_workers, 1);
     }
     plan.workers = std::min({work, cores, memory_workers});

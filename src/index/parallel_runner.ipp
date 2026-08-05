@@ -36,8 +36,8 @@ auto run_parallel_extraction(
   bool stopping = false;
   ParallelRunStatus status = ParallelRunStatus::none;
 
-  const std::size_t workers = std::max<std::size_t>(
-      std::min(plan.workers, count == 0 ? 1 : count), 1);
+  const std::size_t workers =
+      std::max<std::size_t>(std::min(plan.workers, count == 0 ? 1 : count), 1);
 
   auto worker_body = [&](std::size_t worker_index) {
     double idle = 0.0;
@@ -52,10 +52,9 @@ auto run_parallel_extraction(
         rank = next_dispatch++;
         ++in_flight;
         metrics.items_dispatched = std::max(metrics.items_dispatched, rank + 1);
-        metrics.peak_reserved_bytes =
-            std::max(metrics.peak_reserved_bytes,
-                     static_cast<std::uint64_t>(in_flight) *
-                         plan.reserved_bytes_per_worker);
+        metrics.peak_reserved_bytes = std::max(
+            metrics.peak_reserved_bytes, static_cast<std::uint64_t>(in_flight) *
+                                             plan.reserved_bytes_per_worker);
       }
 
       const auto extract_started = Clock::now();
@@ -69,8 +68,8 @@ auto run_parallel_extraction(
         result = ParallelResult<Payload>{};
         result.error = "unknown extraction failure";
       }
-      active += std::chrono::duration<double>(Clock::now() - extract_started)
-                    .count();
+      active +=
+          std::chrono::duration<double>(Clock::now() - extract_started).count();
 
       const auto wait_started = Clock::now();
       {
@@ -117,71 +116,100 @@ auto run_parallel_extraction(
   }
   metrics.workers_started = workers;
 
-  // The calling thread is the publisher: exactly one writer, always in rank
-  // order, never on a worker.
-  //
-  // `next_publish` is shared state -- a worker's admission test reads it to
-  // decide whether it is the rank the publisher is blocked on -- so every
-  // mutation happens under the mutex and is followed by a notify. Advancing it
-  // outside the lock, or notifying before advancing, loses the wakeup and
-  // deadlocks a full buffer.
-  while (true) {
-    ParallelResult<Payload> result;
-    std::size_t rank = 0;
-    {
-      std::unique_lock lock(mutex);
-      if (next_publish >= count) {
-        break;
-      }
-      rank = next_publish;
-      const auto wait_started = Clock::now();
-      arrived.wait(lock, [&] { return stopping || ready.contains(rank); });
-      metrics.total_publish_wait_seconds +=
-          std::chrono::duration<double>(Clock::now() - wait_started).count();
-      if (stopping) {
-        break;
-      }
-      auto entry = ready.find(rank);
-      result = std::move(entry->second);
-      ready.erase(entry);
-      buffered_bytes -= result.bytes;
-    }
-    admit.notify_all();
+  // Stops and joins the pool on EVERY exit from the publisher scope below,
+  // including an exception thrown by the caller-supplied publish callback.
+  // Without it that unwind would cross joinable std::threads, which is
+  // std::terminate rather than a propagated exception.
+  struct PoolGuard {
+    std::vector<std::thread> &pool;
+    std::mutex &mutex;
+    std::condition_variable &admit;
+    std::condition_variable &arrived;
+    bool &stopping;
 
-    if (cancelled()) {
+    // Deliberately an aggregate holding only references: it is a scope-exit
+    // action, never copied or moved.
+    ~PoolGuard() {
       {
         const std::scoped_lock lock(mutex);
         stopping = true;
       }
-      status = ParallelRunStatus::cancelled;
-      on_abandon(rank);
-      break;
-    }
-    const bool keep_going = publish(rank, result);
-    ++metrics.items_published;
-    {
-      const std::scoped_lock lock(mutex);
-      next_publish = rank + 1;
-      if (!keep_going) {
-        stopping = true;
-        status = ParallelRunStatus::publication_stopped;
+      admit.notify_all();
+      arrived.notify_all();
+      for (std::thread &worker : pool) {
+        if (worker.joinable()) {
+          worker.join();
+        }
       }
     }
-    admit.notify_all();
-    if (!keep_going) {
-      break;
-    }
-  }
+  };
 
   {
-    const std::scoped_lock lock(mutex);
-    stopping = true;
-  }
-  admit.notify_all();
-  arrived.notify_all();
-  for (std::thread &worker : pool) {
-    worker.join();
-  }
+    const PoolGuard pool_guard{pool, mutex, admit, arrived, stopping};
+
+    // The calling thread is the publisher: exactly one writer, always in rank
+    // order, never on a worker.
+    //
+    // `next_publish` is shared state -- a worker's admission test reads it to
+    // decide whether it is the rank the publisher is blocked on -- so every
+    // mutation happens under the mutex and is followed by a notify. Advancing
+    // it outside the lock, or notifying before advancing, loses the wakeup and
+    // deadlocks a full buffer.
+    while (true) {
+      ParallelResult<Payload> result;
+      std::size_t rank = 0;
+      {
+        std::unique_lock lock(mutex);
+        if (next_publish >= count) {
+          break;
+        }
+        rank = next_publish;
+        const auto wait_started = Clock::now();
+        arrived.wait(lock, [&] { return stopping || ready.contains(rank); });
+        metrics.total_publish_wait_seconds +=
+            std::chrono::duration<double>(Clock::now() - wait_started).count();
+        if (stopping) {
+          break;
+        }
+        auto entry = ready.find(rank);
+        result = std::move(entry->second);
+        ready.erase(entry);
+        buffered_bytes -= result.bytes;
+      }
+      admit.notify_all();
+
+      if (cancelled()) {
+        {
+          const std::scoped_lock lock(mutex);
+          stopping = true;
+        }
+        status = ParallelRunStatus::cancelled;
+        on_abandon(rank);
+        break;
+      }
+      const bool keep_going = publish(rank, result);
+      if (keep_going) {
+        // A publication that STOPS the run is not a published item: counting it
+        // would overstate progress in exactly the failure report an operator
+        // reads to find out how far a run got.
+        ++metrics.items_published;
+      }
+      {
+        const std::scoped_lock lock(mutex);
+        next_publish = rank + 1;
+        if (!keep_going) {
+          stopping = true;
+          status = ParallelRunStatus::publication_stopped;
+        }
+      }
+      admit.notify_all();
+      if (!keep_going) {
+        break;
+      }
+    }
+
+  } // PoolGuard: every worker has stopped and joined past this point.
+
   // Anything extracted but never published must release its ordered gate too.
   for (auto &[rank, unpublished] : ready) {
     static_cast<void>(unpublished);

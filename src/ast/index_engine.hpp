@@ -180,8 +180,7 @@ public:
 private:
   class Impl;
   std::unique_ptr<Impl> impl_;
-  friend IndexOneOutcome run_index_one(cidx::Storage &db,
-                                       IndexSession &session,
+  friend IndexOneOutcome run_index_one(cidx::Storage &db, IndexSession &session,
                                        const cidx::File &rec,
                                        const std::string &path,
                                        bool graph_enabled,

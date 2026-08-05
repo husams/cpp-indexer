@@ -80,6 +80,15 @@ public:
   // translation unit that never asks. Idempotent, and safe to call after the
   // rank has already been released.
   virtual void release_unclaimed(std::size_t rank) = 0;
+
+  // Drops every grant held by `rank`, making those headers claimable again.
+  //
+  // Required when a translation unit is granted headers and its PUBLICATION
+  // then fails. The grant would otherwise outlive the work: a later
+  // translation unit sharing the header would be denied as "in-flight owned"
+  // and would report it "already", while no row was ever written. Serially the
+  // next unit finds no committed row and indexes it, and this restores that.
+  virtual void revoke_grants(std::size_t rank) = 0;
 };
 
 // Counters the runner publishes so an operator can prove amortisation survived.
@@ -93,6 +102,8 @@ struct HeaderClaimMetrics {
   std::uint64_t denied_in_flight_owner = 0;
   // Re-granted to the same rank on a retry.
   std::uint64_t regranted_on_retry = 0;
+  // Grants dropped because their owner's publication failed.
+  std::uint64_t revoked_after_publish_failure = 0;
   // Longest time a worker spent waiting for its turn at the ordered gate.
   double max_gate_wait_seconds = 0.0;
   double total_gate_wait_seconds = 0.0;
@@ -104,12 +115,13 @@ public:
   SequencedHeaderClaimOracle();
   ~SequencedHeaderClaimOracle() override;
 
-  [[nodiscard]] auto
-  claim(std::size_t rank, std::string_view configuration_identity,
-        const std::vector<HeaderClaimCandidate> &candidates)
+  [[nodiscard]] auto claim(std::size_t rank,
+                           std::string_view configuration_identity,
+                           const std::vector<HeaderClaimCandidate> &candidates)
       -> std::vector<bool> override;
 
   void release_unclaimed(std::size_t rank) override;
+  void revoke_grants(std::size_t rank) override;
 
   // Unblocks every waiter and makes all subsequent claims non-owning. Used on
   // cancellation and on scheduler teardown so no worker can outlive the run

@@ -68,20 +68,18 @@ struct ParallelIndexReport {
 // unit -- successful or not. `published` is false for a failed parse, a source
 // that changed under the parse, or a writer failure. Returning false stops the
 // run.
-using ParallelIndexObserver = std::function<bool(
-    const ParallelIndexTarget &target, const ast::IndexOneOutcome &outcome,
-    bool published)>;
+using ParallelIndexObserver =
+    std::function<bool(const ParallelIndexTarget &target,
+                       const ast::IndexOneOutcome &outcome, bool published)>;
 
 // `index_path` is the authoritative database each worker opens read-only.
 // `db` is the scheduler's read-write handle, and the only handle that writes.
-[[nodiscard]] auto
-run_parallel_index(cidx::Storage &db, const std::string &index_path,
-                   const std::vector<ParallelIndexTarget> &targets,
-                   bool graph_enabled, bool no_front_end_reuse,
-                   const ParallelBudgets &budgets,
-                   const std::function<bool()> &cancelled,
-                   const ParallelIndexObserver &observer)
-    -> ParallelIndexReport;
+[[nodiscard]] auto run_parallel_index(
+    cidx::Storage &db, const std::string &index_path,
+    const std::vector<ParallelIndexTarget> &targets, bool graph_enabled,
+    bool no_front_end_reuse, const ParallelBudgets &budgets,
+    const std::function<bool()> &cancelled,
+    const ParallelIndexObserver &observer) -> ParallelIndexReport;
 
 // Publishes the report through the opt-in profile session. Named separately so
 // a caller can decide when telemetry is emitted.

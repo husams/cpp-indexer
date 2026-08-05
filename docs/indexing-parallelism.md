@@ -92,7 +92,7 @@ header.
 | Source changed under the parse | **Retried**, up to 2 times. The re-extraction re-captures the snapshot, and the oracle re-grants that rank its own headers so a retry cannot lose them to itself. Exhausting the budget reports a failure. |
 | Parse failure | Reported, not retried. |
 | Worker crash / thrown exception | Caught, reported as a failed translation unit. The ordered gate is released so successors are not stalled. |
-| Writer or commit failure | The writer's transaction rolls back; the unit is reported failed and its file stays pending. Never a partially committed unit. |
+| Writer or commit failure | The writer's transaction rolls back; the unit is reported failed and its file stays pending. Never a partially committed unit. The owned-header grants it held are **revoked**, so those headers become claimable again — leaving them granted would deny them to a later unit that would then report them "already" while no row was ever written. |
 | User interruption / cancellation | Dispatch and publication stop. Every dispatched-but-unpublished rank releases its gate. |
 
 Deterministic failures are deliberately not retried: a retry burns a full parse
@@ -108,7 +108,8 @@ With `--profile-json PATH` the run publishes:
 * `parallel.peak_reorder_items`, `parallel.peak_reorder_bytes`,
   `parallel.peak_reserved_bytes`, `parallel.peak_rss_bytes`
 * `parallel.header_claim_candidates`, `.granted`,
-  `.denied_already_indexed`, `.denied_in_flight_owner`, `.regranted_on_retry`
+  `.denied_already_indexed`, `.denied_in_flight_owner`, `.regranted_on_retry`,
+  `.revoked_after_publish_failure`
 * `parallel.source_change_retries`, `parallel.retry_exhausted`
 * timings: `parallel.wall`, `.worker_active`, `.worker_idle`,
   `.backpressure`, `.publish_wait`, `.header_claim_gate_wait`,

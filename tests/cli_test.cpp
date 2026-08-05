@@ -4151,7 +4151,8 @@ TEST_CASE("analyze: mode and jobs validation (exit 2), unknown rule and "
   // parsing, with the same message the typed adapter has always emitted, in
   // both parser implementations. The runtime guard below still covers a caller
   // that builds ParsedArgs directly.
-  const ParseFail jobs = parse_fail({"analyze", "--rule", "cycles", "--jobs", "0"});
+  const ParseFail jobs =
+      parse_fail({"analyze", "--rule", "cycles", "--jobs", "0"});
   CHECK(jobs.code == 2);
   CHECK(jobs.msg.find("cidx: error: --jobs must be a positive integer\n") !=
         std::string::npos);
@@ -4359,8 +4360,9 @@ TEST_CASE("index --jobs rejects non-positive values identically in both "
     const ParseFail grammar = parse_fail(argv);
     CHECK(grammar.code == 2);
     // The CLI11 grammar prefixes its usage line; the detail must match exactly.
-    CHECK(grammar.msg.find("cidx: error: --jobs must be a positive integer\n") !=
-          std::string::npos);
+    CHECK(
+        grammar.msg.find("cidx: error: --jobs must be a positive integer\n") !=
+        std::string::npos);
   }
 }
 
@@ -4389,16 +4391,16 @@ TEST_CASE("analyze --jobs and index --jobs share one rejection contract") {
 
 TEST_CASE("index budget options reject non-positive values in both parsers") {
   const std::vector<std::pair<std::string, std::string>> options = {
-      {"--max-queue-bytes", "0"},      {"--max-queue-bytes", "many"},
-      {"--max-queue-items", "0"},      {"--max-queue-items", "-2"},
-      {"--memory-budget-bytes", "0"},  {"--memory-budget-bytes", "8g"},
+      {"--max-queue-bytes", "0"},     {"--max-queue-bytes", "many"},
+      {"--max-queue-items", "0"},     {"--max-queue-items", "-2"},
+      {"--memory-budget-bytes", "0"}, {"--memory-budget-bytes", "8g"},
   };
   for (const auto &[option, value] : options) {
     const std::vector<std::string> argv{"index", option, value};
     const ParseFail typed = typed_parse_fail(argv);
     CHECK(typed.code == 2);
-    CHECK(typed.msg == "cidx: error: " + option +
-                           " must be a positive integer\n");
+    CHECK(typed.msg ==
+          "cidx: error: " + option + " must be a positive integer\n");
     const ParseFail grammar = parse_fail(argv);
     CHECK(grammar.msg.find("cidx: error: " + option +
                            " must be a positive integer\n") !=

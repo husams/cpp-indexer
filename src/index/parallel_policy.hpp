@@ -58,7 +58,8 @@ struct HostResources {
 // The dominant term is one live ASTContext plus its source buffers; the value
 // is deliberately generous because over-reserving costs throughput while
 // under-reserving costs the whole run.
-inline constexpr std::uint64_t kDefaultBytesPerWorker = 768ULL * 1024ULL * 1024ULL;
+inline constexpr std::uint64_t kDefaultBytesPerWorker =
+    768ULL * 1024ULL * 1024ULL;
 
 // Default share of *available* memory the indexer is willing to occupy when the
 // operator gave no explicit ceiling.
@@ -75,9 +76,9 @@ inline constexpr double kDefaultMemoryShare = 0.60;
 //   4. at least one.
 // An explicit `--jobs N` skips 2 and 3 for the core/memory *derivation* but is
 // still clamped by 1 so the pool cannot exceed the work available.
-[[nodiscard]] auto plan_parallel_extraction(const ParallelBudgets &budgets,
-                                            const HostResources &host,
-                                            std::size_t pending_translation_units)
-    -> ParallelPlan;
+[[nodiscard]] auto
+plan_parallel_extraction(const ParallelBudgets &budgets,
+                         const HostResources &host,
+                         std::size_t pending_translation_units) -> ParallelPlan;
 
 } // namespace cidx::index

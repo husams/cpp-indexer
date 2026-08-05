@@ -84,8 +84,9 @@ auto run_parallel_index(cidx::Storage &db, const std::string &index_path,
   // dispatch so a plan that never uses its last worker never pays for it.
   std::vector<std::unique_ptr<ExtractionWorker>> workers(report.plan.workers);
 
-  const auto extract = [&](std::size_t worker_index, std::size_t rank)
-      -> ParallelResult<ast::IndexOneOutcome> {
+  const auto extract =
+      [&](std::size_t worker_index,
+          std::size_t rank) -> ParallelResult<ast::IndexOneOutcome> {
     if (!workers[worker_index]) {
       workers[worker_index] = std::make_unique<ExtractionWorker>(index_path);
     }
@@ -159,8 +160,8 @@ auto run_parallel_index(cidx::Storage &db, const std::string &index_path,
         // and on schema errors. A publication failure must fail this
         // translation unit, never abort the run: the writer's transaction has
         // already rolled back, so the file simply stays pending.
-        applied.error = std::string("FactBatch publication failed: ") +
-                        error.what();
+        applied.error =
+            std::string("FactBatch publication failed: ") + error.what();
       }
       if (applied.ok()) {
         published = true;
@@ -168,9 +169,15 @@ auto run_parallel_index(cidx::Storage &db, const std::string &index_path,
         // A writer or commit failure must not leave a partially committed
         // translation unit: the writer's own transaction rolled back, and the
         // outcome is reported as a failure so the file stays pending.
+        //
+        // The owned-header grants must be dropped with it. Nothing was written
+        // for those headers, so leaving the grants standing would deny them to
+        // a later translation unit that would then report them "already" while
+        // no row exists -- serially the next unit finds no committed row and
+        // indexes them.
+        oracle.revoke_grants(rank);
         outcome.parse_failed = true;
-        outcome.error =
-            applied.error.value_or("FactBatch publication failed");
+        outcome.error = applied.error.value_or("FactBatch publication failed");
         outcome.dependency_facts = {};
       }
     } else if (!outcome.parse_failed && !outcome.source_changed) {
@@ -209,7 +216,8 @@ void record_parallel_index_profile(const ParallelIndexReport &report) {
                        report.plan.memory_budget_bytes);
   profile::add_counter("parallel.reserved_bytes_per_worker",
                        report.plan.reserved_bytes_per_worker);
-  profile::add_counter("parallel.items_dispatched", report.run.items_dispatched);
+  profile::add_counter("parallel.items_dispatched",
+                       report.run.items_dispatched);
   profile::add_counter("parallel.items_published", report.run.items_published);
   profile::add_counter("parallel.peak_reorder_items",
                        report.run.peak_reorder_items);

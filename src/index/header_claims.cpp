@@ -58,8 +58,7 @@ public:
           ++metrics_.denied_already_indexed;
           continue;
         }
-        const ClaimKey key{candidate.path,
-                           std::string(configuration_identity)};
+        const ClaimKey key{candidate.path, std::string(configuration_identity)};
         const auto existing = granted_.find(key);
         if (existing != granted_.end() &&
             existing->second.parsed_md5 == candidate.parsed_md5) {
@@ -92,6 +91,18 @@ public:
       release(rank);
     }
     ready_.notify_all();
+  }
+
+  void revoke_grants(std::size_t rank) {
+    const std::scoped_lock lock(mutex_);
+    for (auto it = granted_.begin(); it != granted_.end();) {
+      if (it->second.owner == rank) {
+        it = granted_.erase(it);
+        ++metrics_.revoked_after_publish_failure;
+      } else {
+        ++it;
+      }
+    }
   }
 
   void cancel() {
@@ -140,6 +151,10 @@ auto SequencedHeaderClaimOracle::claim(
 
 void SequencedHeaderClaimOracle::release_unclaimed(std::size_t rank) {
   impl_->release_unclaimed(rank);
+}
+
+void SequencedHeaderClaimOracle::revoke_grants(std::size_t rank) {
+  impl_->revoke_grants(rank);
 }
 
 void SequencedHeaderClaimOracle::cancel() { impl_->cancel(); }

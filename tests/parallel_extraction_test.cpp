@@ -237,7 +237,8 @@ TEST_CASE("a shared header is granted to exactly one translation unit") {
           {.path = "/repo/include/shared.hpp",
            .parsed_md5 = std::string("digest"),
            .already_indexed_in_database = false}};
-      const std::vector<bool> owned = oracle.claim(rank, "config-a", candidates);
+      const std::vector<bool> owned =
+          oracle.claim(rank, "config-a", candidates);
       if (owned.at(0)) {
         ++owners;
         owning_rank.store(rank);
@@ -274,7 +275,8 @@ TEST_CASE("amortisation reproduces the serial indexed/already split") {
           {.path = "/repo/include/b.hpp",
            .parsed_md5 = std::string("b"),
            .already_indexed_in_database = false}};
-      const std::vector<bool> owned = oracle.claim(rank, "config-a", candidates);
+      const std::vector<bool> owned =
+          oracle.claim(rank, "config-a", candidates);
       for (const bool own : owned) {
         if (own) {
           ++indexed;
@@ -360,15 +362,64 @@ TEST_CASE("a retrying rank re-grants its own headers, not loses them") {
   CHECK_FALSE(other.at(1));
 }
 
+TEST_CASE("a failed publication releases the headers it had claimed") {
+  // Without revocation the grant outlives the work: the header is denied to
+  // every later translation unit as "in-flight owned" and reported "already",
+  // while no row was ever written for it.
+  SequencedHeaderClaimOracle oracle;
+  const std::vector<HeaderClaimCandidate> candidates{
+      {.path = "/repo/include/a.hpp",
+       .parsed_md5 = std::string("a"),
+       .already_indexed_in_database = false}};
+  CHECK(oracle.claim(0, "config-a", candidates).at(0));
+  // Rank 0 extracted it but its publication failed.
+  oracle.revoke_grants(0);
+  CHECK(oracle.metrics().revoked_after_publish_failure == 1);
+  // The next translation unit must now own it, exactly as serial would.
+  CHECK(oracle.claim(1, "config-a", candidates).at(0));
+  // A third is denied again, because rank 1's grant stands.
+  CHECK_FALSE(oracle.claim(2, "config-a", candidates).at(0));
+}
+
+TEST_CASE("revoking one rank leaves other ranks\' grants intact") {
+  SequencedHeaderClaimOracle oracle;
+  CHECK(oracle
+            .claim(0, "config-a",
+                   {{.path = "/repo/a.hpp",
+                     .parsed_md5 = std::string("a"),
+                     .already_indexed_in_database = false}})
+            .at(0));
+  CHECK(oracle
+            .claim(1, "config-a",
+                   {{.path = "/repo/b.hpp",
+                     .parsed_md5 = std::string("b"),
+                     .already_indexed_in_database = false}})
+            .at(0));
+  oracle.revoke_grants(0);
+  // b.hpp still belongs to rank 1.
+  CHECK_FALSE(oracle
+                  .claim(2, "config-a",
+                         {{.path = "/repo/b.hpp",
+                           .parsed_md5 = std::string("b"),
+                           .already_indexed_in_database = false}})
+                  .at(0));
+  // a.hpp is claimable again.
+  CHECK(oracle
+            .claim(3, "config-a",
+                   {{.path = "/repo/a.hpp",
+                     .parsed_md5 = std::string("a"),
+                     .already_indexed_in_database = false}})
+            .at(0));
+}
+
 TEST_CASE("an abandoned rank never stalls its successors") {
   SequencedHeaderClaimOracle oracle;
   std::atomic_bool finished{false};
   std::thread later([&] {
-    static_cast<void>(oracle.claim(
-        3, "config-a",
-        {{.path = "/repo/late.hpp",
-          .parsed_md5 = std::string("d"),
-          .already_indexed_in_database = false}}));
+    static_cast<void>(oracle.claim(3, "config-a",
+                                   {{.path = "/repo/late.hpp",
+                                     .parsed_md5 = std::string("d"),
+                                     .already_indexed_in_database = false}}));
     finished.store(true);
   });
   // Ranks 0..2 never claim -- a failed parse, a crashed worker and a cache
@@ -385,11 +436,11 @@ TEST_CASE("cancellation releases every waiter without granting") {
   std::atomic_bool released{false};
   std::atomic_bool owned_anything{false};
   std::thread waiter([&] {
-    const std::vector<bool> owned = oracle.claim(
-        9, "config-a",
-        {{.path = "/repo/x.hpp",
-          .parsed_md5 = std::string("d"),
-          .already_indexed_in_database = false}});
+    const std::vector<bool> owned =
+        oracle.claim(9, "config-a",
+                     {{.path = "/repo/x.hpp",
+                       .parsed_md5 = std::string("d"),
+                       .already_indexed_in_database = false}});
     owned_anything.store(owned.at(0));
     released.store(true);
   });
@@ -446,8 +497,8 @@ TEST_CASE("an explicit memory budget overrides the host probe") {
   const HostResources host{.logical_cores = 64,
                            .total_memory_bytes = 512ULL << 30U,
                            .available_memory_bytes = 512ULL << 30U};
-  const ParallelPlan plan =
-      plan_parallel_extraction({.memory_budget_bytes = 2ULL << 30U}, host, 1000);
+  const ParallelPlan plan = plan_parallel_extraction(
+      {.memory_budget_bytes = 2ULL << 30U}, host, 1000);
   CHECK(plan.memory_budget_bytes == (2ULL << 30U));
   CHECK(plan.workers <= 3); // 2 GiB / 768 MiB
   CHECK(plan.workers >= 1);
