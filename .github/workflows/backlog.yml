@@ -54,7 +54,10 @@ jobs:
     env:
       BACKLOG_DB: postgres
       BACKLOG_PROJECT: ${{ vars.BACKLOG_PROJECT }}
-      BACKLOG_PLUGIN_REVISION: a4a69e187805161e2feac08d9a3c0eaaaa483fc0
+      # Track the plugin's main rather than a SHA: the backlog store is
+      # shared and migrates, so any pinned revision rots the moment the
+      # store moves past its SCHEMA_VERSION and CI refuses to open it.
+      BACKLOG_PLUGIN_REVISION: main
 
     steps:
       - name: Install prerequisites
