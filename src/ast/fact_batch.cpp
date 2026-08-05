@@ -629,11 +629,6 @@ void FactBatchRecorder::set_completeness(FactCompleteness completeness) {
   completeness_ = completeness;
 }
 
-void FactBatchRecorder::set_persistent_symbol_lookup(
-    PersistentSymbolLookup lookup) {
-  persistent_symbol_lookup_ = std::move(lookup);
-}
-
 void FactBatchRecorder::set_deferred_external_identity(
     DeferredExternalIdentity deferral) {
   deferred_external_identity_ = std::move(deferral);
@@ -877,15 +872,6 @@ auto FactBatchRecorder::resolve_symbol_id(
   };
   if (const auto local = local_lookup()) {
     return local;
-  }
-  if (persistent_symbol_lookup_) {
-    const auto persisted =
-        persistent_symbol_lookup_(usr, source, current_partition_);
-    if (!persisted) {
-      return std::nullopt;
-    }
-    emit(*persisted);
-    return local_lookup();
   }
   return allow_deferral ? defer_external_symbol(usr, source) : std::nullopt;
 }

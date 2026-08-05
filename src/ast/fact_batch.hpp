@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <functional>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -209,10 +208,6 @@ class FactBatchRecorder final : public SymbolFactEmitter,
                                 public PresentationNormalizer,
                                 public PresentationIntentEmitter {
 public:
-  using PersistentSymbolLookup = std::function<std::optional<SymbolRecord>(
-      const std::string &, const std::optional<std::string> &,
-      const FactPartitionKey &)>;
-
   // Cross-translation-unit identity resolution deferred to the controlled
   // writer. With this enabled the recorder answers an unresolved lookup with a
   // batch handle and a recorded PendingSymbolReference, and performs no
@@ -232,7 +227,6 @@ public:
                                  &primary_hasher = stable_fact_hash);
 
   void set_completeness(FactCompleteness completeness);
-  void set_persistent_symbol_lookup(PersistentSymbolLookup lookup);
   void set_deferred_external_identity(DeferredExternalIdentity deferral);
   void set_partition(
       FactPartitionKey partition,
@@ -401,7 +395,6 @@ private:
   CollisionSafeHandleIndex type_handles_;
   CollisionSafeHandleIndex definition_handles_;
   CollisionSafeHandleIndex file_handles_;
-  PersistentSymbolLookup persistent_symbol_lookup_;
   DeferredExternalIdentity deferred_external_identity_;
   std::vector<PendingSymbolReference> pending_symbol_references_;
   std::unordered_map<std::string, std::int64_t> external_ids_by_key_;
