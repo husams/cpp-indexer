@@ -13,9 +13,14 @@ name: Sync pull requests to Backlog
 #     not failed — branches here are frequently named after the Linear issue
 #     (codex/hse-27-...) rather than the backlog key.
 #
-# Pull-request code is never checked out or executed before merge. The closed,
-# merged path checks out only GitHub's recorded merge commit so the trusted
-# project hook can validate the exact revision before recording Done.
+# The job checks out .backlog from the revision the event is about, so the flow
+# under test is the pull request's own. That directory holds the transition
+# table and the project hooks, and the Backlog CLI imports the hooks - so a
+# same-repo pull request's hook code does run here. Fork pull requests are
+# skipped outright (they carry no store credentials anyway), which is what
+# keeps that acceptable. The closed, merged path additionally checks out
+# GitHub's recorded merge commit so the hook can validate the exact revision
+# before recording Done.
 
 on:
   # pull_request, not pull_request_target: the job then runs THIS branch's copy
@@ -102,17 +107,23 @@ jobs:
 
       # Without a checkout the CLI finds no .backlog directory and falls back to
       # the plugin's bundled default flow, so this repository's transition table
-      # would never decide anything a pull-request event does. Only the trusted
-      # base revision is taken, and only .backlog — never the pull request's own
-      # code, which is not executed here.
-      - name: Check out the trusted flow configuration
+      # would never decide anything a pull-request event does. The flow is taken
+      # from the revision the event is about - the pull request's own head, or
+      # the branch the finished workflow run belongs to - so a change to the
+      # transition table takes effect for the pull request that makes it, not
+      # only after it merges. Only .backlog is checked out; see the file header
+      # for why running that pull request's hooks is acceptable here.
+      - name: Check out the flow configuration under test
+        if: >-
+          github.event.pull_request.head.sha != '' ||
+          github.event.workflow_run.head_sha != ''
         uses: actions/checkout@v4
         with:
           path: flow
           persist-credentials: false
           ref: >-
-            ${{ github.event.pull_request.base.sha ||
-                github.event.repository.default_branch }}
+            ${{ github.event.pull_request.head.sha ||
+                github.event.workflow_run.head_sha }}
           sparse-checkout: .backlog
 
       - name: Check out merged delivery revision
@@ -187,10 +198,13 @@ jobs:
 
           BL="$RUNNER_TEMP/backlog-plugin/skills/backlog/bin/backlog"
 
-          # Run from the trusted flow checkout so every action is resolved by
-          # this repository's .backlog/workflow.yaml. The merged branch below
-          # switches to its own validated runtime instead.
-          cd "$GITHUB_WORKSPACE/flow"
+          # Run from the flow checkout so every action is resolved by the
+          # transition table of the revision under test. The merged branch below
+          # switches to its own validated runtime instead. A workflow_dispatch
+          # smoke test has no revision to check out and stops before any action.
+          if [[ -d "$GITHUB_WORKSPACE/flow" ]]; then
+            cd "$GITHUB_WORKSPACE/flow"
+          fi
 
           if [[ -z "${BACKLOG_PROJECT:-}" ]]; then
             echo "BACKLOG_PROJECT must name the project explicitly."
