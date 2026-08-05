@@ -100,6 +100,21 @@ jobs:
         run: |
           "$RUNNER_TEMP/backlog-plugin/skills/backlog/bin/backlog" where
 
+      # Without a checkout the CLI finds no .backlog directory and falls back to
+      # the plugin's bundled default flow, so this repository's transition table
+      # would never decide anything a pull-request event does. Only the trusted
+      # base revision is taken, and only .backlog — never the pull request's own
+      # code, which is not executed here.
+      - name: Check out the trusted flow configuration
+        uses: actions/checkout@v4
+        with:
+          path: flow
+          persist-credentials: false
+          ref: >-
+            ${{ github.event.pull_request.base.sha ||
+                github.event.repository.default_branch }}
+          sparse-checkout: .backlog
+
       - name: Check out merged delivery revision
         if: >-
           github.event_name == 'pull_request' &&
@@ -171,6 +186,11 @@ jobs:
           set -euo pipefail
 
           BL="$RUNNER_TEMP/backlog-plugin/skills/backlog/bin/backlog"
+
+          # Run from the trusted flow checkout so every action is resolved by
+          # this repository's .backlog/workflow.yaml. The merged branch below
+          # switches to its own validated runtime instead.
+          cd "$GITHUB_WORKSPACE/flow"
 
           if [[ -z "${BACKLOG_PROJECT:-}" ]]; then
             echo "BACKLOG_PROJECT must name the project explicitly."
