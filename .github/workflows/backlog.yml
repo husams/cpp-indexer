@@ -18,7 +18,12 @@ name: Sync pull requests to Backlog
 # project hook can validate the exact revision before recording Done.
 
 on:
-  pull_request_target:
+  # pull_request, not pull_request_target: the job then runs THIS branch's copy
+  # of the workflow, so a fix to the sync script is testable in the pull request
+  # that makes it instead of only after it reaches main. The trade is that a
+  # fork PR gets no secrets, so the job below skips fork pull requests outright
+  # rather than half-running without a store.
+  pull_request:
     types:
       - opened
       - reopened
@@ -50,6 +55,12 @@ concurrency:
 
 jobs:
   sync:
+    # Fork pull requests carry no BACK_LOG_URL; mirroring them is impossible,
+    # and failing them would red-check contributions this repository cannot
+    # sync by design.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: cpp-indexer-runner
     env:
       BACKLOG_DB: postgres
@@ -91,7 +102,7 @@ jobs:
 
       - name: Check out merged delivery revision
         if: >-
-          github.event_name == 'pull_request_target' &&
+          github.event_name == 'pull_request' &&
           github.event.action == 'closed' &&
           github.event.pull_request.merged == true
         uses: actions/checkout@v4
@@ -103,7 +114,7 @@ jobs:
 
       - name: Verify merged delivery trust boundary
         if: >-
-          github.event_name == 'pull_request_target' &&
+          github.event_name == 'pull_request' &&
           github.event.action == 'closed' &&
           github.event.pull_request.merged == true
         shell: bash
@@ -131,7 +142,7 @@ jobs:
 
       - name: Prepare merged Backlog runtime
         if: >-
-          github.event_name == 'pull_request_target' &&
+          github.event_name == 'pull_request' &&
           github.event.action == 'closed' &&
           github.event.pull_request.merged == true
         shell: bash
@@ -218,7 +229,7 @@ jobs:
           current_pr_number="$("$BL" show "$task_key" --json | jq -r '.pr_number // empty')"
           if [[ -n "$current_pr_number" && "$current_pr_number" != "$pr_number" ]]; then
             case "$EVENT_NAME:$EVENT_ACTION" in
-              pull_request_target:opened)
+              pull_request:opened)
                 ;;
               *)
                 echo "Ignoring event for superseded PR #$pr_number; task records PR #$current_pr_number."
