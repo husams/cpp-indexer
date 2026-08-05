@@ -7,12 +7,67 @@
 
 #include <atomic>
 #include <exception>
+#include <filesystem>
 #include <memory>
 #include <stdexcept>
+#include <system_error>
 #include <utility>
 
 namespace cidx::index {
 namespace {
+
+// The immutable extraction input every worker reads.
+//
+// Workers must not read the authoritative database. Not because the reads are
+// wrong -- they are run-invariant lookups of file rows, component ownership and
+// configuration identity -- but because holding a SQLite read lock on the
+// database the scheduler is publishing into cannot work under rollback
+// journaling: a reader's SHARED lock and the writer's EXCLUSIVE lock exclude
+// each other, so a worker that reads while the writer commits fails the
+// publication outright.
+//
+// So the run takes ONE consistent snapshot through the SQLite backup API
+// before any worker starts, and every worker reads that instead. It is
+// immutable for the run's duration, which makes each worker's view of the
+// database independent of how far publication has progressed -- the same
+// property the deferred symbol-identity resolution gives the fact stream.
+//
+// Nothing that must observe this run's own publications reads through it:
+// owned-header ownership is decided by the scheduler's claim oracle, and
+// cross-translation-unit symbol identity is resolved by the controlled writer
+// against the live database.
+class ExtractionSnapshot {
+public:
+  explicit ExtractionSnapshot(cidx::Storage &db, const std::string &index_path)
+      : path_(index_path + ".extract-snapshot"), file_(path_),
+        journal_(path_ + "-journal") {
+    std::error_code discard;
+    std::filesystem::remove(path_, discard);
+    db.raw_db().backup_to(path_);
+  }
+
+  ExtractionSnapshot(const ExtractionSnapshot &) = delete;
+  auto operator=(const ExtractionSnapshot &) -> ExtractionSnapshot & = delete;
+  ExtractionSnapshot(ExtractionSnapshot &&) = delete;
+  auto operator=(ExtractionSnapshot &&) -> ExtractionSnapshot & = delete;
+
+  // Both paths are built in the constructor so cleanup allocates nothing and
+  // cannot throw out of a destructor.
+  ~ExtractionSnapshot() noexcept {
+    std::error_code discard;
+    std::filesystem::remove(file_, discard);
+    std::filesystem::remove(journal_, discard);
+  }
+
+  [[nodiscard]] auto path() const -> const std::string & { return path_; }
+
+private:
+  std::string path_;
+  // Held as paths, not strings, so cleanup constructs nothing and therefore
+  // allocates nothing on the destructor path.
+  std::filesystem::path file_;
+  std::filesystem::path journal_;
+};
 
 // A worker's isolated extraction context. Each one owns its own database
 // handle, its own IndexSession (and therefore its own Toolchain, descriptor and
@@ -66,7 +121,8 @@ auto run_parallel_index(cidx::Storage &db, const std::string &index_path,
                         bool graph_enabled, bool no_front_end_reuse,
                         const ParallelBudgets &budgets,
                         const std::function<bool()> &cancelled,
-                        const ParallelIndexObserver &observer)
+                        const ParallelIndexObserver &observer,
+                        const ParallelExtractionBarrier &extracted)
     -> ParallelIndexReport {
   ParallelIndexReport report;
   report.plan =
@@ -75,6 +131,7 @@ auto run_parallel_index(cidx::Storage &db, const std::string &index_path,
     return report;
   }
 
+  const ExtractionSnapshot snapshot(db, index_path);
   SequencedHeaderClaimOracle oracle;
   // Incremented from worker threads, so they cannot be plain members of the
   // report until the pool has joined.
@@ -88,7 +145,8 @@ auto run_parallel_index(cidx::Storage &db, const std::string &index_path,
       [&](std::size_t worker_index,
           std::size_t rank) -> ParallelResult<ast::IndexOneOutcome> {
     if (!workers[worker_index]) {
-      workers[worker_index] = std::make_unique<ExtractionWorker>(index_path);
+      workers[worker_index] =
+          std::make_unique<ExtractionWorker>(snapshot.path());
     }
     ExtractionWorker &worker = *workers[worker_index];
     const ParallelIndexTarget &target = targets[rank];
@@ -116,6 +174,9 @@ auto run_parallel_index(cidx::Storage &db, const std::string &index_path,
     }
     if (outcome.source_changed) {
       retry_exhausted.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (extracted) {
+      extracted(rank);
     }
     const std::uint64_t bytes = approximate_batch_bytes(outcome);
     return ParallelResult<ast::IndexOneOutcome>{
@@ -234,10 +295,20 @@ void record_parallel_index_profile(const ParallelIndexReport &report) {
                        report.claims.denied_in_flight_owner);
   profile::add_counter("parallel.header_claim_regranted_on_retry",
                        report.claims.regranted_on_retry);
+  profile::add_counter("parallel.header_claim_revoked_after_publish_failure",
+                       report.claims.revoked_after_publish_failure);
   profile::add_counter("parallel.source_change_retries", report.retries);
   profile::add_counter("parallel.retry_exhausted", report.retry_exhausted);
   profile::add_counter("parallel.peak_rss_bytes",
                        profile::process_peak_rss_bytes());
+  // Published translation units per wall second: the one figure that compares
+  // directly across worker counts, since every other counter scales with the
+  // pool rather than with delivered work.
+  if (report.run.wall_seconds > 0.0) {
+    profile::add_timing("parallel.publication_throughput_units_per_second",
+                        static_cast<double>(report.run.items_published) /
+                            report.run.wall_seconds);
+  }
   profile::add_timing("parallel.wall", report.run.wall_seconds);
   profile::add_timing("parallel.worker_active",
                       report.run.total_worker_active_seconds);

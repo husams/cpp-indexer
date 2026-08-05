@@ -431,7 +431,8 @@ void write_empty_record_vectors(TestWireWriter &writer) {
 }
 
 void write_empty_maps(TestWireWriter &writer) {
-  for (std::size_t map = 0; map < 5; ++map) {
+  // Four handle maps, the file map, and the deferred symbol-reference section.
+  for (std::size_t map = 0; map < 6; ++map) {
     writer.u64(0);
   }
 }
@@ -528,7 +529,7 @@ TEST_CASE("canonical FactBatch artifact round trips every fact family") {
         std::vector<std::string>{"sha256:dep-a", "sha256:dep-b"});
   CHECK(info.content_digest ==
         "sha256:"
-        "4c0c16a3a7a4cc298789812052445859dbdfd2a0df9228a64457a4c01cd87b42");
+        "21f640189942bb2a34dd7b0493c273aef12ebf2d0b56cf9f8783a4767cd3a511");
 
   const auto replay =
       ast::encode_fact_batch_artifact(require_batch(result), options);
@@ -648,7 +649,7 @@ TEST_CASE("FactBatch decoder exercises authenticated corruption branches") {
   duplicate_handle.string("first");
   duplicate_handle.i64(7);
   duplicate_handle.string("second");
-  for (std::size_t map = 0; map < 4; ++map) {
+  for (std::size_t map = 0; map < 5; ++map) {
     duplicate_handle.u64(0);
   }
   result = ast::decode_fact_batch_artifact(
@@ -664,7 +665,7 @@ TEST_CASE("FactBatch decoder exercises authenticated corruption branches") {
   unsorted_handles.string("later");
   unsorted_handles.i64(7);
   unsorted_handles.string("earlier");
-  for (std::size_t map = 0; map < 4; ++map) {
+  for (std::size_t map = 0; map < 5; ++map) {
     unsorted_handles.u64(0);
   }
   result = ast::decode_fact_batch_artifact(
@@ -747,7 +748,7 @@ TEST_CASE("FactBatch decoder exercises authenticated corruption branches") {
   require_diagnostic(result, ast::FactBatchArtifactErrorCode::incompatible);
 
   auto unsupported_version = empty_wire_bytes();
-  unsupported_version.at(kTestWireMagic.size()) = std::byte{0x03};
+  unsupported_version.at(kTestWireMagic.size()) = std::byte{0x04};
   refresh_test_digest(unsupported_version);
   result = ast::decode_fact_batch_artifact(
       ast::FactBatchArtifact::from_bytes(std::move(unsupported_version)),
@@ -938,7 +939,7 @@ TEST_CASE("FactBatch artifact spill is bounded and transfer neutral") {
   CHECK(require_info(result).byte_size == artifact.byte_size());
   CHECK(require_info(result).content_digest ==
         "sha256:"
-        "4c0c16a3a7a4cc298789812052445859dbdfd2a0df9228a64457a4c01cd87b42");
+        "21f640189942bb2a34dd7b0493c273aef12ebf2d0b56cf9f8783a4767cd3a511");
   CHECK(bytes(loaded) == bytes(artifact));
 
   REQUIRE(std::filesystem::remove(materialized));

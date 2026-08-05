@@ -24,6 +24,7 @@
 #include "include_hygiene/analysis.hpp"
 #include "include_hygiene/executor.hpp"
 #include "include_hygiene/plan.hpp"
+#include "index/parallel_index.hpp"
 #include "query/cxq.hpp"
 #include "query/exec.hpp"
 #include "storage/storage.hpp"
@@ -137,7 +138,11 @@ void log_parse_failure(Logger *logger, const std::string &path,
 // The one index lifecycle. Both the in-place path and the clean-rebuild path
 // call this with the database they are writing to, so default, --no-graph and
 // --defer-transforms behave identically no matter which entry point ran.
+// `index_path` is the on-disk location of `db`. Bounded parallel extraction
+// needs it because each worker opens its own read-only handle to the same
+// database; every other path ignores it.
 protocol::ResultEnvelope run_index_pass(Storage &db,
+                                        const std::string &index_path,
                                         const IndexRequest &request,
                                         ApplicationContext &context) {
   std::optional<std::string> source_root;
@@ -240,28 +245,21 @@ protocol::ResultEnvelope run_index_pass(Storage &db,
     truncated = true;
   }
 
-  ast::IndexSession session(db);
-  // Same cache orchestration as the CLI: one decision path, one set of
-  // counters, one conservative fallback.
-  TuFactCacheIndexer indexer(db, session,
-                             tu_fact_cache_options_from_environment());
-  for (std::size_t position = 0; position < targets.size(); ++position) {
-    const auto &[file, path] = targets[position];
-    if (context.cancellation().cancelled()) {
-      break;
-    }
+  // One accounting path for both extraction modes. Serial and parallel differ
+  // only in who produces the outcome and where it is published; every counter,
+  // diagnostic and file record below is derived identically, so `--jobs N`
+  // cannot report a run differently from `--jobs 1`.
+  const auto publish_progress = [&](std::size_t position,
+                                    const std::string &path) {
     context.publish(
         protocol::ProgressEvent{.sequence = static_cast<int64_t>(position),
                                 .operation = "index",
                                 .message = path,
                                 .completed = static_cast<int64_t>(position),
                                 .total = static_cast<int64_t>(targets.size())});
-    if (context.cancellation().cancelled()) {
-      break;
-    }
-    const ast::IndexOneOutcome outcome = indexer.index_one(
-        file, path, request.graph, ast::IndexFailurePoint::none,
-        request.no_front_end_reuse);
+  };
+  const auto record_outcome = [&](const File &file, const std::string &path,
+                                  const ast::IndexOneOutcome &outcome) {
     std::vector<Diagnostic> persisted_diagnostics = outcome.diagnostics;
     if ((outcome.parse_failed || outcome.source_changed) &&
         persisted_diagnostics.empty()) {
@@ -311,6 +309,65 @@ protocol::ResultEnvelope run_index_pass(Storage &db,
            {"headers_already", json_out::Value::of(outcome.headers.already)},
            {"headers_system", json_out::Value::of(outcome.headers.system)},
            {"headers_unowned", json_out::Value::of(outcome.headers.unowned)}}));
+    }
+  };
+
+  const index::ParallelBudgets budgets{
+      .jobs = request.jobs,
+      .max_queue_bytes = request.max_queue_bytes,
+      .max_queue_items = request.max_queue_items,
+      .memory_budget_bytes = request.memory_budget_bytes};
+  // The same pure policy the scheduler applies, asked here so a run that plans
+  // exactly one worker takes the serial path instead. That is not a silent
+  // downgrade of a parallel request: one worker IS the plan, and the serial
+  // path computes it with the translation-unit fact cache and without paying
+  // for an extraction snapshot.
+  const std::size_t planned_workers =
+      index::plan_parallel_extraction(budgets, index::probe_host_resources(),
+                                      targets.size())
+          .workers;
+  if (planned_workers > 1 && !index_path.empty()) {
+    // Bounded parallel extraction. `targets` is already in the legacy apply
+    // order -- list_files orders by (component.path, directory.path,
+    // file.name), and an explicit file list keeps the operator's order, which
+    // is the order the serial loop would have published in. The scheduler
+    // publishes in exactly that order regardless of who finishes first.
+    std::vector<index::ParallelIndexTarget> parallel_targets;
+    parallel_targets.reserve(targets.size());
+    for (const auto &[file, path] : targets) {
+      parallel_targets.push_back({.file = file, .path = path});
+    }
+    std::size_t position = 0;
+    const index::ParallelIndexReport report = index::run_parallel_index(
+        db, index_path, parallel_targets, request.graph,
+        request.no_front_end_reuse, budgets,
+        [&context] { return context.cancellation().cancelled(); },
+        [&](const index::ParallelIndexTarget &target,
+            const ast::IndexOneOutcome &outcome, bool /*published*/) {
+          publish_progress(position++, target.path);
+          record_outcome(target.file, target.path, outcome);
+          return !context.cancellation().cancelled();
+        });
+    index::record_parallel_index_profile(report);
+  } else {
+    ast::IndexSession session(db);
+    // Same cache orchestration as the CLI: one decision path, one set of
+    // counters, one conservative fallback.
+    TuFactCacheIndexer indexer(db, session,
+                               tu_fact_cache_options_from_environment());
+    for (std::size_t position = 0; position < targets.size(); ++position) {
+      const auto &[file, path] = targets[position];
+      if (context.cancellation().cancelled()) {
+        break;
+      }
+      publish_progress(position, path);
+      if (context.cancellation().cancelled()) {
+        break;
+      }
+      const ast::IndexOneOutcome outcome = indexer.index_one(
+          file, path, request.graph, ast::IndexFailurePoint::none,
+          request.no_front_end_reuse);
+      record_outcome(file, path, outcome);
     }
   }
   protocol::ResultEnvelope result = service_result("index", context, "index");
@@ -546,7 +603,7 @@ protocol::ResultEnvelope run_clean_rebuild(const std::string &index_path,
     // Every replayed file starts pending, so the ordinary "index everything
     // pending" lifecycle is exactly what a clean rebuild needs.
     pass_request.action = IndexAction::update;
-    pass = run_index_pass(candidate, pass_request, context);
+    pass = run_index_pass(candidate, candidate_path, pass_request, context);
   } catch (const std::exception &error) {
     return service_error("index", context, "backend_error",
                          std::string("clean rebuild failed: ") + error.what());
@@ -645,25 +702,26 @@ StorageApplicationOperations::execute(const IndexRequest &request,
   }
   // S-074: bounded parallel extraction is refused, not silently downgraded --
   // an operator who asked for it must never be told the run succeeded when it
-  // ran serially. See kIndexParallelUnavailable for why the mode is not
-  // reachable yet even though its scheduler is complete.
+  // ran serially. Workers open their own read-only handle to the database
+  // being written, so a database with no on-disk path (an in-memory index)
+  // cannot run the mode at all.
   //
-  // Refused here, at the one entry point, rather than inside run_index_pass:
+  // Checked here, at the one entry point, rather than inside run_index_pass:
   // both the in-place and clean-rebuild paths funnel through this, and a clean
   // rebuild creates and replays a candidate database BEFORE it reaches the
   // index pass. Checking downstream would do all of that work and then refuse.
-  //
-  // Refused whenever it is ASKED FOR, not only when there happens to be work,
-  // so an operator gets the same answer about an unavailable mode on an
-  // up-to-date index as on a cold one.
-  if (request.jobs > 1) {
+  const std::string index_path =
+      index_path_.empty() && context.workspace() != nullptr
+          ? context.workspace()->index_path()
+          : index_path_;
+  if (request.jobs > 1 && index_path.empty()) {
     return service_error("index", context, "unsupported",
-                         kIndexParallelUnavailable);
+                         kIndexParallelNeedsFileIndex);
   }
   if (request.clean) {
     return run_clean_rebuild(index_path_, request, context);
   }
-  return run_index_pass(storage_, request, context);
+  return run_index_pass(storage_, index_path, request, context);
 }
 
 protocol::ResultEnvelope

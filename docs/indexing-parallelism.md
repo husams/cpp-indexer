@@ -2,11 +2,10 @@
 
 Operating guide for `cidx index --jobs` and the bounded-extraction budgets.
 
-> **Status: the mechanism ships, the mode does not.** `--jobs N` greater than 1
-> is currently refused with a diagnostic. See
-> [Why `--jobs N > 1` is refused](#why---jobs-n--1-is-refused) for the exact
-> blocker and what closing it requires. Everything else on this page describes
-> behaviour that is implemented and tested.
+> **Status: available.** `--jobs N` runs bounded parallel extraction, and
+> omitting the option selects the automatic policy. The one case that is still
+> refused is an index with no on-disk path (an in-memory database), because
+> each worker opens its own handle to the database being indexed.
 
 ## Options
 
@@ -110,6 +109,7 @@ With `--profile-json PATH` the run publishes:
 * `parallel.header_claim_candidates`, `.granted`,
   `.denied_already_indexed`, `.denied_in_flight_owner`, `.regranted_on_retry`,
   `.revoked_after_publish_failure`
+* `parallel.publication_throughput_units_per_second`
 * `parallel.source_change_retries`, `parallel.retry_exhausted`
 * timings: `parallel.wall`, `.worker_active`, `.worker_idle`,
   `.backpressure`, `.publish_wait`, `.header_claim_gate_wait`,
@@ -120,43 +120,65 @@ With `--profile-json PATH` the run publishes:
 `header_claim_gate_wait` means one slow low-ranked unit is holding the ordered
 gate.
 
-## Why `--jobs N > 1` is refused
+## What a worker may read
 
-Extraction still **reads the authoritative database throughout each parse** —
-owned-header file rows, per-file configuration applicability, component
-ownership, portable identities, and cross-translation-unit external symbol
-identities.
-
-cidx ships rollback journaling with FULL synchronous durability on purpose
+A worker must not read the authoritative database. Not because the reads are
+wrong — file rows, component ownership and configuration identity are all
+run-invariant — but because they cannot coexist with publication. cidx ships
+rollback journaling with FULL synchronous durability on purpose
 (`storage/sqlite.cpp`: `PRAGMA journal_mode = DELETE`; WAL is explicitly gated
-behind measured atomicity evidence). Under rollback journaling a writer needs an
-EXCLUSIVE lock, which it cannot take while any connection holds SHARED. With
-several workers reading continuously, the window in which no reader holds SHARED
-shrinks toward zero, so the controlled writer is **starved** rather than merely
-slowed. Reproduced on a 24-unit corpus: every publication failed at
-`INSERT INTO translation_unit_config`.
+behind measured atomicity evidence). Under rollback journaling the writer needs
+an EXCLUSIVE lock, which it cannot take while any connection holds SHARED, so a
+worker that reads while the scheduler commits **fails the publication** rather
+than merely slowing it.
 
-Most of those reads are hoistable into an immutable per-run input, but one is
-not. `set_persistent_symbol_lookup` resolves a symbol's *external identity*
-against the live symbol table, mid-parse, keyed on a USR that is only discovered
-by parsing, and it deliberately sees rows published by **other translation units
-in the same run**. Ablating it on the 24-unit corpus loses 46 canonical rows —
-every `uses` edge from a unit into the header-owned `shared` namespace.
+Two mechanisms remove every such read:
 
-That makes it order-dependent by construction: a unit extracted concurrently
-with its predecessor would see a symbol table missing that predecessor's
-symbols, and the answer would depend on wall-clock timing rather than on legacy
-order. Making it deterministic again would require each unit's *parse* to wait
-for its predecessor's *publication*, which is full serialisation.
+**One immutable extraction snapshot per run.** Before any worker starts, the
+run copies the database through the SQLite backup API and every worker opens
+that copy READ-ONLY. It does not change for the duration of the run, so a
+worker's view of the database is independent of how far publication has
+progressed. Read-only is enforced by the open mode, not asserted: a regression
+that reintroduces a write from extraction surfaces as `SQLITE_READONLY`.
 
-Closing it therefore means resolving cross-unit identity **after** extraction
-instead of during it, which is a change to the identity model rather than to the
-scheduler.
+**Cross-unit symbol identity is resolved at publication, not during the parse.**
+This is the one read that is genuinely not hoistable. It is keyed on a USR that
+only the parse discovers, and it deliberately resolves against symbols published
+by *other* translation units in the same run — so answering it during extraction
+makes identity depend on wall-clock timing, and answering it from a pre-run
+snapshot silently drops facts (on a 24-unit corpus, 46 canonical rows: every
+`uses` edge from a unit into the header-owned `shared` namespace).
+
+Extraction therefore records the *question* — `(usr, identity_source,
+semantic universe, translation unit)` against a batch handle — as a
+`PendingSymbolReference`, and the controlled writer answers it at publication
+against the live database, using the same two identity-key probes the in-parse
+lookup used. Because the writer applies batches serially in the legacy apply
+order, cross-unit identity becomes a function of that order rather than of parse
+timing. That is strictly stronger than the behaviour it replaces.
+
+A reference that still does not resolve at publication is not an error: it is
+the deferred form of the serial lookup returning nothing, and the facts that
+depend on it are dropped exactly as the serial visitor never emitted them. The
+"relation endpoint did not resolve" invariant still holds for every endpoint
+this extraction minted itself.
+
+Worker-produced artifacts carry their pending references (FactBatch artifact
+wire version 3), so a transferred batch is self-describing.
 
 ## Troubleshooting
 
 **"--jobs must be a positive integer"** — the value was 0, negative,
 non-numeric, had trailing characters, or was empty.
+
+**"--jobs greater than 1 needs an index stored on disk"** — the selected index
+has no file to snapshot (an in-memory database). Use `--jobs 1`.
+
+**A run that plans one worker takes the serial path.** `--jobs 1`, a
+single-translation-unit run, and an automatic plan bounded to one worker all
+compute the same thing, and the serial path does it with the translation-unit
+fact cache and without paying for an extraction snapshot. `--jobs 4` on a
+one-unit run is a one-worker plan, and is reported as such.
 
 **Low utilisation with high `publish_wait`** — one slow low-ranked translation
 unit is holding the reorder buffer. Expected on corpora with one very large

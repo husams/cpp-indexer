@@ -19,32 +19,21 @@ inline constexpr const char *kIndexTransformFlagConflict =
 inline constexpr const char *kIndexCleanRequiresRebuild =
     "--clean is only valid for `index rebuild`";
 
-// S-074. The bounded parallel extraction mechanism -- worker/budget policy,
-// the ordered owned-header claim oracle, the bounded reorder buffer and
-// legacy-order publication through the single controlled writer -- is complete
-// and covered by tests. The mode is still refused end to end because
-// EXTRACTION ITSELF STILL READS THE AUTHORITATIVE DATABASE (owned-header file
-// rows, per-file configuration applicability, component ownership, portable
-// identities) throughout each parse.
+// S-074. Bounded parallel extraction is reachable: extraction resolves
+// cross-translation-unit symbol identity AFTER the parse, in the controlled
+// writer, so a worker performs no database read of symbol identity and the
+// answer depends on the legacy apply order rather than on parse timing.
 //
-// cidx ships rollback journaling with FULL synchronous durability
-// (storage/sqlite.cpp: `PRAGMA journal_mode = DELETE`), deliberately, and WAL
-// is explicitly not enabled without measured atomicity evidence. Under rollback
-// journaling a writer needs an EXCLUSIVE lock, which no connection can take
-// while another holds a SHARED read lock. Concurrent workers reading the
-// database therefore starve the scheduler's controlled writer, which fails the
-// publication rather than merely slowing it down.
-//
-// Closing this needs the story's "workers consume immutable extraction inputs"
-// bullet: hoist every extraction-time read into an immutable per-run snapshot
-// handed to the worker, so a worker touches no database at all. That is a
-// change to the extraction engine's inputs, not to this scheduler, and it is
-// not something to fake with a lock retry -- retrying would trade a hard
-// failure for an unbounded stall.
-inline constexpr const char *kIndexParallelUnavailable =
-    "--jobs greater than 1 is not available yet: translation-unit extraction "
-    "still reads the index database, which cannot run concurrently with the "
-    "controlled writer under rollback journaling. Use --jobs 1.";
+// What remains a hard requirement is that every worker can open the database
+// it is indexing. cidx ships rollback journaling with FULL synchronous
+// durability (storage/sqlite.cpp: `PRAGMA journal_mode = DELETE`), so worker
+// handles are opened READ-ONLY: any regression that reintroduces a write from
+// extraction surfaces as a loud SQLITE_READONLY rather than as a silent race
+// with the scheduler's writer.
+inline constexpr const char *kIndexParallelNeedsFileIndex =
+    "--jobs greater than 1 needs an index stored on disk: each extraction "
+    "worker opens its own read-only handle to the same database, which an "
+    "in-memory index cannot provide. Use --jobs 1.";
 
 struct IndexRequest {
   IndexAction action = IndexAction::update;

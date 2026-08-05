@@ -72,14 +72,23 @@ using ParallelIndexObserver =
     std::function<bool(const ParallelIndexTarget &target,
                        const ast::IndexOneOutcome &outcome, bool published)>;
 
-// `index_path` is the authoritative database each worker opens read-only.
+// Deterministic completion-order control, in the same spirit as the engine's
+// IndexFailurePoint injectors: null on every production path, and the only way
+// a test can force a completion order that is NOT the dispatch order. Invoked
+// on the worker thread with the rank it just finished extracting, before the
+// result reaches the reorder buffer.
+using ParallelExtractionBarrier = std::function<void(std::size_t rank)>;
+
+// `index_path` is the authoritative database. Workers never open it: the run
+// takes one consistent snapshot of it and each worker reads that read-only.
 // `db` is the scheduler's read-write handle, and the only handle that writes.
 [[nodiscard]] auto run_parallel_index(
     cidx::Storage &db, const std::string &index_path,
     const std::vector<ParallelIndexTarget> &targets, bool graph_enabled,
     bool no_front_end_reuse, const ParallelBudgets &budgets,
     const std::function<bool()> &cancelled,
-    const ParallelIndexObserver &observer) -> ParallelIndexReport;
+    const ParallelIndexObserver &observer,
+    const ParallelExtractionBarrier &extracted = {}) -> ParallelIndexReport;
 
 // Publishes the report through the opt-in profile session. Named separately so
 // a caller can decide when telemetry is emitted.
