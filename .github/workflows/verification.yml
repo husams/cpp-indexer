@@ -518,14 +518,14 @@ jobs:
         run: spec/tla/tools/check-sidecar-conformance.sh
 
   tla-policy:
-    name: Protected invariant review policy
+    name: Manifest and workflow policy regression
     needs: changes
     if: needs.changes.outputs.tla_policy == 'true'
     runs-on: cpp-indexer-runner
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-      - name: Check protected invariant review policy
+      - name: Validate the manifest and the workflow install policy
         run: spec/tla/tools/check-policy.sh
 
   cpp-default:
