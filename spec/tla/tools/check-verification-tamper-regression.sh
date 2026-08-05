@@ -3,8 +3,8 @@
 # Regression proving the P1 fix (internal-critic review of HSE-89, round 5):
 # the scripts that actually RUN TLC/TLAPS/conformance (check.sh,
 # check-conformance.sh, check-sidecar-conformance.sh, check-proofs.sh) had
-# the same self-policing gap check-protected-review.sh and
-# check-gate-selection.sh were already fixed for -- a single PR could (a)
+# the same self-policing gap check-gate-selection.sh was already fixed for
+# -- a single PR could (a)
 # weaken a protected invariant (e.g. drop ProtectedInvariant from a model
 # config, or edit protected/CidxProtected.tla) and (b) in the same commit
 # replace check.sh with a stub that exits 0, so CI would run that tampered
@@ -44,8 +44,8 @@
 # further gaps: a bootstrap fallback that fires on ANY nonzero
 # `git cat-file -e BASE:PATH` cannot tell "checker is genuinely new" apart
 # from "the base commit never resolved" (fixed in extract-trusted-checker.sh,
-# the single shared implementation every extraction step but
-# check-protected-review.sh's now calls); and an extraction destination
+# the single shared implementation every extraction step now calls); and an
+# extraction destination
 # inside the checked-out repository tree is a path the PR under review fully
 # controls (test 4 proves the helper refuses this outright, rather than
 # relying on write-ordering or symlink-following semantics to stay safe).
@@ -256,9 +256,7 @@ echo "TLA_VERIFICATION_TAMPER_STATUS=PASS check=extract-trusted-checker-bootstra
 
 # --- Test 6: every workflow extraction step delegates to
 # extract-trusted-checker.sh and writes to $RUNNER_TEMP (outside the
-# checkout), except check-protected-review.sh, which stays unconditional,
-# hand-written, and destined for $RUNNER_TEMP too -- it never calls the
-# shared helper's first-introduction bootstrap branch at all. This is a
+# checkout). This is a
 # static workflow contract because GitHub expression interpolation is not
 # available to local shell tests; the executable proofs above cover the
 # extraction logic's actual runtime behavior.
@@ -301,10 +299,6 @@ checkers = {
     # extracted once, alongside check-proofs.sh, into the same $RUNNER_TEMP
     # directory so the base-pinned copy resolves it there.
     "check-proofs-binding.sh": 1,
-    # The protected-review checker also uses the shared extractor. When the
-    # checker is first introduced, the extractor reports bootstrap and the
-    # checker requires an independent current-head approval.
-    "check-protected-review.sh": 1,
 }
 
 for checker, expected_count in checkers.items():
@@ -423,46 +417,6 @@ if "CIDX_CHECK_PROOFS_SH: ${{ runner.temp }}/check-proofs.sh" not in proof_bindi
     raise SystemExit(
         "TLA_VERIFICATION_TAMPER_REGRESSION_STATUS=FAIL "
         "reason=cidx-check-proofs-sh-not-wired-to-runner-temp"
-    )
-
-# The protected-review checker uses the shared extractor too. Its
-# first-introduction mode remains fail-closed against self-approval, but is
-# not an immutable self-protection boundary while both new files are
-# head-controlled; external enforcement is required before this can be
-# treated as a complete introduction gate.
-protected_review_marker = (
-    f"extract-trusted-checker.sh \\\n            \"${{{{ github.event.pull_request.base.sha }}}}\" \\\n            spec/tla/tools/check-protected-review.sh \\\n"
-)
-if workflow.count(protected_review_marker) != 1:
-    raise SystemExit(
-        "TLA_VERIFICATION_TAMPER_REGRESSION_STATUS=FAIL "
-        "reason=protected-review-extraction-missing-or-duplicated"
-    )
-protected_review_start = workflow.index(protected_review_marker)
-protected_review_end = workflow.find("\n      - name:", protected_review_start)
-protected_review_block = workflow[protected_review_start:protected_review_end]
-if '"$RUNNER_TEMP/check-protected-review.sh"' not in protected_review_block:
-    raise SystemExit(
-        "TLA_VERIFICATION_TAMPER_REGRESSION_STATUS=FAIL "
-        "reason=protected-review-destination-not-runner-temp"
-    )
-if 'TLA_PROTECTED_REVIEW_BOOTSTRAP=true' not in protected_review_block:
-    raise SystemExit(
-        "TLA_VERIFICATION_TAMPER_REGRESSION_STATUS=FAIL "
-        "reason=protected-review-bootstrap-signal-not-wired"
-    )
-protected_review_source = pathlib.Path(
-    repo_root, "spec/tla/tools/check-protected-review.sh"
-).read_text()
-if "bootstrap-requires-independent-head-approval" not in protected_review_source:
-    raise SystemExit(
-        "TLA_VERIFICATION_TAMPER_REGRESSION_STATUS=FAIL "
-        "reason=protected-review-bootstrap-not-independent"
-    )
-if 'run: "$RUNNER_TEMP/check-protected-review.sh"' not in workflow:
-    raise SystemExit(
-        "TLA_VERIFICATION_TAMPER_REGRESSION_STATUS=FAIL "
-        "reason=protected-review-execution-not-runner-temp"
     )
 
 # No extraction destination anywhere in the workflow may resolve inside the

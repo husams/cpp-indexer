@@ -3,7 +3,7 @@
 # HSE-89 internal-critic P1 (round 5): verification.yml extracts this script
 # from GITHUB_BASE_SHA for pull_request events and runs THAT copy rather than
 # the PR's own checkout, exactly as it already does for
-# check-protected-review.sh and check-gate-selection.sh -- a PR that weakens
+# check-gate-selection.sh -- a PR that weakens
 # a protected invariant could otherwise replace this script with a stub that
 # exits 0 in the same commit. CIDX_REPO_ROOT lets that extracted copy -- which
 # no longer lives inside the repository tree -- still resolve ROOT to the

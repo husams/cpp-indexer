@@ -67,11 +67,9 @@ generated file cannot silently redefine the checked-in policy.
 The last two entries close a self-bypass gap (HSE-89 review fix): without
 them, a change could edit `manifest.json` to remove a `protectedPaths` entry,
 or edit `.github/CODEOWNERS` to add itself as an owner, and neither edit would
-itself require review. `tools/check-protected-review.sh` additionally
-resolves both files from `GITHUB_BASE_SHA` (the pre-PR commit), not the
-checked-out worktree, so evaluating a PR's diff against its own edited copy
-of these files is not possible even if this protectedPaths entry were somehow
-missing.
+itself require review. Enforcement is GitHub's own CODEOWNERS review
+requirement plus branch protection; the repository no longer carries a
+second, in-CI copy of that check.
 
 ## Assurance-level and proof policy (HSE-89)
 

@@ -43,7 +43,7 @@ jobs:
         run: git fetch origin "${{ github.event.pull_request.base.ref }}"
       - name: Extract the trusted (base-commit) gate-selection regression test
         if: github.event_name == 'pull_request'
-        # Same self-policing gap as check-protected-review.sh below: a PR
+        # A PR must not police itself: it
         # could narrow ci-dependency-map.json's flow->gates mapping and
         # delete the matching run_case assertion in check-gate-selection.sh
         # in the same change, so the checker that proves the mapping is
@@ -162,8 +162,7 @@ jobs:
         if: github.event_name == 'pull_request'
         # Internal-critic P1 (round 5): the scripts that actually RUN
         # TLC/TLAPS/conformance were never covered by the base-pinning
-        # already applied to check-protected-review.sh and
-        # check-gate-selection.sh. A PR could weaken a protected invariant
+        # already applied to check-gate-selection.sh. A PR could weaken a protected invariant
         # (protected/CidxProtected.tla, modules/CidxTypes.tla, models/*.cfg,
         # ...) and, in the same commit, replace check.sh with a stub that
         # exits 0; CI would then run that tampered copy straight from the
@@ -528,56 +527,6 @@ jobs:
         uses: actions/checkout@v4
       - name: Check protected invariant review policy
         run: spec/tla/tools/check-policy.sh
-
-  tla-protected-diff-review:
-    name: Protected-path change requires CODEOWNER approval
-    if: github.event_name == 'pull_request'
-    runs-on: cpp-indexer-runner
-    permissions:
-      contents: read
-      pull-requests: read
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Fetch base ref
-        run: |
-          git fetch origin "${{ github.event.pull_request.base.ref }}"
-      - name: Extract the trusted (base-commit) checker
-        # The PR's own checkout must never be the code that polices the PR:
-        # a PR could otherwise rewrite check-protected-review.sh to always
-        # pass. Extract the script as it existed at the base commit and run
-        # THAT copy; CIDX_REPO_ROOT points it back at the real checkout for
-        # git/CODEOWNERS access.
-        #
-        # A first-introduction PR has no base copy to extract. The shared
-        # helper's bootstrap is fail-closed in check-protected-review.sh: it
-        # accepts only a current-head approval from a reviewer other than the
-        # PR author, never a self-approval or a base CODEOWNER row that cannot
-        # yet describe the new checker. Because both the helper and checker
-        # are head-controlled when first introduced, this bootstrap is not an
-        # immutable self-protection boundary; external enforcement and a real
-        # independent reviewer remain required. The helper still hard-fails
-        # for an unresolved base commit and writes only outside the checkout.
-        run: |
-          result="$(spec/tla/tools/extract-trusted-checker.sh \
-            "${{ github.event.pull_request.base.sha }}" \
-            spec/tla/tools/check-protected-review.sh \
-            "$RUNNER_TEMP/check-protected-review.sh")"
-          echo "$result"
-          if [[ "$result" == *" mode=bootstrap "* ]]; then
-            echo "TLA_PROTECTED_REVIEW_BOOTSTRAP=true" >> "$GITHUB_ENV"
-          fi
-      - name: Require CODEOWNER approval for protected-path changes
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_PR_NUMBER: ${{ github.event.pull_request.number }}
-          GITHUB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          GITHUB_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          CIDX_REPO_ROOT: ${{ github.workspace }}
-        run: "$RUNNER_TEMP/check-protected-review.sh"
 
   cpp-default:
     name: C++ default tests
