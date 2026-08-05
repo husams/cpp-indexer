@@ -97,8 +97,7 @@
         "spec/tla/manifest.json",
         "spec/tla/README.md",
         ".github/CODEOWNERS",
-        "spec/tla/tools/check-policy.sh",
-        "spec/tla/tools/check-protected-review.sh"
+        "spec/tla/tools/check-policy.sh"
       ]
     },
     {

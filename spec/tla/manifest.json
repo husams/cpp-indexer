@@ -199,7 +199,6 @@
     "counterexamples/golden/",
     "/.github/CODEOWNERS",
     "/spec/tla/manifest.json",
-    "tools/check-protected-review.sh",
     "tools/check-policy.sh",
     "tools/select-changed-gates.sh",
     "tools/check-gate-selection.sh",

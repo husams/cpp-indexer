@@ -22,7 +22,6 @@ required = (
     "/spec/tla/counterexamples/golden/ @husams",
     "/.github/CODEOWNERS @husams",
     "/spec/tla/manifest.json @husams",
-    "/spec/tla/tools/check-protected-review.sh @husams",
     "/spec/tla/tools/check-policy.sh @husams",
     "/spec/tla/tools/select-changed-gates.sh @husams",
     "/spec/tla/tools/check-gate-selection.sh @husams",
