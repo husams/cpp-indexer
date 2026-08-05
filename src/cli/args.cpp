@@ -138,6 +138,9 @@ void build_top_level(CLI::App &app, ParsedArgs &pa) {
                   "skip relationship-graph extraction (calls, inherits, ...)");
   index->add_flag("--defer-transforms", pa.defer_transforms,
                   "persist extracted facts and defer derived publication");
+  index->add_flag("--clean", pa.clean_rebuild,
+                  "with `index rebuild`: build a private candidate database, "
+                  "verify it, and publish it atomically");
   index->add_flag("--no-front-end-reuse", pa.no_front_end_reuse,
                   "disable optional front-end reuse (diagnostic; none is "
                   "currently shipped)");

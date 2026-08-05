@@ -15,6 +15,8 @@ enum class IndexAction : std::uint8_t { update, rebuild, status, explain };
 
 inline constexpr const char *kIndexTransformFlagConflict =
     "--no-graph and --defer-transforms are mutually exclusive";
+inline constexpr const char *kIndexCleanRequiresRebuild =
+    "--clean is only valid for `index rebuild`";
 
 struct IndexRequest {
   IndexAction action = IndexAction::update;
@@ -22,6 +24,9 @@ struct IndexRequest {
   std::optional<std::string> source;
   bool graph = true;
   bool defer_transforms = false;
+  // Opt-in clean rebuild: index into a private candidate database, verify it,
+  // and publish it with one atomic rename. Never edits the serving database.
+  bool clean = false;
   bool autoderive_labels = true;
   bool no_front_end_reuse = false;
   bool json = false;

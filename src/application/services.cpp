@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "application/analysis_service.hpp"
+#include "application/clean_rebuild.hpp"
 #include "ast/clang_version.hpp"
 #include "ast/index_engine.hpp"
 #include "astgraph/astgraph.hpp"
@@ -133,27 +134,12 @@ void log_parse_failure(Logger *logger, const std::string &path,
   }
 }
 
-} // namespace
-
-protocol::ResultEnvelope
-StorageApplicationOperations::execute(const IndexRequest &request,
-                                      ApplicationContext &context) {
-  if (!request.graph && request.defer_transforms) {
-    return service_error("index", context, "invalid_input",
-                         kIndexTransformFlagConflict);
-  }
-  if (request.action == IndexAction::status &&
-      context.read_ports().schema != nullptr) {
-    const Stats stats = context.read_ports().schema->stats();
-    protocol::ResultEnvelope result =
-        service_result("index.status", context, "index");
-    result.result =
-        json_out::Value::obj({{"files", json_out::Value::of(stats.files)},
-                              {"symbols", json_out::Value::of(stats.symbols)},
-                              {"edges", json_out::Value::of(stats.edges)}});
-    return result;
-  }
-  Storage &db = storage_;
+// The one index lifecycle. Both the in-place path and the clean-rebuild path
+// call this with the database they are writing to, so default, --no-graph and
+// --defer-transforms behave identically no matter which entry point ran.
+protocol::ResultEnvelope run_index_pass(Storage &db,
+                                        const IndexRequest &request,
+                                        ApplicationContext &context) {
   std::optional<std::string> source_root;
   if (request.source) {
     const std::optional<Component> component =
@@ -428,6 +414,239 @@ StorageApplicationOperations::execute(const IndexRequest &request,
     result.identity.freshness = identity.freshness;
   }
   return result;
+}
+
+// Removes the candidate database unless it has been published or explicitly
+// released. A clean rebuild must never leave a half-built database behind.
+class CandidateGuard {
+public:
+  // The path is stored as a filesystem::path so the destructor's removal is
+  // itself noexcept: cleanup runs on the failure path and must never raise a
+  // second failure over the one being reported.
+  explicit CandidateGuard(const std::string &path) : path_(path) {}
+  ~CandidateGuard() noexcept {
+    if (!armed_) {
+      return;
+    }
+    std::error_code ec;
+    std::filesystem::remove(path_, ec);
+  }
+  CandidateGuard(const CandidateGuard &) = delete;
+  CandidateGuard &operator=(const CandidateGuard &) = delete;
+  CandidateGuard(CandidateGuard &&) = delete;
+  CandidateGuard &operator=(CandidateGuard &&) = delete;
+
+  void release() noexcept { armed_ = false; }
+
+private:
+  std::filesystem::path path_;
+  bool armed_ = true;
+};
+
+json_out::Value clean_rebuild_report(const std::string &candidate_path,
+                                     const CleanRebuildVerification &checks,
+                                     bool published,
+                                     const std::string &detail) {
+  return json_out::Value::obj(
+      {{"published", json_out::Value::of(published)},
+       {"candidate", json_out::Value::of(candidate_path)},
+       {"schema_version",
+        json_out::Value::of(static_cast<int64_t>(checks.schema_version))},
+       {"integrity_ok", json_out::Value::of(checks.integrity_ok)},
+       {"foreign_keys_ok", json_out::Value::of(checks.foreign_keys_ok)},
+       {"catalog_ok", json_out::Value::of(checks.catalog_ok)},
+       {"complete", json_out::Value::of(checks.complete)},
+       {"files_pending", json_out::Value::of(checks.files_pending)},
+       {"catalog_digest", json_out::Value::of(checks.catalog.digest)},
+       {"semantic_digest", json_out::Value::of(checks.semantic_digest)},
+       {"detail", json_out::Value::of(detail)}});
+}
+
+// Clean rebuild: build a private candidate, verify it, publish it atomically.
+// The serving database is only ever read, and only replaced by one rename of a
+// fully verified file.
+protocol::ResultEnvelope run_clean_rebuild(const std::string &index_path,
+                                           const IndexRequest &request,
+                                           ApplicationContext &context) {
+  if (index_path.empty()) {
+    return service_error("index", context, "invalid_input",
+                         "clean rebuild requires an index database path");
+  }
+  if (!request.files.empty()) {
+    return service_error("index", context, "invalid_input",
+                         "clean rebuild rebuilds the whole index; it does not "
+                         "accept file arguments");
+  }
+  if (request.source) {
+    return service_error("index", context, "invalid_input",
+                         "clean rebuild rebuilds the whole index; it does not "
+                         "accept --source");
+  }
+
+  const CleanRebuildFailurePoint failure =
+      clean_rebuild_failure_point_from_environment();
+  const auto injected = [&](CleanRebuildFailurePoint point) {
+    return failure == point;
+  };
+  const auto injection_error = [&](CleanRebuildFailurePoint point) {
+    return service_error(
+        "index", context, "backend_error",
+        "clean rebuild aborted: injected failure at " +
+            std::string(clean_rebuild_failure_point_name(point)));
+  };
+
+  CleanRebuildInputs inputs;
+  storage::DatabaseCatalogIdentity expected;
+  const bool had_serving_database = [&] {
+    std::error_code ec;
+    const bool exists = std::filesystem::exists(index_path, ec);
+    return exists && !ec;
+  }();
+  try {
+    inputs = capture_clean_rebuild_inputs(index_path);
+    if (had_serving_database) {
+      expected = storage::read_database_catalog_identity(index_path);
+    }
+  } catch (const std::exception &error) {
+    return service_error("index", context, "backend_error",
+                         std::string("clean rebuild cannot read the index "
+                                     "database: ") +
+                             error.what());
+  }
+  if (injected(CleanRebuildFailurePoint::after_inputs_captured)) {
+    return injection_error(CleanRebuildFailurePoint::after_inputs_captured);
+  }
+
+  const std::string candidate_path = clean_rebuild_candidate_path(index_path);
+  {
+    // A candidate left by an earlier crashed run is not evidence about this
+    // one; it is removed before the new candidate is created.
+    std::error_code ec;
+    std::filesystem::remove(candidate_path, ec);
+  }
+  CandidateGuard guard(candidate_path);
+
+  protocol::ResultEnvelope pass;
+  try {
+    Storage candidate(candidate_path);
+    if (injected(CleanRebuildFailurePoint::after_candidate_created)) {
+      return injection_error(CleanRebuildFailurePoint::after_candidate_created);
+    }
+    replay_clean_rebuild_inputs(candidate, inputs);
+    if (!had_serving_database) {
+      // Nothing was in service, so the replayed catalog is the only reference
+      // the candidate can be held to.
+      expected = storage::read_database_catalog_identity(candidate_path);
+    }
+    if (injected(CleanRebuildFailurePoint::after_inputs_replayed)) {
+      return injection_error(CleanRebuildFailurePoint::after_inputs_replayed);
+    }
+    IndexRequest pass_request = request;
+    pass_request.clean = false;
+    // Every replayed file starts pending, so the ordinary "index everything
+    // pending" lifecycle is exactly what a clean rebuild needs.
+    pass_request.action = IndexAction::update;
+    pass = run_index_pass(candidate, pass_request, context);
+  } catch (const std::exception &error) {
+    return service_error("index", context, "backend_error",
+                         std::string("clean rebuild failed: ") + error.what());
+  }
+  if (injected(CleanRebuildFailurePoint::after_candidate_indexed)) {
+    return injection_error(CleanRebuildFailurePoint::after_candidate_indexed);
+  }
+
+  if (pass.status != protocol::Status::Complete) {
+    pass.result = json_out::Value::obj(
+        {{"index", pass.result},
+         {"clean_rebuild",
+          clean_rebuild_report(candidate_path, CleanRebuildVerification{},
+                               false,
+                               "candidate was not published: the rebuild did "
+                               "not complete")}});
+    if (pass.status == protocol::Status::Complete) {
+      pass.status = protocol::Status::Error;
+    }
+    return pass;
+  }
+
+  CleanRebuildVerification checks;
+  try {
+    checks = verify_clean_rebuild_candidate(candidate_path, expected, true);
+  } catch (const std::exception &error) {
+    return service_error("index", context, "backend_error",
+                         std::string("clean rebuild verification failed: ") +
+                             error.what());
+  }
+  if (!checks.passed()) {
+    protocol::ResultEnvelope result = service_result("index", context, "index");
+    result.status = protocol::Status::Error;
+    result.completeness.state = "unknown";
+    result.identity.freshness = "unverifiable";
+    result.result = json_out::Value::obj(
+        {{"index", pass.result},
+         {"clean_rebuild", clean_rebuild_report(candidate_path, checks, false,
+                                                checks.failure_reason())}});
+    result.diagnostics.push_back(
+        protocol::Diagnostic{.code = "backend_error",
+                             .severity = "error",
+                             .message = "clean rebuild refused publication: " +
+                                        checks.failure_reason()});
+    return result;
+  }
+  if (injected(CleanRebuildFailurePoint::after_verification)) {
+    return injection_error(CleanRebuildFailurePoint::after_verification);
+  }
+
+  const std::string refusal = publish_clean_rebuild_candidate(
+      candidate_path, index_path, inputs.source_digest, failure);
+  if (!refusal.empty()) {
+    protocol::ResultEnvelope result = service_result("index", context, "index");
+    result.status = protocol::Status::Error;
+    result.completeness.state = "unknown";
+    result.identity.freshness = "unverifiable";
+    result.result = json_out::Value::obj(
+        {{"index", pass.result},
+         {"clean_rebuild",
+          clean_rebuild_report(candidate_path, checks, false, refusal)}});
+    result.diagnostics.push_back(protocol::Diagnostic{
+        .code = "backend_error",
+        .severity = "error",
+        .message = "clean rebuild could not publish: " + refusal});
+    return result;
+  }
+  // Published: the candidate path no longer exists, so the guard must not fire.
+  guard.release();
+  pass.result = json_out::Value::obj(
+      {{"index", pass.result},
+       {"clean_rebuild",
+        clean_rebuild_report(candidate_path, checks, true, "")}});
+  return pass;
+}
+
+} // namespace
+
+protocol::ResultEnvelope
+StorageApplicationOperations::execute(const IndexRequest &request,
+                                      ApplicationContext &context) {
+  if (!request.graph && request.defer_transforms) {
+    return service_error("index", context, "invalid_input",
+                         kIndexTransformFlagConflict);
+  }
+  if (request.action == IndexAction::status &&
+      context.read_ports().schema != nullptr) {
+    const Stats stats = context.read_ports().schema->stats();
+    protocol::ResultEnvelope result =
+        service_result("index.status", context, "index");
+    result.result =
+        json_out::Value::obj({{"files", json_out::Value::of(stats.files)},
+                              {"symbols", json_out::Value::of(stats.symbols)},
+                              {"edges", json_out::Value::of(stats.edges)}});
+    return result;
+  }
+  if (request.clean) {
+    return run_clean_rebuild(index_path_, request, context);
+  }
+  return run_index_pass(storage_, request, context);
 }
 
 protocol::ResultEnvelope
