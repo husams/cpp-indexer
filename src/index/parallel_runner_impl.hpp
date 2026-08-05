@@ -1,4 +1,6 @@
 // Implementation of run_parallel_extraction. Included by parallel_runner.hpp.
+// A header rather than a .ipp so the architecture manifest can classify it
+// like every other project include.
 #pragma once
 
 #include <algorithm>

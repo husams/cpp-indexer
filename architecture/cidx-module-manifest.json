@@ -2,8 +2,13 @@
   "apiVersion": "cidx.architecture/v1",
   "manifestVersion": 1,
   "repository": "husams/cpp-indexer",
-  "sourceRoots": ["src", "python/indexer"],
-  "cmakeFiles": ["CMakeLists.txt"],
+  "sourceRoots": [
+    "src",
+    "python/indexer"
+  ],
+  "cmakeFiles": [
+    "CMakeLists.txt"
+  ],
   "modules": [
     {
       "id": "model.contracts",
@@ -17,21 +22,57 @@
         "src/extract/plan_ir.hpp",
         "src/catalogs/**"
       ],
-      "allowedDependencies": ["model.contracts"],
+      "allowedDependencies": [
+        "model.contracts"
+      ],
       "description": "Clang-free, SQLite-free domain records and semantic IR values."
     },
     {
       "id": "foundation.util",
       "layer": "foundation",
-      "paths": ["src/util/**", "src/profile/**"],
-      "allowedDependencies": ["foundation.util", "model.contracts"],
-      "allowedExternal": ["filesystem", "process", "sqlite"],
+      "paths": [
+        "src/util/**",
+        "src/profile/**"
+      ],
+      "allowedDependencies": [
+        "foundation.util",
+        "model.contracts"
+      ],
+      "allowedExternal": [
+        "filesystem",
+        "process",
+        "sqlite"
+      ],
       "description": "Small platform utilities and opt-in telemetry; filesystem, process, and telemetry-only SQLite access live here."
+    },
+    {
+      "id": "foundation.scheduling",
+      "layer": "foundation",
+      "paths": [
+        "src/index/header_claims.hpp",
+        "src/index/header_claims.cpp",
+        "src/index/parallel_policy.hpp",
+        "src/index/parallel_policy.cpp",
+        "src/index/parallel_runner.hpp",
+        "src/index/parallel_runner_impl.hpp"
+      ],
+      "allowedDependencies": [
+        "foundation.scheduling",
+        "model.contracts"
+      ],
+      "allowedExternal": [
+        "filesystem",
+        "process"
+      ],
+      "description": "Clang-free, SQLite-free bounded-parallelism primitives: worker/budget policy, the ordered owned-header claim oracle, and the bounded legacy-order dispatch runner. Depends on no product state, which is what lets the extraction engine consume the claim oracle."
     },
     {
       "id": "workspace.toolchain",
       "layer": "workspace",
-      "paths": ["src/toolchain/**", "src/workspace/**"],
+      "paths": [
+        "src/toolchain/**",
+        "src/workspace/**"
+      ],
       "allowedDependencies": [
         "workspace.toolchain",
         "foundation.util",
@@ -42,19 +83,26 @@
     {
       "id": "frontend.compiledb",
       "layer": "frontend",
-      "paths": ["src/compiledb/**"],
+      "paths": [
+        "src/compiledb/**"
+      ],
       "allowedDependencies": [
         "frontend.compiledb",
         "foundation.util",
         "model.contracts"
       ],
-      "allowedExternal": ["clang", "llvm"],
+      "allowedExternal": [
+        "clang",
+        "llvm"
+      ],
       "description": "Clang compilation-database adapter."
     },
     {
       "id": "extraction.ast",
       "layer": "extraction",
-      "paths": ["src/ast/**"],
+      "paths": [
+        "src/ast/**"
+      ],
       "excludePaths": [
         "src/ast/symbol_record.hpp",
         "src/ast/edge_records.hpp"
@@ -64,16 +112,24 @@
         "model.contracts",
         "foundation.util",
         "frontend.compiledb",
-        "workspace.toolchain"
+        "workspace.toolchain",
+        "foundation.scheduling"
       ],
-      "allowedExternal": ["clang", "llvm"],
+      "allowedExternal": [
+        "clang",
+        "llvm"
+      ],
       "description": "Typed LibTooling visitors, identity encoders, and extraction ports/adapters."
     },
     {
       "id": "extraction.dsl",
       "layer": "extraction",
-      "paths": ["src/extract/**"],
-      "excludePaths": ["src/extract/plan_ir.hpp"],
+      "paths": [
+        "src/extract/**"
+      ],
+      "excludePaths": [
+        "src/extract/plan_ir.hpp"
+      ],
       "allowedDependencies": [
         "extraction.dsl",
         "extraction.ast",
@@ -83,14 +139,21 @@
         "frontend.compiledb",
         "persistence.sqlite"
       ],
-      "allowedExternal": ["clang", "llvm"],
+      "allowedExternal": [
+        "clang",
+        "llvm"
+      ],
       "description": "HSE-64 declarative AST extraction DSL: the ExtractionPlan IR, validator, Clang dynamic-matcher execution engine, and extension fact sink."
     },
     {
       "id": "analysis.astgraph",
       "layer": "analysis",
-      "paths": ["src/astgraph/**"],
-      "excludePaths": ["src/astgraph/main.cpp"],
+      "paths": [
+        "src/astgraph/**"
+      ],
+      "excludePaths": [
+        "src/astgraph/main.cpp"
+      ],
       "allowedDependencies": [
         "analysis.astgraph",
         "extraction.ast",
@@ -100,15 +163,32 @@
         "foundation.util",
         "persistence.sqlite"
       ],
-      "allowedExternal": ["clang", "llvm"],
-      "description": "Raw-AST artifact extraction and Soufflé analysis adapter."
+      "allowedExternal": [
+        "clang",
+        "llvm"
+      ],
+      "description": "Raw-AST artifact extraction and Souffl\u00e9 analysis adapter."
     },
     {
       "id": "persistence.sqlite",
       "layer": "persistence",
-      "paths": ["src/storage/**"],
-      "excludePaths": ["src/storage/records.hpp"],
-      "sourceSuffixes": [".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".sql"],
+      "paths": [
+        "src/storage/**"
+      ],
+      "excludePaths": [
+        "src/storage/records.hpp"
+      ],
+      "sourceSuffixes": [
+        ".c",
+        ".cc",
+        ".cpp",
+        ".cxx",
+        ".h",
+        ".hh",
+        ".hpp",
+        ".hxx",
+        ".sql"
+      ],
       "allowedDependencies": [
         "persistence.sqlite",
         "frontend.compiledb",
@@ -116,13 +196,17 @@
         "foundation.util",
         "model.contracts"
       ],
-      "allowedExternal": ["sqlite"],
+      "allowedExternal": [
+        "sqlite"
+      ],
       "description": "SQLite schema, migrations, transactions, and storage adapters."
     },
     {
       "id": "analysis.graph",
       "layer": "query-analysis",
-      "paths": ["src/graph/**"],
+      "paths": [
+        "src/graph/**"
+      ],
       "allowedDependencies": [
         "analysis.graph",
         "query.plan",
@@ -135,7 +219,9 @@
     {
       "id": "query.plan",
       "layer": "query-analysis",
-      "paths": ["src/query/**"],
+      "paths": [
+        "src/query/**"
+      ],
       "allowedDependencies": [
         "query.plan",
         "persistence.sqlite",
@@ -147,7 +233,9 @@
     {
       "id": "refactor.include-hygiene",
       "layer": "analysis",
-      "paths": ["src/include_hygiene/**"],
+      "paths": [
+        "src/include_hygiene/**"
+      ],
       "allowedDependencies": [
         "refactor.include-hygiene",
         "analysis.graph",
@@ -155,13 +243,18 @@
         "foundation.util",
         "model.contracts"
       ],
-      "allowedExternal": ["clang", "llvm"],
+      "allowedExternal": [
+        "clang",
+        "llvm"
+      ],
       "description": "Include analysis/planning and its Clang validation/application adapter."
     },
     {
       "id": "analysis.diff",
       "layer": "analysis",
-      "paths": ["src/diff/**"],
+      "paths": [
+        "src/diff/**"
+      ],
       "excludePaths": [
         "src/diff/main.cpp",
         "src/diff/syntax_ir.hpp",
@@ -176,13 +269,35 @@
         "foundation.util",
         "model.contracts"
       ],
-      "allowedExternal": ["clang", "llvm"],
+      "allowedExternal": [
+        "clang",
+        "llvm"
+      ],
       "description": "Syntax/semantic diff lowering and comparison model."
+    },
+    {
+      "id": "product.index-scheduler",
+      "layer": "product-surface",
+      "paths": [
+        "src/index/parallel_index.hpp",
+        "src/index/parallel_index.cpp"
+      ],
+      "allowedDependencies": [
+        "product.index-scheduler",
+        "foundation.scheduling",
+        "extraction.ast",
+        "persistence.sqlite",
+        "foundation.util",
+        "model.contracts"
+      ],
+      "description": "Binds the parallelism primitives to production indexing: isolated per-worker extraction contexts, and publication through the single controlled writer in legacy apply order."
     },
     {
       "id": "product.application",
       "layer": "product-surface",
-      "paths": ["src/application/**"],
+      "paths": [
+        "src/application/**"
+      ],
       "allowedDependencies": [
         "product.application",
         "workspace.toolchain",
@@ -195,9 +310,13 @@
         "refactor.include-hygiene",
         "analysis.diff",
         "foundation.util",
-        "model.contracts"
+        "model.contracts",
+        "product.index-scheduler",
+        "foundation.scheduling"
       ],
-      "allowedExternal": ["filesystem"],
+      "allowedExternal": [
+        "filesystem"
+      ],
       "description": "Typed application requests, policy context, and concrete product services."
     },
     {
@@ -210,7 +329,9 @@
         "src/astgraph/main.cpp",
         "src/diff/main.cpp"
       ],
-      "excludePaths": ["src/cli/souffle_rules.hpp"],
+      "excludePaths": [
+        "src/cli/souffle_rules.hpp"
+      ],
       "allowedDependencies": [
         "product.cli",
         "product.application",
@@ -249,15 +370,21 @@
         "refactor.include-hygiene",
         "analysis.diff",
         "foundation.util",
-        "model.contracts"
+        "model.contracts",
+        "foundation.scheduling",
+        "product.index-scheduler"
       ],
       "description": "Temporary cidx_core aggregation target retained during modular migration."
     },
     {
       "id": "sdk.python",
       "layer": "sdk",
-      "paths": ["python/indexer/**"],
-      "sourceSuffixes": [".py"],
+      "paths": [
+        "python/indexer/**"
+      ],
+      "sourceSuffixes": [
+        ".py"
+      ],
       "excludePaths": [
         "python/indexer/clang/**",
         "python/indexer/astcmd.py",
@@ -281,8 +408,12 @@
         "python/indexer/utils/files.py",
         "python/indexer/utils/__init__.py"
       ],
-      "allowedDependencies": ["sdk.python"],
-      "allowedExternal": ["filesystem"],
+      "allowedDependencies": [
+        "sdk.python"
+      ],
+      "allowedExternal": [
+        "filesystem"
+      ],
       "description": "Python storage, graph, query, and support SDK surface."
     },
     {
@@ -311,9 +442,19 @@
         "python/indexer/compiledb.py",
         "python/indexer/agent_tools.py"
       ],
-      "sourceSuffixes": [".py"],
-      "allowedDependencies": ["sdk.python", "sdk.python.compat"],
-      "allowedExternal": ["clang", "sqlite", "filesystem", "process"],
+      "sourceSuffixes": [
+        ".py"
+      ],
+      "allowedDependencies": [
+        "sdk.python",
+        "sdk.python.compat"
+      ],
+      "allowedExternal": [
+        "clang",
+        "sqlite",
+        "filesystem",
+        "process"
+      ],
       "description": "Transitional Python compatibility adapters that still reach legacy Clang and SQLite APIs."
     },
     {
@@ -324,15 +465,22 @@
         "src/astgraph/rules/**",
         "src/cli/souffle_rules.hpp"
       ],
-      "sourceSuffixes": [".dl", ".hpp"],
-      "allowedDependencies": ["analysis.souffle-rules"],
+      "sourceSuffixes": [
+        ".dl",
+        ".hpp"
+      ],
+      "allowedDependencies": [
+        "analysis.souffle-rules"
+      ],
       "allowedExternal": [],
-      "description": "Checked-in Soufflé rule sources shipped by the analysis adapters."
+      "description": "Checked-in Souffl\u00e9 rule sources shipped by the analysis adapters."
     },
     {
       "id": "analysis.fact-provider",
       "layer": "analysis",
-      "paths": ["src/analysis/**"],
+      "paths": [
+        "src/analysis/**"
+      ],
       "allowedDependencies": [
         "analysis.fact-provider",
         "analysis.astgraph",
@@ -341,29 +489,141 @@
         "foundation.util",
         "model.contracts"
       ],
-      "allowedExternal": ["process"],
+      "allowedExternal": [
+        "process"
+      ],
       "description": "Shared semantic/raw-AST fact providers and the unified analysis runner."
     }
   ],
   "targets": [
-    {"name": "cidx_core", "kind": "library", "module": "compat.core-bundle", "links": ["clang-cpp", "LLVM", "${_cidx_sqlite_link}"]},
-    {"name": "cidx_catalog_check", "kind": "generated-target", "module": "model.contracts", "links": []},
-    {"name": "cidx_ast", "kind": "object-library", "module": "extraction.ast", "links": []},
-    {"name": "cidx_extract", "kind": "object-library", "module": "extraction.dsl", "links": []},
-    {"name": "cidx_hygiene", "kind": "object-library", "module": "refactor.include-hygiene", "links": []},
-    {"name": "cidx_astgraph_ast", "kind": "object-library", "module": "analysis.astgraph", "links": []},
-    {"name": "cidx_diff_ast", "kind": "object-library", "module": "analysis.diff", "links": []},
-    {"name": "cidx_compiledb", "kind": "object-library", "module": "frontend.compiledb", "links": []},
-    {"name": "cidx_sqlite_static", "kind": "imported-library", "module": "persistence.sqlite", "links": ["${CMAKE_DL_LIBS}", "pthread", "m"]},
-    {"name": "cidx_dl_rules", "kind": "generated-target", "module": "analysis.astgraph", "links": []},
-    {"name": "cidx_astgraph_souffle_rules", "kind": "generated-library", "module": "analysis.astgraph", "links": []},
-    {"name": "cidx", "kind": "executable", "module": "product.cli", "links": ["cidx_core"]},
-    {"name": "cidx-astgraph", "kind": "executable", "module": "product.cli", "links": ["cidx_core"]},
-    {"name": "cidx-diff", "kind": "executable", "module": "product.cli", "links": ["cidx_core"]},
-    {"name": "cidx-queryplan-example", "kind": "optional-executable", "module": "product.cli", "links": ["cidx_core"]},
-    {"name": "cidx-clang-tidy", "kind": "generated-target", "module": "compat.core-bundle", "links": []},
-    {"name": "cidx-agent", "kind": "executable", "module": "product.cli", "links": ["cidx_core"]},
-    {"name": "front_end_reuse_probe", "kind": "test-executable", "module": "compat.core-bundle", "links": ["cidx_core"]}
+    {
+      "name": "cidx_core",
+      "kind": "library",
+      "module": "compat.core-bundle",
+      "links": [
+        "clang-cpp",
+        "LLVM",
+        "${_cidx_sqlite_link}"
+      ]
+    },
+    {
+      "name": "cidx_catalog_check",
+      "kind": "generated-target",
+      "module": "model.contracts",
+      "links": []
+    },
+    {
+      "name": "cidx_ast",
+      "kind": "object-library",
+      "module": "extraction.ast",
+      "links": []
+    },
+    {
+      "name": "cidx_extract",
+      "kind": "object-library",
+      "module": "extraction.dsl",
+      "links": []
+    },
+    {
+      "name": "cidx_hygiene",
+      "kind": "object-library",
+      "module": "refactor.include-hygiene",
+      "links": []
+    },
+    {
+      "name": "cidx_astgraph_ast",
+      "kind": "object-library",
+      "module": "analysis.astgraph",
+      "links": []
+    },
+    {
+      "name": "cidx_diff_ast",
+      "kind": "object-library",
+      "module": "analysis.diff",
+      "links": []
+    },
+    {
+      "name": "cidx_compiledb",
+      "kind": "object-library",
+      "module": "frontend.compiledb",
+      "links": []
+    },
+    {
+      "name": "cidx_sqlite_static",
+      "kind": "imported-library",
+      "module": "persistence.sqlite",
+      "links": [
+        "${CMAKE_DL_LIBS}",
+        "pthread",
+        "m"
+      ]
+    },
+    {
+      "name": "cidx_dl_rules",
+      "kind": "generated-target",
+      "module": "analysis.astgraph",
+      "links": []
+    },
+    {
+      "name": "cidx_astgraph_souffle_rules",
+      "kind": "generated-library",
+      "module": "analysis.astgraph",
+      "links": []
+    },
+    {
+      "name": "cidx",
+      "kind": "executable",
+      "module": "product.cli",
+      "links": [
+        "cidx_core"
+      ]
+    },
+    {
+      "name": "cidx-astgraph",
+      "kind": "executable",
+      "module": "product.cli",
+      "links": [
+        "cidx_core"
+      ]
+    },
+    {
+      "name": "cidx-diff",
+      "kind": "executable",
+      "module": "product.cli",
+      "links": [
+        "cidx_core"
+      ]
+    },
+    {
+      "name": "cidx-queryplan-example",
+      "kind": "optional-executable",
+      "module": "product.cli",
+      "links": [
+        "cidx_core"
+      ]
+    },
+    {
+      "name": "cidx-clang-tidy",
+      "kind": "generated-target",
+      "module": "compat.core-bundle",
+      "links": []
+    },
+    {
+      "name": "cidx-agent",
+      "kind": "executable",
+      "module": "product.cli",
+      "links": [
+        "cidx_core"
+      ]
+    },
+    {
+      "name": "front_end_reuse_probe",
+      "kind": "test-executable",
+      "module": "compat.core-bundle",
+      "links": [
+        "cidx_core"
+      ]
+    }
   ],
   "targetExceptions": [
     {
@@ -373,7 +633,12 @@
       "rationale": "The current static library aggregates the product and adapter object libraries and owns their Clang/LLVM/SQLite links.",
       "expiresOn": "2026-12-31",
       "removalIssue": "HSE-62",
-      "dependencies": ["clang-cpp", "LLVM", "${_cidx_sqlite_link}", "SQLite::SQLite3"]
+      "dependencies": [
+        "clang-cpp",
+        "LLVM",
+        "${_cidx_sqlite_link}",
+        "SQLite::SQLite3"
+      ]
     },
     {
       "target": "cidx",
@@ -382,7 +647,9 @@
       "rationale": "The product executable still consumes the transitional cidx_core aggregation target.",
       "expiresOn": "2026-12-31",
       "removalIssue": "HSE-62",
-      "dependencies": ["cidx_core"]
+      "dependencies": [
+        "cidx_core"
+      ]
     },
     {
       "target": "cidx-astgraph",
@@ -391,7 +658,9 @@
       "rationale": "The AST graph executable still consumes the transitional cidx_core aggregation target.",
       "expiresOn": "2026-12-31",
       "removalIssue": "HSE-62",
-      "dependencies": ["cidx_core"]
+      "dependencies": [
+        "cidx_core"
+      ]
     },
     {
       "target": "cidx-diff",
@@ -400,7 +669,9 @@
       "rationale": "The diff executable still consumes the transitional cidx_core aggregation target.",
       "expiresOn": "2026-12-31",
       "removalIssue": "HSE-62",
-      "dependencies": ["cidx_core"]
+      "dependencies": [
+        "cidx_core"
+      ]
     },
     {
       "target": "cidx-queryplan-example",
@@ -409,7 +680,9 @@
       "rationale": "The optional query-plan example still consumes the transitional cidx_core aggregation target.",
       "expiresOn": "2026-12-31",
       "removalIssue": "HSE-62",
-      "dependencies": ["cidx_core"]
+      "dependencies": [
+        "cidx_core"
+      ]
     },
     {
       "target": "cidx-agent",
@@ -418,7 +691,9 @@
       "rationale": "The agent transport executable consumes the transitional cidx_core aggregation target.",
       "expiresOn": "2026-12-31",
       "removalIssue": "HSE-62",
-      "dependencies": ["cidx_core"]
+      "dependencies": [
+        "cidx_core"
+      ]
     }
   ],
   "contracts": [
@@ -426,37 +701,92 @@
       "path": "src/storage/records.hpp",
       "kind": "domain-model",
       "owner": "model.contracts",
-      "forbiddenIncludePrefixes": ["clang/", "llvm/", "sqlite", "cli/", "util/", "storage/", "sys/", "unistd.h", "spawn.h"]
+      "forbiddenIncludePrefixes": [
+        "clang/",
+        "llvm/",
+        "sqlite",
+        "cli/",
+        "util/",
+        "storage/",
+        "sys/",
+        "unistd.h",
+        "spawn.h"
+      ]
     },
     {
       "path": "src/ast/symbol_record.hpp",
       "kind": "extraction-artifact-contract",
       "owner": "model.contracts",
-      "forbiddenIncludePrefixes": ["clang/", "llvm/", "sqlite", "cli/", "storage/", "sys/", "unistd.h", "spawn.h"]
+      "forbiddenIncludePrefixes": [
+        "clang/",
+        "llvm/",
+        "sqlite",
+        "cli/",
+        "storage/",
+        "sys/",
+        "unistd.h",
+        "spawn.h"
+      ]
     },
     {
       "path": "src/ast/edge_records.hpp",
       "kind": "extraction-artifact-contract",
       "owner": "model.contracts",
-      "forbiddenIncludePrefixes": ["clang/", "llvm/", "sqlite", "cli/", "storage/", "sys/", "unistd.h", "spawn.h"]
+      "forbiddenIncludePrefixes": [
+        "clang/",
+        "llvm/",
+        "sqlite",
+        "cli/",
+        "storage/",
+        "sys/",
+        "unistd.h",
+        "spawn.h"
+      ]
     },
     {
       "path": "src/diff/syntax_ir.hpp",
       "kind": "public-artifact-contract",
       "owner": "model.contracts",
-      "forbiddenIncludePrefixes": ["clang/", "llvm/", "sqlite", "cli/", "storage/", "sys/", "unistd.h", "spawn.h"]
+      "forbiddenIncludePrefixes": [
+        "clang/",
+        "llvm/",
+        "sqlite",
+        "cli/",
+        "storage/",
+        "sys/",
+        "unistd.h",
+        "spawn.h"
+      ]
     },
     {
       "path": "src/diff/behaviour_ir.hpp",
       "kind": "public-artifact-contract",
       "owner": "model.contracts",
-      "forbiddenIncludePrefixes": ["clang/", "llvm/", "sqlite", "cli/", "storage/", "sys/", "unistd.h", "spawn.h"]
+      "forbiddenIncludePrefixes": [
+        "clang/",
+        "llvm/",
+        "sqlite",
+        "cli/",
+        "storage/",
+        "sys/",
+        "unistd.h",
+        "spawn.h"
+      ]
     },
     {
       "path": "src/extract/plan_ir.hpp",
       "kind": "public-artifact-contract",
       "owner": "model.contracts",
-      "forbiddenIncludePrefixes": ["clang/", "llvm/", "sqlite", "cli/", "storage/", "sys/", "unistd.h", "spawn.h"]
+      "forbiddenIncludePrefixes": [
+        "clang/",
+        "llvm/",
+        "sqlite",
+        "cli/",
+        "storage/",
+        "sys/",
+        "unistd.h",
+        "spawn.h"
+      ]
     }
   ],
   "exceptions": [
@@ -627,7 +957,7 @@
       "include": "storage/sqlite.hpp",
       "boundary": "astgraph analysis -> SQLite adapter",
       "owner": "Platform M2 analysis maintainers",
-      "rationale": "The current Soufflé runner still opens the persisted analysis database directly; a storage port will remove this coupling.",
+      "rationale": "The current Souffl\u00e9 runner still opens the persisted analysis database directly; a storage port will remove this coupling.",
       "expiresOn": "2026-12-31",
       "removalIssue": "HSE-62"
     },
@@ -645,177 +975,474 @@
   ],
   "externalExceptions": [
     {
-      "source": "src/storage/artifacts.hpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "filesystem",
-      "boundary": "persistence -> filesystem adapter", "owner": "Storage M2 maintainers", "rationale": "Artifact public paths remain std::filesystem values until the WorkspaceContext path port is complete.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/storage/artifacts.hpp",
+      "fromModule": "persistence.sqlite",
+      "toModule": "external:filesystem",
+      "include": "filesystem",
+      "boundary": "persistence -> filesystem adapter",
+      "owner": "Storage M2 maintainers",
+      "rationale": "Artifact public paths remain std::filesystem values until the WorkspaceContext path port is complete.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/storage/artifacts.cpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "sys/stat.h",
-      "boundary": "persistence -> filesystem adapter", "owner": "Storage M2 maintainers", "rationale": "Artifact publication uses descriptor validation until the WorkspaceContext filesystem adapter is complete.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/storage/artifacts.cpp",
+      "fromModule": "persistence.sqlite",
+      "toModule": "external:filesystem",
+      "include": "sys/stat.h",
+      "boundary": "persistence -> filesystem adapter",
+      "owner": "Storage M2 maintainers",
+      "rationale": "Artifact publication uses descriptor validation until the WorkspaceContext filesystem adapter is complete.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/storage/artifacts.cpp", "fromModule": "persistence.sqlite", "toModule": "external:process", "include": "fcntl.h",
-      "boundary": "persistence -> process compatibility", "owner": "Storage M2 maintainers", "rationale": "Artifact publication uses POSIX durable-file flags until the foundation durability adapter is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/storage/artifacts.cpp",
+      "fromModule": "persistence.sqlite",
+      "toModule": "external:process",
+      "include": "fcntl.h",
+      "boundary": "persistence -> process compatibility",
+      "owner": "Storage M2 maintainers",
+      "rationale": "Artifact publication uses POSIX durable-file flags until the foundation durability adapter is extracted.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/storage/artifacts.cpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "sys/file.h",
-      "boundary": "persistence -> filesystem adapter", "owner": "Storage M2 maintainers", "rationale": "Artifact publication uses the POSIX inter-process lock until the foundation durability adapter is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/storage/artifacts.cpp",
+      "fromModule": "persistence.sqlite",
+      "toModule": "external:filesystem",
+      "include": "sys/file.h",
+      "boundary": "persistence -> filesystem adapter",
+      "owner": "Storage M2 maintainers",
+      "rationale": "Artifact publication uses the POSIX inter-process lock until the foundation durability adapter is extracted.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/storage/artifacts.cpp", "fromModule": "persistence.sqlite", "toModule": "external:process", "include": "unistd.h",
-      "boundary": "persistence -> process compatibility", "owner": "Storage M2 maintainers", "rationale": "Artifact publication uses POSIX fsync/close until the foundation durability adapter is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/storage/artifacts.cpp",
+      "fromModule": "persistence.sqlite",
+      "toModule": "external:process",
+      "include": "unistd.h",
+      "boundary": "persistence -> process compatibility",
+      "owner": "Storage M2 maintainers",
+      "rationale": "Artifact publication uses POSIX fsync/close until the foundation durability adapter is extracted.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/astgraph/main.cpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "filesystem",
-      "boundary": "product surface -> filesystem adapter", "owner": "Storage M2 maintainers", "rationale": "Astgraph adoption needs filesystem paths for sidecar publication until the shared workspace adapter is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/astgraph/main.cpp",
+      "fromModule": "product.cli",
+      "toModule": "external:filesystem",
+      "include": "filesystem",
+      "boundary": "product surface -> filesystem adapter",
+      "owner": "Storage M2 maintainers",
+      "rationale": "Astgraph adoption needs filesystem paths for sidecar publication until the shared workspace adapter is extracted.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/ast/index_engine.cpp", "fromModule": "extraction.ast", "toModule": "external:filesystem", "include": "sys/stat.h",
-      "boundary": "extraction -> filesystem compatibility", "owner": "Platform M1 extraction maintainers", "rationale": "Retain the current source-stat probe until workspace context owns it.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/ast/index_engine.cpp",
+      "fromModule": "extraction.ast",
+      "toModule": "external:filesystem",
+      "include": "sys/stat.h",
+      "boundary": "extraction -> filesystem compatibility",
+      "owner": "Platform M1 extraction maintainers",
+      "rationale": "Retain the current source-stat probe until workspace context owns it.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/astgraph/astgraph.cpp", "fromModule": "analysis.astgraph", "toModule": "external:process", "include": "unistd.h",
-      "boundary": "astgraph -> process compatibility", "owner": "Platform M2 analysis maintainers", "rationale": "Retain the current unlink compatibility call until the runner port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-62"
+      "source": "src/astgraph/astgraph.cpp",
+      "fromModule": "analysis.astgraph",
+      "toModule": "external:process",
+      "include": "unistd.h",
+      "boundary": "astgraph -> process compatibility",
+      "owner": "Platform M2 analysis maintainers",
+      "rationale": "Retain the current unlink compatibility call until the runner port is extracted.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-62"
     },
     {
-      "source": "src/astgraph/astgraph.cpp", "fromModule": "analysis.astgraph", "toModule": "external:filesystem", "include": "filesystem",
-      "boundary": "astgraph -> filesystem compatibility", "owner": "Platform M2 analysis maintainers", "rationale": "Retain the AST artifact path adapter until the shared workspace filesystem port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/astgraph/astgraph.cpp",
+      "fromModule": "analysis.astgraph",
+      "toModule": "external:filesystem",
+      "include": "filesystem",
+      "boundary": "astgraph -> filesystem compatibility",
+      "owner": "Platform M2 analysis maintainers",
+      "rationale": "Retain the AST artifact path adapter until the shared workspace filesystem port is extracted.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/analysis/facts.cpp", "fromModule": "analysis.fact-provider", "toModule": "external:filesystem", "include": "filesystem",
-      "boundary": "derivation -> workspace filesystem adapter", "owner": "Platform M2 analysis maintainers", "rationale": "Fact snapshot import/export still uses temporary and generated paths until the workspace filesystem port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/analysis/facts.cpp",
+      "fromModule": "analysis.fact-provider",
+      "toModule": "external:filesystem",
+      "include": "filesystem",
+      "boundary": "derivation -> workspace filesystem adapter",
+      "owner": "Platform M2 analysis maintainers",
+      "rationale": "Fact snapshot import/export still uses temporary and generated paths until the workspace filesystem port is extracted.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/analysis/facts.cpp", "fromModule": "analysis.fact-provider", "toModule": "persistence.sqlite", "include": "storage/sqlite.hpp",
-      "boundary": "derivation -> persistence SQLite adapter", "owner": "Platform M2 analysis maintainers", "rationale": "The fact providers use the persistence-owned SQLite wrapper until the FactStore port is complete.", "expiresOn": "2026-12-31", "removalIssue": "HSE-62"
+      "source": "src/analysis/facts.cpp",
+      "fromModule": "analysis.fact-provider",
+      "toModule": "persistence.sqlite",
+      "include": "storage/sqlite.hpp",
+      "boundary": "derivation -> persistence SQLite adapter",
+      "owner": "Platform M2 analysis maintainers",
+      "rationale": "The fact providers use the persistence-owned SQLite wrapper until the FactStore port is complete.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-62"
     },
     {
-      "source": "src/analysis/runner.cpp", "fromModule": "analysis.fact-provider", "toModule": "external:filesystem", "include": "filesystem",
-      "boundary": "derivation -> workspace filesystem adapter", "owner": "Platform M2 analysis maintainers", "rationale": "The unified runner still owns temporary input/output paths until the workspace filesystem port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/analysis/runner.cpp",
+      "fromModule": "analysis.fact-provider",
+      "toModule": "external:filesystem",
+      "include": "filesystem",
+      "boundary": "derivation -> workspace filesystem adapter",
+      "owner": "Platform M2 analysis maintainers",
+      "rationale": "The unified runner still owns temporary input/output paths until the workspace filesystem port is extracted.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/analysis/runner.hpp", "fromModule": "analysis.fact-provider", "toModule": "external:filesystem", "include": "filesystem",
-      "boundary": "derivation -> workspace filesystem adapter", "owner": "Platform M2 analysis maintainers", "rationale": "The public analysis options and publication request expose filesystem paths until the workspace filesystem port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/analysis/runner.hpp",
+      "fromModule": "analysis.fact-provider",
+      "toModule": "external:filesystem",
+      "include": "filesystem",
+      "boundary": "derivation -> workspace filesystem adapter",
+      "owner": "Platform M2 analysis maintainers",
+      "rationale": "The public analysis options and publication request expose filesystem paths until the workspace filesystem port is extracted.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/cli/analyze.cpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "sys/stat.h",
-      "boundary": "product surface -> filesystem compatibility", "owner": "Platform M1 application maintainers", "rationale": "Retain the analyze input stat until shared workspace context owns it.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/cli/analyze.cpp",
+      "fromModule": "product.cli",
+      "toModule": "external:filesystem",
+      "include": "sys/stat.h",
+      "boundary": "product surface -> filesystem compatibility",
+      "owner": "Platform M1 application maintainers",
+      "rationale": "Retain the analyze input stat until shared workspace context owns it.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/cli/commands_detail.hpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "sys/stat.h",
-      "boundary": "product surface -> filesystem compatibility", "owner": "Platform M1 application maintainers", "rationale": "Retain the command filesystem probe until the workspace adapter is shared.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/cli/commands_detail.hpp",
+      "fromModule": "product.cli",
+      "toModule": "external:filesystem",
+      "include": "sys/stat.h",
+      "boundary": "product surface -> filesystem compatibility",
+      "owner": "Platform M1 application maintainers",
+      "rationale": "Retain the command filesystem probe until the workspace adapter is shared.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/cli/commands_detail.hpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "filesystem",
-      "boundary": "product surface -> filesystem compatibility", "owner": "Platform M1 application maintainers", "rationale": "Retain the command path adapter until the workspace boundary is shared.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/cli/commands_detail.hpp",
+      "fromModule": "product.cli",
+      "toModule": "external:filesystem",
+      "include": "filesystem",
+      "boundary": "product surface -> filesystem compatibility",
+      "owner": "Platform M1 application maintainers",
+      "rationale": "Retain the command path adapter until the workspace boundary is shared.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/cli/commands_detail.hpp", "fromModule": "product.cli", "toModule": "external:process", "include": "unistd.h",
-      "boundary": "product surface -> process compatibility", "owner": "Platform M1 application maintainers", "rationale": "Retain the command process compatibility call until the application port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-68"
+      "source": "src/cli/commands_detail.hpp",
+      "fromModule": "product.cli",
+      "toModule": "external:process",
+      "include": "unistd.h",
+      "boundary": "product surface -> process compatibility",
+      "owner": "Platform M1 application maintainers",
+      "rationale": "Retain the command process compatibility call until the application port is extracted.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-68"
     },
     {
-      "source": "src/diff/driver.cpp", "fromModule": "analysis.diff", "toModule": "external:filesystem", "include": "sys/stat.h",
-      "boundary": "diff analysis -> filesystem compatibility", "owner": "Platform M3 diff maintainers", "rationale": "Retain the diff input stat until the workspace context is shared.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/diff/driver.cpp",
+      "fromModule": "analysis.diff",
+      "toModule": "external:filesystem",
+      "include": "sys/stat.h",
+      "boundary": "diff analysis -> filesystem compatibility",
+      "owner": "Platform M3 diff maintainers",
+      "rationale": "Retain the diff input stat until the workspace context is shared.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/diff/target.cpp", "fromModule": "analysis.diff", "toModule": "external:filesystem", "include": "sys/stat.h",
-      "boundary": "diff analysis -> filesystem compatibility", "owner": "Platform M3 diff maintainers", "rationale": "Retain the diff target stat until the workspace context is shared.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/diff/target.cpp",
+      "fromModule": "analysis.diff",
+      "toModule": "external:filesystem",
+      "include": "sys/stat.h",
+      "boundary": "diff analysis -> filesystem compatibility",
+      "owner": "Platform M3 diff maintainers",
+      "rationale": "Retain the diff target stat until the workspace context is shared.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/graph/query.cpp", "fromModule": "analysis.graph", "toModule": "external:filesystem", "include": "filesystem",
-      "boundary": "graph analysis -> filesystem compatibility", "owner": "Platform M3 query maintainers", "rationale": "Retain graph path normalization until the workspace adapter is shared.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/graph/query.cpp",
+      "fromModule": "analysis.graph",
+      "toModule": "external:filesystem",
+      "include": "filesystem",
+      "boundary": "graph analysis -> filesystem compatibility",
+      "owner": "Platform M3 query maintainers",
+      "rationale": "Retain graph path normalization until the workspace adapter is shared.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/include_hygiene/executor.cpp", "fromModule": "refactor.include-hygiene", "toModule": "external:filesystem", "include": "sys/stat.h",
-      "boundary": "include hygiene -> filesystem compatibility", "owner": "Platform M3 refactor maintainers", "rationale": "Retain the executor file metadata probe until the workspace adapter is shared.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/include_hygiene/executor.cpp",
+      "fromModule": "refactor.include-hygiene",
+      "toModule": "external:filesystem",
+      "include": "sys/stat.h",
+      "boundary": "include hygiene -> filesystem compatibility",
+      "owner": "Platform M3 refactor maintainers",
+      "rationale": "Retain the executor file metadata probe until the workspace adapter is shared.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/include_hygiene/executor.cpp", "fromModule": "refactor.include-hygiene", "toModule": "external:filesystem", "include": "sys/xattr.h",
-      "boundary": "include hygiene -> filesystem compatibility", "owner": "Platform M3 refactor maintainers", "rationale": "Retain the executor extended-attribute compatibility path until the workspace adapter is shared.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/include_hygiene/executor.cpp",
+      "fromModule": "refactor.include-hygiene",
+      "toModule": "external:filesystem",
+      "include": "sys/xattr.h",
+      "boundary": "include hygiene -> filesystem compatibility",
+      "owner": "Platform M3 refactor maintainers",
+      "rationale": "Retain the executor extended-attribute compatibility path until the workspace adapter is shared.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/include_hygiene/executor.cpp", "fromModule": "refactor.include-hygiene", "toModule": "external:filesystem", "include": "sys/acl.h",
-      "boundary": "include hygiene -> filesystem compatibility", "owner": "Platform M3 refactor maintainers", "rationale": "Retain the executor ACL compatibility path until the workspace adapter is shared.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/include_hygiene/executor.cpp",
+      "fromModule": "refactor.include-hygiene",
+      "toModule": "external:filesystem",
+      "include": "sys/acl.h",
+      "boundary": "include hygiene -> filesystem compatibility",
+      "owner": "Platform M3 refactor maintainers",
+      "rationale": "Retain the executor ACL compatibility path until the workspace adapter is shared.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/include_hygiene/executor.cpp", "fromModule": "refactor.include-hygiene", "toModule": "external:process", "include": "unistd.h",
-      "boundary": "include hygiene -> process compatibility", "owner": "Platform M3 refactor maintainers", "rationale": "Retain the executor process compatibility call until the application port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-68"
+      "source": "src/include_hygiene/executor.cpp",
+      "fromModule": "refactor.include-hygiene",
+      "toModule": "external:process",
+      "include": "unistd.h",
+      "boundary": "include hygiene -> process compatibility",
+      "owner": "Platform M3 refactor maintainers",
+      "rationale": "Retain the executor process compatibility call until the application port is extracted.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-68"
     },
     {
-      "source": "src/main.cpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "sys/stat.h",
-      "boundary": "product surface -> filesystem compatibility", "owner": "Platform M1 application maintainers", "rationale": "Retain the primary command input stat until shared workspace context owns it.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/main.cpp",
+      "fromModule": "product.cli",
+      "toModule": "external:filesystem",
+      "include": "sys/stat.h",
+      "boundary": "product surface -> filesystem compatibility",
+      "owner": "Platform M1 application maintainers",
+      "rationale": "Retain the primary command input stat until shared workspace context owns it.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/cli/application_adapter.cpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "sys/stat.h",
-      "boundary": "product surface -> filesystem compatibility", "owner": "Platform M3 application maintainers", "rationale": "Retain POSIX mkdir compatibility while typed policy controls when cache artifacts may be created.", "expiresOn": "2026-12-31", "removalIssue": "HSE-68"
+      "source": "src/cli/application_adapter.cpp",
+      "fromModule": "product.cli",
+      "toModule": "external:filesystem",
+      "include": "sys/stat.h",
+      "boundary": "product surface -> filesystem compatibility",
+      "owner": "Platform M3 application maintainers",
+      "rationale": "Retain POSIX mkdir compatibility while typed policy controls when cache artifacts may be created.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-68"
     },
     {
-      "source": "src/toolchain/toolchain.cpp", "fromModule": "workspace.toolchain", "toModule": "external:filesystem", "include": "sys/stat.h",
-      "boundary": "workspace -> filesystem adapter", "owner": "Platform M1 workspace maintainers", "rationale": "Retain the toolchain filesystem probe while WorkspaceContext is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/toolchain/toolchain.cpp",
+      "fromModule": "workspace.toolchain",
+      "toModule": "external:filesystem",
+      "include": "sys/stat.h",
+      "boundary": "workspace -> filesystem adapter",
+      "owner": "Platform M1 workspace maintainers",
+      "rationale": "Retain the toolchain filesystem probe while WorkspaceContext is extracted.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/storage/storage.cpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "filesystem",
-      "boundary": "persistence -> filesystem adapter", "owner": "Platform M1 storage maintainers", "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/storage/storage.cpp",
+      "fromModule": "persistence.sqlite",
+      "toModule": "external:filesystem",
+      "include": "filesystem",
+      "boundary": "persistence -> filesystem adapter",
+      "owner": "Platform M1 storage maintainers",
+      "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/storage/storage_definitions.cpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "filesystem",
-      "boundary": "persistence -> filesystem adapter", "owner": "Platform M1 storage maintainers", "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/storage/storage_definitions.cpp",
+      "fromModule": "persistence.sqlite",
+      "toModule": "external:filesystem",
+      "include": "filesystem",
+      "boundary": "persistence -> filesystem adapter",
+      "owner": "Platform M1 storage maintainers",
+      "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/storage/storage_detail.hpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "filesystem",
-      "boundary": "persistence -> filesystem adapter", "owner": "Platform M1 storage maintainers", "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/storage/storage_detail.hpp",
+      "fromModule": "persistence.sqlite",
+      "toModule": "external:filesystem",
+      "include": "filesystem",
+      "boundary": "persistence -> filesystem adapter",
+      "owner": "Platform M1 storage maintainers",
+      "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/storage/storage_entity_rollup.cpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "filesystem",
-      "boundary": "persistence -> filesystem adapter", "owner": "Platform M1 storage maintainers", "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/storage/storage_entity_rollup.cpp",
+      "fromModule": "persistence.sqlite",
+      "toModule": "external:filesystem",
+      "include": "filesystem",
+      "boundary": "persistence -> filesystem adapter",
+      "owner": "Platform M1 storage maintainers",
+      "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/storage/storage_files.cpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "filesystem",
-      "boundary": "persistence -> filesystem adapter", "owner": "Platform M1 storage maintainers", "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/storage/storage_files.cpp",
+      "fromModule": "persistence.sqlite",
+      "toModule": "external:filesystem",
+      "include": "filesystem",
+      "boundary": "persistence -> filesystem adapter",
+      "owner": "Platform M1 storage maintainers",
+      "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/storage/storage_include.cpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "filesystem",
-      "boundary": "persistence -> filesystem adapter", "owner": "Platform M1 storage maintainers", "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/storage/storage_include.cpp",
+      "fromModule": "persistence.sqlite",
+      "toModule": "external:filesystem",
+      "include": "filesystem",
+      "boundary": "persistence -> filesystem adapter",
+      "owner": "Platform M1 storage maintainers",
+      "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/storage/storage_migrate.cpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "filesystem",
-      "boundary": "persistence -> filesystem adapter", "owner": "Platform M1 storage maintainers", "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/storage/storage_migrate.cpp",
+      "fromModule": "persistence.sqlite",
+      "toModule": "external:filesystem",
+      "include": "filesystem",
+      "boundary": "persistence -> filesystem adapter",
+      "owner": "Platform M1 storage maintainers",
+      "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/storage/storage_query.cpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "filesystem",
-      "boundary": "persistence -> filesystem adapter", "owner": "Platform M1 storage maintainers", "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/storage/storage_query.cpp",
+      "fromModule": "persistence.sqlite",
+      "toModule": "external:filesystem",
+      "include": "filesystem",
+      "boundary": "persistence -> filesystem adapter",
+      "owner": "Platform M1 storage maintainers",
+      "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/storage/storage_repo.cpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "filesystem",
-      "boundary": "persistence -> filesystem adapter", "owner": "Platform M1 storage maintainers", "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/storage/storage_repo.cpp",
+      "fromModule": "persistence.sqlite",
+      "toModule": "external:filesystem",
+      "include": "filesystem",
+      "boundary": "persistence -> filesystem adapter",
+      "owner": "Platform M1 storage maintainers",
+      "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/storage/storage_symbols.cpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "filesystem",
-      "boundary": "persistence -> filesystem adapter", "owner": "Platform M1 storage maintainers", "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/storage/storage_symbols.cpp",
+      "fromModule": "persistence.sqlite",
+      "toModule": "external:filesystem",
+      "include": "filesystem",
+      "boundary": "persistence -> filesystem adapter",
+      "owner": "Platform M1 storage maintainers",
+      "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/storage/storage_types.cpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "filesystem",
-      "boundary": "persistence -> filesystem adapter", "owner": "Platform M1 storage maintainers", "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+      "source": "src/storage/storage_types.cpp",
+      "fromModule": "persistence.sqlite",
+      "toModule": "external:filesystem",
+      "include": "filesystem",
+      "boundary": "persistence -> filesystem adapter",
+      "owner": "Platform M1 storage maintainers",
+      "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-61"
     },
     {
-      "source": "src/ui/server.cpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "sys/socket.h",
-      "boundary": "product surface -> loopback transport", "owner": "Platform M4 UI maintainers", "rationale": "The local explorer uses the platform loopback socket API until the shared transport adapter is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-84"
+      "source": "src/ui/server.cpp",
+      "fromModule": "product.cli",
+      "toModule": "external:filesystem",
+      "include": "sys/socket.h",
+      "boundary": "product surface -> loopback transport",
+      "owner": "Platform M4 UI maintainers",
+      "rationale": "The local explorer uses the platform loopback socket API until the shared transport adapter is extracted.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-84"
     },
     {
-      "source": "src/ui/server.cpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "sys/types.h",
-      "boundary": "product surface -> loopback transport", "owner": "Platform M4 UI maintainers", "rationale": "The local explorer uses the platform loopback socket API until the shared transport adapter is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-84"
+      "source": "src/ui/server.cpp",
+      "fromModule": "product.cli",
+      "toModule": "external:filesystem",
+      "include": "sys/types.h",
+      "boundary": "product surface -> loopback transport",
+      "owner": "Platform M4 UI maintainers",
+      "rationale": "The local explorer uses the platform loopback socket API until the shared transport adapter is extracted.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-84"
     },
     {
-      "source": "src/ui/server.cpp", "fromModule": "product.cli", "toModule": "external:process", "include": "unistd.h",
-      "boundary": "product surface -> loopback transport", "owner": "Platform M4 UI maintainers", "rationale": "The local explorer uses POSIX accept/close and optional browser launch until the shared transport adapter is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-84"
+      "source": "src/ui/server.cpp",
+      "fromModule": "product.cli",
+      "toModule": "external:process",
+      "include": "unistd.h",
+      "boundary": "product surface -> loopback transport",
+      "owner": "Platform M4 UI maintainers",
+      "rationale": "The local explorer uses POSIX accept/close and optional browser launch until the shared transport adapter is extracted.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-84"
     },
     {
-      "source": "src/ui/server.cpp", "fromModule": "product.cli", "toModule": "external:process", "include": "poll.h",
-      "boundary": "product surface -> loopback transport", "owner": "Platform M4 UI maintainers", "rationale": "The local explorer uses POSIX poll() for a non-blocking client-disconnect check until the shared transport adapter is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-84"
+      "source": "src/ui/server.cpp",
+      "fromModule": "product.cli",
+      "toModule": "external:process",
+      "include": "poll.h",
+      "boundary": "product surface -> loopback transport",
+      "owner": "Platform M4 UI maintainers",
+      "rationale": "The local explorer uses POSIX poll() for a non-blocking client-disconnect check until the shared transport adapter is extracted.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-84"
     }
   ],
   "mutuallyExclusiveSourceGroups": [
     {
-      "sources": ["src/astgraph/souffle_stub.cpp", "src/astgraph/souffle_runner.cpp"],
+      "sources": [
+        "src/astgraph/souffle_stub.cpp",
+        "src/astgraph/souffle_runner.cpp"
+      ],
       "owner": "Platform M2 analysis maintainers",
       "rationale": "CMakeLists.txt compiles exactly one of these per build: souffle_stub.cpp when CIDX_ASTGRAPH_SOUFFLE_ENABLED is off (Souffle not found or disabled), souffle_runner.cpp when it is on. Both are real, manifest-classified production sources, but only one is ever a member of compile_commands.json in any single build configuration -- the self-host report's translation-unit coverage check treats a group as satisfied once ANY one member is present in the index, rather than requiring every mutually exclusive build variant simultaneously.",
       "removalIssue": "HSE-62"

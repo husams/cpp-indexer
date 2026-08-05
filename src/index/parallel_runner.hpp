@@ -89,4 +89,4 @@ template <typename Payload>
 
 } // namespace cidx::index
 
-#include "index/parallel_runner.ipp" // IWYU pragma: export
+#include "index/parallel_runner_impl.hpp" // IWYU pragma: export

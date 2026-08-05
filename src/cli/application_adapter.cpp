@@ -275,6 +275,8 @@ parse_typed_index(const std::vector<std::string> &argv) {
       request.graph = false;
     } else if (argv[i] == "--defer-transforms") {
       request.defer_transforms = true;
+    } else if (argv[i] == "--clean") {
+      request.clean = true;
     } else if (argv[i] == "--no-front-end-reuse") {
       request.no_front_end_reuse = true;
     } else if (argv[i] == "--no-autoderive-labels") {
@@ -315,6 +317,9 @@ parse_typed_index(const std::vector<std::string> &argv) {
   }
   if (!request.graph && request.defer_transforms) {
     usage_error(application::kIndexTransformFlagConflict);
+  }
+  if (request.clean && request.action != application::IndexAction::rebuild) {
+    usage_error(application::kIndexCleanRequiresRebuild);
   }
   return request;
 }
@@ -688,8 +693,17 @@ int run_application_request(const application::CommandRequest &request,
     ctx.logger = &Logger::root();
   }
 
-  Storage db(ctx.index_path, read_only ? Storage::OpenMode::read_only
-                                       : Storage::OpenMode::read_write);
+  // A clean rebuild must not open the database that is in service for writing:
+  // opening read-write migrates, applies the schema script, and updates the
+  // SQLite header, which would break the byte-for-byte guarantee before a
+  // verified candidate even exists. The coordinator captures its inputs under
+  // its own read-only handle and publishes with one atomic rename, so the
+  // request plumbing gets a private scratch database instead.
+  const auto *index_request = std::get_if<application::IndexRequest>(&request);
+  const bool clean_rebuild = index_request != nullptr && index_request->clean;
+  Storage db(clean_rebuild ? std::string(":memory:") : ctx.index_path,
+             read_only ? Storage::OpenMode::read_only
+                       : Storage::OpenMode::read_write);
   StorageWorkspaceAdapter workspace_data(db);
   WorkspaceContext workspace =
       WorkspaceContext::borrow(workspace_data,

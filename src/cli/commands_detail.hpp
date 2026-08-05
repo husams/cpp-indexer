@@ -28,6 +28,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "application/requests.hpp"
 #include "application/tu_fact_cache_service.hpp"
 #include "ast/clang_version.hpp"
 #include "ast/index_engine.hpp"
