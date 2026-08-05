@@ -649,7 +649,9 @@ jobs:
         uses: astral-sh/setup-uv@v6
       - name: Install Backlog test runtime
         env:
-          BACKLOG_PLUGIN_REVISION: 40739f8b6ce7615705ee3eb7bf0dcb986ed6adb2
+          # Same reason as the sync workflow: the shared store migrates, so a
+          # fixed revision refuses to open it as soon as the store moves ahead.
+          BACKLOG_PLUGIN_REVISION: main
         run: |
           git init "$RUNNER_TEMP/backlog-plugin"
           git -C "$RUNNER_TEMP/backlog-plugin" remote add origin \
