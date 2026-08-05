@@ -122,7 +122,11 @@ int run_cidx(const std::vector<std::string> &argv, const std::string &cache,
   ctx.logger = &log;
   ctx.out = &out;
   ctx.err = &err;
-  return cli::run_command(parsed, ctx);
+  const int code = cli::run_command(parsed, ctx);
+  if (code != 0) {
+    MESSAGE("cidx failed: " << err.str());
+  }
+  return code;
 }
 
 std::string dump(SqliteDb &db, const char *name, const char *sql, int columns) {
@@ -290,6 +294,59 @@ TEST_SUITE("clang") {
 
     CHECK(project(serial_cache + "/index.db", root) ==
           project(parallel_index, root));
+  }
+
+  TEST_CASE("delete/re-emit and repeated declarations stay deterministic under "
+            "parallel publication") {
+    // The fixtures the story names that publication ORDER could disturb: a
+    // symbol deleted from one unit and re-emitted, the same symbol declared by
+    // every unit (shared::value), and a declaration repeated within a unit.
+    // Both arms run the identical edit sequence; the databases must agree.
+    const auto index_sequence = [](const std::string &root,
+                                   const std::string &jobs) {
+      const std::string source = root + "/src";
+      write_corpus(source);
+      const std::string cache = root + "/cache";
+      ::mkdir(cache.c_str(), 0755);
+      cidx::Logger log;
+      REQUIRE(run_cidx({"import", "--db", source + "/compile_commands.json",
+                        "--name", "parallel-db"},
+                       cache, log) == 0);
+      REQUIRE(run_cidx({"index", "--jobs", jobs}, cache, log) == 0);
+      // Delete a definition from one unit and re-emit a different one in its
+      // place, and make every other unit stale too, so the whole set is
+      // republished together and the run plans more than one worker. (The
+      // grammar parser has no `rebuild` subcommand -- that spelling belongs to
+      // the typed adapter -- so staleness is produced by editing.)
+      for (std::size_t unit = 0; unit < kTranslationUnits; ++unit) {
+        const std::string index = std::to_string(unit);
+        std::string body = "#include \"shared.hpp\"\n"
+                           "int repeated_declaration();\n"
+                           "int touched_" +
+                           index + "() { return " + index + "; }\n";
+        body += unit == 1
+                    ? "int reemitted_1() { return shared::value(); }\n"
+                    : "int local_" + index +
+                          "() { return shared::value(); }\n"
+                          "int carried_" +
+                          index + "(shared::Carrier c) { return c.get(); }\n";
+        body += "namespace shared { int fan_" + index +
+                "() { return value(); } }\n";
+        write_file(source + "/unit_" + index + ".cpp", body);
+      }
+      REQUIRE(run_cidx({"index", "--jobs", jobs}, cache, log) == 0);
+      return project(cache + "/index.db", root);
+    };
+    const std::string serial_root = make_temp_dir();
+    const std::string parallel_root = make_temp_dir();
+    const std::string serial = index_sequence(serial_root, "1");
+    const std::string parallel =
+        index_sequence(parallel_root, std::to_string(kTranslationUnits));
+    CHECK(serial == parallel);
+    // The deletion must actually have taken effect, or the comparison above is
+    // comparing two unchanged databases.
+    CHECK(serial.find("local_1") == std::string::npos);
+    CHECK(serial.find("reemitted_1") != std::string::npos);
   }
 
   TEST_CASE("cross-translation-unit references survive parallel publication") {

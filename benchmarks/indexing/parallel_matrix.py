@@ -61,6 +61,71 @@ def layer0(cache: Path, corpus: Path) -> str:
     return text.replace(str(corpus), "<CORPUS>").replace(str(cache), "<CACHE>")
 
 
+# Tables whose contents legitimately differ between two runs of the same corpus
+# in different directories, or between runs at different wall-clock times.
+VOLATILE_TABLES = frozenset({"meta"})
+
+# The optional translation-unit FactBatch cache. It is an accelerator, not a
+# fact: a multi-worker run does not populate it, because the cache decision
+# lives in the serial TuFactCacheIndexer wrapper that the scheduler bypasses.
+# Reported separately so the difference is visible and never silently folded
+# into a fact-parity claim.
+CACHE_TABLES = frozenset({"artifact", "artifact_relation"})
+
+
+def table_counts(cache: Path) -> dict[str, int]:
+    """Row count for every user table -- including the ones dump_layer0.sh omits
+    (definition, def_edge, type_node, type_edge, parameter, symbol_type,
+    template_param, diagnostic, fact_applicability, file_config,
+    translation_unit_config, semantic_universe, include_*)."""
+    import sqlite3
+
+    conn = sqlite3.connect(cache / "index.db")
+    try:
+        tables = [
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_schema WHERE type='table' "
+                "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+            )
+        ]
+        return {
+            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in tables
+            if table not in VOLATILE_TABLES and table not in CACHE_TABLES
+        }
+    finally:
+        conn.close()
+
+
+def cache_table_counts(cache: Path) -> dict[str, int]:
+    import sqlite3
+
+    conn = sqlite3.connect(cache / "index.db")
+    try:
+        return {
+            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in sorted(CACHE_TABLES)
+        }
+    finally:
+        conn.close()
+
+
+def integrity(cache: Path) -> dict[str, object]:
+    import sqlite3
+
+    conn = sqlite3.connect(cache / "index.db")
+    try:
+        return {
+            "integrity_check": conn.execute("PRAGMA integrity_check").fetchone()[0],
+            "foreign_key_violations": len(
+                conn.execute("PRAGMA foreign_key_check").fetchall()
+            ),
+        }
+    finally:
+        conn.close()
+
+
 def header_totals(stdout: str) -> dict[str, int]:
     payload = json.loads(stdout)
     result = payload.get("result", payload)
@@ -92,12 +157,14 @@ def main() -> int:
         shutil.rmtree(work)
     work.mkdir(parents=True)
 
-    corpus = work / "corpus"
-    generate_corpus(corpus, args.count)
-
     arms: dict[str, dict] = {}
     for jobs in args.jobs:
         name = "auto" if jobs == 0 else f"jobs{jobs}"
+        # One corpus per arm. The incremental probe below edits its sources, so
+        # a shared corpus would leave later arms indexing different code and
+        # turn a parity comparison into a comparison of two different programs.
+        corpus = work / f"corpus-{name}"
+        generate_corpus(corpus, args.count)
         cache = work / f"cache-{name}"
         cache.mkdir()
         run_cidx(binary, ["import", "--db", str(corpus / "compile_commands.json"),
@@ -117,13 +184,33 @@ def main() -> int:
                 )
             totals = trial_totals
             print(f"  {name} trial {trial}: {elapsed:.2f}s headers={trial_totals}")
+        # Parity is captured HERE, before the incremental probe below edits the
+        # shared corpus: every arm must be compared against the same sources.
         run_cidx(binary, ["resolve"], corpus, cache)
+        captured = {
+            "layer0": layer0(cache, corpus),
+            "table_counts": table_counts(cache),
+            "integrity": integrity(cache),
+        }
+        # Incremental path: a no-op run over a current index, then a run after
+        # one source changes. Both are the operator's warm SLO. The arms share
+        # one corpus, so the edit has to be one each arm can make on its own.
+        _, noop = run_cidx(binary, ["index", *jobs_args(jobs)], corpus, cache)
+        changed = corpus / "unit_0007.cpp"
+        changed.write_text(
+            changed.read_text() + "int incremental_probe() { return 1; }\n",
+            encoding="utf-8",
+        )
+        _, incremental = run_cidx(binary, ["index", *jobs_args(jobs)], corpus, cache)
         arms[name] = {
             "jobs": jobs,
             "durations": durations,
             "median": statistics.median(durations),
             "headers": totals,
-            "layer0": layer0(cache, corpus),
+            "tu_fact_cache_tables": cache_table_counts(cache),
+            "noop_seconds": noop,
+            "incremental_seconds": incremental,
+            **captured,
         }
 
     baseline = arms["jobs1"]
@@ -135,12 +222,27 @@ def main() -> int:
         "headers_match_serial": {},
     }
     ok = True
+    report["table_counts_match_serial"] = {}
+    report["integrity"] = {}
     for name, arm in arms.items():
         identical = arm["layer0"] == baseline["layer0"]
         headers_identical = arm["headers"] == baseline["headers"]
-        ok = ok and identical and headers_identical
+        counts_identical = arm["table_counts"] == baseline["table_counts"]
+        sound = (
+            arm["integrity"]["integrity_check"] == "ok"
+            and arm["integrity"]["foreign_key_violations"] == 0
+        )
+        ok = ok and identical and headers_identical and counts_identical and sound
         report["parity"][name] = identical
         report["headers_match_serial"][name] = headers_identical
+        report["table_counts_match_serial"][name] = counts_identical
+        report["integrity"][name] = arm["integrity"]
+        if not counts_identical:
+            report.setdefault("table_count_deltas", {})[name] = {
+                table: [baseline["table_counts"].get(table), value]
+                for table, value in arm["table_counts"].items()
+                if baseline["table_counts"].get(table) != value
+            }
         paired_faster = all(
             arm["durations"][i] < baseline["durations"][i]
             for i in range(args.trials)
@@ -152,6 +254,9 @@ def main() -> int:
             "speedup_vs_serial": baseline["median"] / arm["median"],
             "all_paired_trials_faster": paired_faster,
             "headers": arm["headers"],
+            "noop_seconds": arm["noop_seconds"],
+            "incremental_one_file_seconds": arm["incremental_seconds"],
+            "tu_fact_cache_tables": arm["tu_fact_cache_tables"],
         }
         if not identical:
             (work / f"layer0-diff-{name}.txt").write_text(
