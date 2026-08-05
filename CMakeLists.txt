@@ -154,6 +154,7 @@ add_library(cidx_core STATIC
   src/util/logger.cpp
   src/util/env.cpp
   src/util/subprocess.cpp
+  src/util/durable_publish.cpp
   src/util/hashing.cpp
   src/util/artifact_io.cpp
   src/util/json_min.cpp

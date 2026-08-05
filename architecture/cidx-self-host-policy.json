@@ -166,10 +166,10 @@
         {
           "callerFile": "src/cli/application_adapter.cpp",
           "calleeQualName": "cidx::Storage::Storage",
-          "line": 637,
+          "line": 674,
           "col": 11,
           "owner": "Platform M4 CLI maintainers",
-          "rationale": "The application adapter still constructs cidx::Storage directly to decide read-only vs. read-write opening instead of delegating to a typed application service (HSE-68).",
+          "rationale": "The application adapter still constructs cidx::Storage directly to decide read-only vs. read-write opening, and to hand a clean rebuild a private scratch database instead of the file in service, rather than delegating to a typed application service (HSE-68).",
           "expiresOn": "2026-12-31",
           "removalIssue": "HSE-62"
         },

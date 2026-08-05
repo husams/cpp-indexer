@@ -1,13 +1,7 @@
 #include "application/clean_rebuild.hpp"
 
-#include <fcntl.h>
-#include <unistd.h>
-
 #include <algorithm>
 #include <array>
-#include <cerrno>
-#include <cstdio>
-#include <cstring>
 #include <filesystem>
 #include <map>
 #include <ranges>
@@ -16,6 +10,7 @@
 #include <utility>
 
 #include "storage/storage.hpp"
+#include "util/durable_publish.hpp"
 #include "util/env.hpp"
 #include "util/errors.hpp"
 #include "util/hashing.hpp"
@@ -43,18 +38,6 @@ constexpr std::array<FailurePointName, 7> kFailurePointNames{{
     {.point = CleanRebuildFailurePoint::before_publication,
      .name = "before-publication"},
 }};
-
-// fsync a path. A directory needs its own fsync for a rename to be durable, and
-// both files and directories are opened read-only to do it.
-auto sync_path(const std::string &path) -> bool {
-  const int fd = ::open(path.c_str(), O_RDONLY);
-  if (fd < 0) {
-    return false;
-  }
-  const int rc = ::fsync(fd);
-  ::close(fd);
-  return rc == 0;
-}
 
 auto parent_directory(const std::string &path) -> std::string {
   const std::filesystem::path parent =
@@ -129,7 +112,7 @@ auto clean_rebuild_candidate_path(const std::string &index_path)
     -> std::string {
   const std::filesystem::path target(index_path);
   const std::string name = ".cidx-rebuild-" +
-                           std::to_string(static_cast<long>(::getpid())) + "-" +
+                           std::to_string(util::current_process_id()) + "-" +
                            target.filename().string();
   return (std::filesystem::path(parent_directory(index_path)) / name).string();
 }
@@ -417,23 +400,10 @@ auto publish_clean_rebuild_candidate(const std::string &candidate_path,
            std::string(clean_rebuild_failure_point_name(failure));
   }
 
-  // Durability before visibility: the candidate's bytes and the directory entry
-  // that will name it must both be on stable storage before the rename.
-  if (!sync_path(candidate_path)) {
-    return "cannot flush candidate database " + candidate_path + ": " +
-           std::strerror(errno);
-  }
-  const std::string directory = parent_directory(index_path);
-  (void)sync_path(directory);
-
-  // rename(2) is atomic: a reader either sees the whole previous database or
-  // the whole published one, never a partial file.
-  if (std::rename(candidate_path.c_str(), index_path.c_str()) != 0) {
-    return "cannot publish " + candidate_path + " over " + index_path + ": " +
-           std::strerror(errno);
-  }
-  (void)sync_path(directory);
-  return {};
+  // fsync the candidate, fsync the directory, then rename. rename(2) is atomic:
+  // a reader either sees the whole previous database or the whole published
+  // one, never a partial file.
+  return util::publish_file_atomically(candidate_path, index_path);
 }
 
 } // namespace cidx::application
