@@ -3,6 +3,7 @@
 // command spelling.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -16,6 +17,33 @@ enum class IndexAction : std::uint8_t { update, rebuild, status, explain };
 inline constexpr const char *kIndexTransformFlagConflict =
     "--no-graph and --defer-transforms are mutually exclusive";
 
+// S-074. The bounded parallel extraction mechanism -- worker/budget policy,
+// the ordered owned-header claim oracle, the bounded reorder buffer and
+// legacy-order publication through the single controlled writer -- is complete
+// and covered by tests. The mode is still refused end to end because
+// EXTRACTION ITSELF STILL READS THE AUTHORITATIVE DATABASE (owned-header file
+// rows, per-file configuration applicability, component ownership, portable
+// identities) throughout each parse.
+//
+// cidx ships rollback journaling with FULL synchronous durability
+// (storage/sqlite.cpp: `PRAGMA journal_mode = DELETE`), deliberately, and WAL
+// is explicitly not enabled without measured atomicity evidence. Under rollback
+// journaling a writer needs an EXCLUSIVE lock, which no connection can take
+// while another holds a SHARED read lock. Concurrent workers reading the
+// database therefore starve the scheduler's controlled writer, which fails the
+// publication rather than merely slowing it down.
+//
+// Closing this needs the story's "workers consume immutable extraction inputs"
+// bullet: hoist every extraction-time read into an immutable per-run snapshot
+// handed to the worker, so a worker touches no database at all. That is a
+// change to the extraction engine's inputs, not to this scheduler, and it is
+// not something to fake with a lock retry -- retrying would trade a hard
+// failure for an unbounded stall.
+inline constexpr const char *kIndexParallelUnavailable =
+    "--jobs greater than 1 is not available yet: translation-unit extraction "
+    "still reads the index database, which cannot run concurrently with the "
+    "controlled writer under rollback journaling. Use --jobs 1.";
+
 struct IndexRequest {
   IndexAction action = IndexAction::update;
   std::vector<std::string> files;
@@ -28,6 +56,13 @@ struct IndexRequest {
   std::optional<std::string> index;
   std::optional<std::string> profile_json;
   std::optional<std::string> profile_sqlite_configuration;
+  // Bounded parallel translation-unit extraction (S-074). 0 selects the
+  // documented automatic policy; the parsers reject anything that is not a
+  // positive integer, so a set value is always usable.
+  int jobs = 0;
+  std::uint64_t max_queue_bytes = 0;
+  std::size_t max_queue_items = 0;
+  std::uint64_t memory_budget_bytes = 0;
 };
 
 enum class QueryOutput : std::uint8_t { human, json };

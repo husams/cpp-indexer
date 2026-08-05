@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "ast/index_engine.hpp"
+#include "cli/application_adapter.hpp"
 #include "cli/args.hpp"
 #include "cli/commands.hpp"
 #include "cli/format.hpp"
@@ -4146,9 +4147,29 @@ TEST_CASE("analyze: mode and jobs validation (exit 2), unknown rule and "
   r = run_cli({"analyze", "--list", "--rule", "cycles"}, t);
   CHECK(r.rc == 2);
 
-  r = run_cli({"analyze", "--rule", "cycles", "--jobs", "0"}, t);
-  CHECK(r.rc == 2);
-  CHECK(r.err == "error: --jobs must be at least 1\n");
+  // S-074 unified the bounded-numeric contract: --jobs is now rejected during
+  // parsing, with the same message the typed adapter has always emitted, in
+  // both parser implementations. The runtime guard below still covers a caller
+  // that builds ParsedArgs directly.
+  const ParseFail jobs = parse_fail({"analyze", "--rule", "cycles", "--jobs", "0"});
+  CHECK(jobs.code == 2);
+  CHECK(jobs.msg.find("cidx: error: --jobs must be a positive integer\n") !=
+        std::string::npos);
+  {
+    cli::ParsedArgs direct;
+    direct.command = "analyze";
+    direct.analyze_rule = "cycles";
+    direct.analyze_jobs = 0; // bypasses the parser entirely
+    std::ostringstream out;
+    std::ostringstream err;
+    cli::Context ctx;
+    ctx.cache_dir = t;
+    ctx.index_path = t + "/index.db";
+    ctx.out = &out;
+    ctx.err = &err;
+    CHECK(cli::run_command(direct, ctx) == 2);
+    CHECK(err.str() == "error: --jobs must be at least 1\n");
+  }
 
   r = run_cli({"analyze", "--rule", "nope"}, t);
   CHECK(r.rc == 1);
@@ -4285,6 +4306,141 @@ TEST_CASE("analyze: broken user Datalog surfaces the souffle error (needs "
   const CmdResult r = run_cli({"analyze", "--rules-file", prog}, t);
   CHECK(r.rc == 1);
   CHECK(r.err.find("error: souffle failed (exit ") == 0);
+}
+
+// ---------------------------------------------------------------------------
+// S-074: bounded parallel extraction options. AC #1719 requires help, parsing,
+// validation and IDENTICAL error behavior in BOTH parser implementations -- the
+// typed application adapter that production `cidx index` runs through, and the
+// CLI11 grammar that owns the help text. Each case below asserts the same
+// rejection twice, once per parser.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The typed adapter: what production `cidx index ...` actually parses.
+ParseFail typed_parse_fail(const std::vector<std::string> &argv) {
+  ParseFail out;
+  try {
+    static_cast<void>(cli::parse_application_request(argv));
+    FAIL("expected UsageError from the typed adapter");
+  } catch (const UsageError &e) {
+    out.code = e.exit_code();
+    out.msg = e.what();
+  }
+  return out;
+}
+
+const cidx::application::IndexRequest &
+typed_index(const cli::ApplicationParseResult &parsed) {
+  const auto *request =
+      std::get_if<cidx::application::CommandRequest>(&parsed.value);
+  REQUIRE(request != nullptr);
+  const auto *index = std::get_if<cidx::application::IndexRequest>(request);
+  REQUIRE(index != nullptr);
+  return *index;
+}
+
+} // namespace
+
+TEST_CASE("index --jobs rejects non-positive values identically in both "
+          "parsers") {
+  const std::vector<std::vector<std::string>> rejected = {
+      {"index", "--jobs", "0"},   {"index", "--jobs", "-1"},
+      {"index", "--jobs", "abc"}, {"index", "--jobs", "4x"},
+      {"index", "--jobs", ""},    {"index", "--jobs", " 4"},
+      {"index", "--jobs", "+4"},  {"index", "--jobs", "3.5"},
+  };
+  for (const std::vector<std::string> &argv : rejected) {
+    const ParseFail typed = typed_parse_fail(argv);
+    CHECK(typed.code == 2);
+    CHECK(typed.msg == "cidx: error: --jobs must be a positive integer\n");
+
+    const ParseFail grammar = parse_fail(argv);
+    CHECK(grammar.code == 2);
+    // The CLI11 grammar prefixes its usage line; the detail must match exactly.
+    CHECK(grammar.msg.find("cidx: error: --jobs must be a positive integer\n") !=
+          std::string::npos);
+  }
+}
+
+TEST_CASE("analyze --jobs and index --jobs share one rejection contract") {
+  // The story requires index to reuse analyze's parsing, validation and error
+  // text; a divergence here is the drift that requirement exists to prevent.
+  for (const std::string &value : {"0", "-3", "nope", ""}) {
+    const ParseFail analyze =
+        typed_parse_fail({"analyze", "--rule", "r", "--jobs", value});
+    const ParseFail index = typed_parse_fail({"index", "--jobs", value});
+    CHECK(analyze.msg == index.msg);
+    CHECK(analyze.code == index.code);
+
+    const ParseFail analyze_grammar =
+        parse_fail({"analyze", "--rule", "r", "--jobs", value});
+    const ParseFail index_grammar = parse_fail({"index", "--jobs", value});
+    CHECK(analyze_grammar.code == index_grammar.code);
+    CHECK(analyze_grammar.msg.find(
+              "cidx: error: --jobs must be a positive integer\n") !=
+          std::string::npos);
+    CHECK(index_grammar.msg.find(
+              "cidx: error: --jobs must be a positive integer\n") !=
+          std::string::npos);
+  }
+}
+
+TEST_CASE("index budget options reject non-positive values in both parsers") {
+  const std::vector<std::pair<std::string, std::string>> options = {
+      {"--max-queue-bytes", "0"},      {"--max-queue-bytes", "many"},
+      {"--max-queue-items", "0"},      {"--max-queue-items", "-2"},
+      {"--memory-budget-bytes", "0"},  {"--memory-budget-bytes", "8g"},
+  };
+  for (const auto &[option, value] : options) {
+    const std::vector<std::string> argv{"index", option, value};
+    const ParseFail typed = typed_parse_fail(argv);
+    CHECK(typed.code == 2);
+    CHECK(typed.msg == "cidx: error: " + option +
+                           " must be a positive integer\n");
+    const ParseFail grammar = parse_fail(argv);
+    CHECK(grammar.msg.find("cidx: error: " + option +
+                           " must be a positive integer\n") !=
+          std::string::npos);
+  }
+}
+
+TEST_CASE("index accepts valid job and budget values in both parsers") {
+  const cli::ApplicationParseResult parsed = cli::parse_application_request(
+      {"index", "--jobs", "6", "--max-queue-bytes", "1048576",
+       "--max-queue-items", "12", "--memory-budget-bytes", "2147483648"});
+  const cidx::application::IndexRequest &request = typed_index(parsed);
+  CHECK(request.jobs == 6);
+  CHECK(request.max_queue_bytes == 1048576U);
+  CHECK(request.max_queue_items == 12U);
+  CHECK(request.memory_budget_bytes == 2147483648ULL);
+
+  const cli::ParsedArgs grammar = cli::parse_args(
+      {"index", "--jobs", "6", "--max-queue-bytes", "1048576",
+       "--max-queue-items", "12", "--memory-budget-bytes", "2147483648"});
+  CHECK(grammar.index_jobs == 6);
+  CHECK(grammar.index_max_queue_bytes == 1048576U);
+  CHECK(grammar.index_max_queue_items == 12U);
+  CHECK(grammar.index_memory_budget_bytes == 2147483648ULL);
+}
+
+TEST_CASE("omitting --jobs selects the automatic policy, not one worker") {
+  const cli::ApplicationParseResult parsed =
+      cli::parse_application_request({"index"});
+  CHECK(typed_index(parsed).jobs == 0);
+  const cli::ParsedArgs grammar = cli::parse_args({"index"});
+  CHECK(grammar.index_jobs == 0);
+}
+
+TEST_CASE("index help documents the parallel extraction options") {
+  const cli::ParsedArgs parsed = cli::parse_args({"index", "--help"});
+  REQUIRE(parsed.help_text);
+  const std::string &help = *parsed.help_text;
+  CHECK(help.find("--jobs") != std::string::npos);
+  CHECK(help.find("--max-queue-bytes") != std::string::npos);
+  CHECK(help.find("--max-queue-items") != std::string::npos);
+  CHECK(help.find("--memory-budget-bytes") != std::string::npos);
 }
 
 int main(int argc, char **argv) {

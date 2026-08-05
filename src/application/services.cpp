@@ -254,6 +254,18 @@ StorageApplicationOperations::execute(const IndexRequest &request,
     truncated = true;
   }
 
+  // S-074: bounded parallel extraction is refused, not silently downgraded --
+  // an operator who asked for it must never be told the run succeeded when it
+  // ran serially. See kIndexParallelUnavailable for why the mode is not
+  // reachable yet even though its scheduler is complete.
+  // Refused whenever it is ASKED FOR, not only when there happens to be work:
+  // an operator must get the same answer about an unavailable mode on an
+  // up-to-date index as on a cold one.
+  if (request.jobs > 1) {
+    return service_error("index", context, "unsupported",
+                         kIndexParallelUnavailable);
+  }
+
   ast::IndexSession session(db);
   // Same cache orchestration as the CLI: one decision path, one set of
   // counters, one conservative fallback.

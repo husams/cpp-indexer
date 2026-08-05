@@ -30,6 +30,7 @@ set(CIDX_DEFAULT_TESTS
   fact_batch_writer_contract_test
   fact_batch_complexity_test
   owned_header_plan_test
+  parallel_extraction_test
   fact_batch_artifact_test
   tu_fact_cache_test
   ui_graph_view_test
