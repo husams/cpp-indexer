@@ -17,7 +17,7 @@ threshold in prose.
 
 | In | Out |
 | --- | --- |
-| The generated production corpora: 32 and 1,000 translation units, header-heavy, many-owned-header, and controlled fan-in shapes, forward and reverse compilation-database order. | **Self-indexing the `cpp-indexer` checkout.** Excluded by explicit instruction for this qualification; re-indexing is not on the critical path of a change in this repository. |
+| Generated production corpora: 32 and 1,000 translation units, header-heavy, many-owned-header, and controlled fan-in shapes, forward and reverse compilation-database order. | **Self-indexing the `cpp-indexer` checkout.** Excluded by explicit instruction for this qualification; re-indexing is not on the critical path of a change in this repository. |
 | Cold, unchanged-warm, one-source, low/high-fan-in-header, configuration-change and generated-input states. | Absolute timings on shared CI hardware. The scheduled job records `host_quiescence` so a contended run is visible rather than averaged in. |
 | The shipped automatic worker policy, plus a pinned serial run for the telemetry only the serial path produces. | PCH/preamble reuse beyond the shipped `none` mechanism: ADR-014 ships no other, and the report records the identity rather than inventing a candidate. |
 
@@ -27,12 +27,12 @@ threshold in prose.
 | --- | --- |
 | Host | Darwin 25.1.0 arm64 (Mach-O), 10 CPUs |
 | Compiler | Apple clang 17.0.0 (clang-1700.6.3.2) |
-| Candidate executable | `cidx 0.53.0`, SHA-256 `7b71ba20730ca1f90bfff2efc9205200a98ecd73a88c6c33eeb05e2989135be2` |
-| Candidate source | `17d2c66` on the S-078 branch |
-| Pre-feature executable | `d9f4754` — the merge immediately before the first PERF-002 change (`5ae38ad`, HSE-114). SHA-256 `70e1a1dd…`. It advertises none of `--profile-json`, `--jobs`, `--clean`, `--defer-transforms`, so its arm runs without telemetry and that is recorded rather than assumed. |
+| Candidate executable | `cidx 0.53.0`, SHA-256 `cbe314f9f552828d…`, built from `e602ce8` with a clean tree. All four runs below used this one binary. |
+| Pre-feature executable | `d9f4754` — the merge immediately before the first PERF-002 change (`5ae38ad`, HSE-114). It advertises none of `--profile-json`, `--jobs`, `--clean`, `--defer-transforms`, so its arm runs without telemetry and that is recorded rather than assumed. |
 | Schema / catalog | version 40, catalog version 1, hash `c4f4262…9e37e9f7` |
 | SQLite | 3.53.3, shipped rollback-journal profile (`journal_mode = DELETE`, `synchronous = FULL`) |
 | Trials | three per case per executable; every figure below is a median, with the trial series recorded in the JSON |
+| Corpus scale | absolute figures are from the 1,000-unit production matrix; the paired pre-feature A/B is `baseline:256:forward`. Both sizes are recorded in the reports and are stated wherever a number comes from one of them. |
 
 ## The published SLO
 
@@ -41,81 +41,91 @@ exclusive: a median exactly at it fails.
 
 | Measurement | Median | Limit | Headroom |
 | --- | ---: | ---: | ---: |
-| Unchanged warm index | **0.692 s** | 5 s | 4.31 s |
-| One-source incremental index | **0.668 s** | 2 s | 1.33 s |
-| High-fan-in-header state | **0.322 s** | 2 s | 1.68 s |
-| Cold index (1,000 units) | **10.511 s** | 900 s | 889 s |
+| Unchanged warm index | **0.719 s** | 5 s | 4.28 s |
+| One-source incremental index | **0.698 s** | 2 s | 1.30 s |
+| Cold index (1,000 units) | **11.089 s** | 900 s | 889 s |
 
-Cold supporting figures: 21.133 s child CPU (2.01x utilisation, so the workers
-are genuinely overlapping), 109.1 MiB peak RSS, trials 7.961 / 10.511 / 11.126 s.
+Cold supporting figures: 22.182 s child CPU (2.00x utilisation, so the workers
+really are overlapping), 109.1 MiB peak RSS, trials 11.089 / 11.456 / 10.917 s.
+Warm trials 0.845 / 0.711 / 0.719 s; one-source trials 0.882 / 0.688 / 0.698 s.
 
-Relative to the pre-feature executable, on the same corpus and host:
+Two states are rebuilds rather than incremental updates, and are published as
+such rather than measured against an incremental limit:
+
+| Dependency rebuild (1,000 units) | Median | Units re-extracted |
+| --- | ---: | ---: |
+| High-fan-in header change | 20.231 s | 1,000 of 1,000 |
+| Generated-input change | 21.140 s | 1,000 of 1,000 |
+
+Relative to the pre-feature executable, paired on `baseline:256:forward`:
 
 | Stage | Pre-feature | Candidate | Change |
 | --- | ---: | ---: | ---: |
-| Cold | 105.129 s | 10.245 s | **10.26x faster** |
-| Configuration change | 94.112 s | 14.008 s | 6.72x faster |
-| Generated-input rebuild | 96.342 s | 14.373 s | 6.70x faster |
-| Unchanged warm | 0.213 s | 0.715 s | 0.502 s slower — **waived**, see below |
-| One-source incremental | 0.352 s | 0.713 s | 0.361 s slower — **waived** |
-| High-fan-in header | 0.148 s | 0.322 s | 0.174 s slower — **waived** |
+| Cold | 11.925 s | 2.547 s | **4.68x faster** |
+| Unchanged warm | 0.065 s | 0.272 s | 0.206 s slower — **waived** |
+| One-source incremental | 0.119 s | 0.303 s | 0.184 s slower — **waived** |
+| High-fan-in header | 0.054 s | 3.361 s | not comparable — **waived**, see below |
+
+The candidate's fact set is a strict superset of the pre-feature one: at 256
+units it gains 256 `def_edge` rows and 258 `fact_applicability` rows — the
+`uses` edges into header-owned namespaces that are lost when cross-unit
+identity is resolved from a pre-run snapshot instead of at publication.
+Nothing shrank, and a shrinking section is a hard failure of the comparison.
 
 ### Non-regression allowance and the three waivers
 
 The contract allows a candidate median to exceed the recorded pre-feature
-median by the greater of 10% or 50 ms. All three incremental stages exceed
-that, so each carries an explicit waiver naming a quantified benefit, a cause
-and an owner. The waivers are data in the report, not a code path that skips
-the check: an incomplete waiver is reported as malformed and does not rescue
-the measurement.
+median by the greater of 10% or 50 ms. Three stages exceed that, so each
+carries an explicit waiver naming a quantified benefit, a cause and an owner
+([`fixtures/s078-regression-waivers.json`](../benchmarks/indexing/fixtures/s078-regression-waivers.json)).
+The waivers are data in the report, not a code path that skips the check: an
+incomplete waiver is reported as malformed and does not rescue the measurement.
 
-**Cause, measured rather than asserted.** A warm run extracts nothing, so
-everything it spends is per-invocation overhead. Of the 0.715 s warm run,
-**0.376 s is the derived-publication transform pipeline** — and no individual
-transform executed: the whole cost is the readiness evaluation that runs
-whether or not anything is stale. The same run issues 16.6k prepared
-statements, 4.2M SQLite virtual-machine steps and 237k full-scan steps while
-publishing nothing. The one-source run spends 0.315 s in the pipeline of which
-only 0.071 s is individually timed transform execution, and
-`entity-graph-rollup` scans 20,018 rows under its generation-gated full-rebuild
-contract for a single changed source. The high-fan-in-header stage spends 0 s
-in transforms and still issues 13,131 prepared statements at 1,000 registered
-files — a per-invocation fixed cost that scales with the registered file count
-rather than with the change.
+**Warm and one-source: measured cause, not asserted.** A warm run extracts
+nothing, so everything it spends is per-invocation overhead. At 1,000 units,
+**0.342 s of the 0.719 s warm run is the derived-publication transform
+pipeline** — and no individual transform executed: the whole cost is the
+readiness evaluation that runs whether or not anything is stale. Benefit: the
+cold improvement above. Owners: S-077 for the readiness evaluation, S-069 for
+the run-wide session and workspace snapshot. Both are carried in the residual
+list with a threshold, so the term cannot creep.
 
-**Benefit.** 10.26x cold. **Owners.** S-077 for the transform readiness
-evaluation, S-069 for the run-wide session/workspace snapshot. Both are carried
-in the residual list below with a threshold, so the term cannot creep.
+**High-fan-in header: the two executables are no longer doing the same work,
+and that is the point.** The candidate re-extracts every unit the changed
+header reaches; the pre-feature executable re-extracts none and leaves the
+index holding facts the header no longer supports. Its 54 ms was the cost of
+doing nothing. This row is kept in the comparison, rather than dropped from it,
+so the number stays visible.
 
 The absolute contract is what protects the operator, and it holds with large
-margins: warm is at 14% of its limit and one-source at 33% of its.
+margins: warm is at 14% of its limit and one-source at 35% of its.
 
 ## The provisional `>=4x` cold goal: retained, and met
 
-**Disposition: retained. Measured: 10.26x. The goal is met.**
+**Disposition: retained. Measured: 4.68x. The goal is met.**
 
 The arithmetic that had to accompany any other disposition:
 
 | Quantity | Value |
 | --- | ---: |
-| Measured Clang front-end share of cold **wall** time | 4.717 s of 10.511 s = **44.88%** |
-| Measured Clang front-end share of cold **CPU** time | 4.717 s of 21.133 s = 22.32% |
-| LibTooling-inclusive share of cold wall time | 8.271 s = 78.70% |
-| Amdahl ceiling on *further* improvement from here | **2.23x** |
+| Measured Clang front-end share of cold **wall** time (1,000 units) | 5.100 s of 11.089 s = **45.99%** |
+| Measured Clang front-end share of cold **CPU** time | 5.100 s of 22.182 s = 22.99% |
+| LibTooling-inclusive share of cold wall time | 8.861 s = 79.91% |
+| Amdahl ceiling on *further* improvement from here | **2.17x** |
 
-The ceiling is stated as a ceiling on what remains, not on what was achieved:
-it is computed from the candidate's own front-end share, so a 10.26x
-improvement from a 105 s baseline down to 10.5 s is entirely consistent with
-only ~2.2x remaining if the front end became free. Reading it the other way
-round is the mistake this row exists to prevent.
+The ceiling is a ceiling on what remains, not on what was achieved: it is
+computed from the candidate's own front-end share, so a 4.68x improvement from
+an 11.9 s baseline down to 2.5 s is entirely consistent with only ~2.2x
+remaining if the front end became free. Reading it the other way round is the
+mistake this row exists to prevent.
 
 Which workstreams attack that term:
 
 | Story | Mechanism | What it attacks |
 | --- | --- | --- |
-| S-074 (HSE-109) | bounded parallel translation-unit extraction | front-end **wall** time, by overlapping parses. Measured: serial 44.156 s against parallel 10.511 s on the same corpus, **4.20x**. |
+| S-074 (HSE-109) | bounded parallel translation-unit extraction | front-end **wall** time, by overlapping parses. Measured at 1,000 units: serial 46.368 s against parallel 11.089 s, **4.18x**. |
 | S-075 (HSE-110) | configuration-compatible PCH/preamble reuse | front-end **CPU** time. ADR-014 ships only the `none` mechanism; the identity is recorded and the explicit `--no-front-end-reuse` control publishes the same facts. |
-| S-076 (HSE-111) | transitive-header invalidation and the content-addressed TU fact cache | front-end **calls**, by avoiding the parse on a hit. Measured: a cached replay avoids 12 of 12 parser calls where the fresh arm avoids none. Reachability caveat in [Dependency invalidation](#dependency-invalidation-partly-met) below. |
+| S-076 (HSE-111) | transitive-header invalidation and the content-addressed TU fact cache | front-end **calls**, by avoiding the parse on a hit. Measured: a cached replay avoids 6 of 6 parser calls where the fresh arm avoids none. |
 
 ## Was the superlinear term reproduced?
 
@@ -124,28 +134,25 @@ informative.
 
 **Across corpus sizes the term is bounded.** Per-translation-unit cold cost is
 essentially flat between 32 and 1,000 units in the shipped configuration —
-0.010487 s against 0.010510 s per unit, an implied growth exponent of
-**1.0007**. Serially it is 0.035975 s against 0.044156 s, exponent 1.06. Both
-are a large improvement on S-074's earlier measurement of ~N^1.25 serial and
-~N^1.35 parallel, and both are far inside the 1.4 threshold this report
-establishes for the term.
+0.010952 s against 0.011089 s per unit, an implied growth exponent of
+**1.0036**. That is a large improvement on S-074's earlier measurement of
+~N^1.25 serial and ~N^1.35 parallel, and it is far inside the 1.4 threshold
+this report establishes for the term.
 
-**Within a single 1,000-unit run, a positive positional term is still
-statistically preferred in the parallel arm.** AIC prefers the quadratic model
-over linear and constant, with coefficient 1.468e-08 +/- 1.614e-09 s per
-position squared (9.1 sigma) and R^2 = 0.118, reproduced in reverse
-compilation-database order too (1.328e-08 +/- 1.682e-09). At the end of a
-1,000-unit corpus that term contributes about 14.7 ms to a unit whose mean cost
-is 10.5 ms.
+**Within a single 1,000-unit run, a weak positional term is still preferred in
+the parallel arm.** AIC prefers the quadratic model, with coefficient
+9.429e-09 +/- 1.974e-09 s per position squared (4.8 sigma) — but R^2 = 0.032,
+so it explains about 3% of the per-unit variance.
 
-**The serial arm shows no such term**: its coefficient is *negative*,
--1.064e-09 +/- 5.132e-10, and the harness reports `superlinear-unresolved`.
-A positional term that appears only under concurrency, on a corpus where the
-aggregate per-unit cost is flat, is far better explained by worker contention
-and reorder-buffer occupancy late in a run than by database growth. That is the
-conservative bound this report publishes: **the corpus-growth term is removed
-at the aggregate level; a concurrency-positional term remains, is measured, and
-is bounded by the flat aggregate.**
+**The serial arm shows no such term.** Its coefficient is 6.759e-10 +/-
+6.924e-10 — indistinguishable from zero — and the harness reports
+`superlinear-not-preferred`. A positional term that appears only under
+concurrency, on a corpus whose aggregate per-unit cost is flat, is far better
+explained by worker contention and reorder-buffer occupancy late in a run than
+by database growth. That is the conservative bound this report publishes: **the
+corpus-growth term is removed at the aggregate level; a weak
+concurrency-positional term remains, is measured, and is bounded by the flat
+aggregate.**
 
 ## Mode equivalence
 
@@ -165,7 +172,7 @@ count, plus `integrity_check` and `foreign_key_check` on each database.
 | Operating bounds | unbounded against three squeezed settings | identical |
 
 **Discriminating evidence, so the axes are not vacuous.** The cached replay arm
-avoided 12 parser calls; the fresh replay arm avoided none. The cold cache arm
+avoided 6 parser calls; the fresh replay arm avoided none; the cold cache arm
 avoided none, as a cache-populating run must. Both replay arms performed the
 identical two forced re-extraction rounds, because a replayed database is
 legitimately not identical to a cold one and comparing a cached replay against
@@ -176,40 +183,44 @@ which indexes a real corpus with completion forced into the exact reverse of
 the dispatch order and compares row-by-row projections, plus delete/re-emit,
 repeated declarations and the same symbol declared by every unit.
 
-## Dependency invalidation (partly met)
+## Dependency invalidation
 
-This is the one acceptance criterion this report cannot claim end to end, and
-it is stated plainly rather than folded into a green table.
+A changed dependency rebuilds the units that depend on it, and only those.
+This is a gate, not a claim: the controlled fan-in corpus is built so that both
+failure modes show up as a wrong number.
 
-**What is qualified.** Editing the main source, an owned header, or an
-unowned/generated intermediate changes the recorded content identity and
-invalidates the cache entry; `plan_affected_translation_units` computes the
-affected set and proves the remainder unaffected. Both are covered by
-`tu_fact_cache_test` and `tu_fact_cache_integration_test`, run green as part of
-this qualification.
+| Change | Units re-extracted | Expected |
+| --- | ---: | ---: |
+| Low-fan-in header (included by two units of 32) | **2** | 2 |
+| High-fan-in header (included by all 32) | **32** | 32 |
+| Generated input (forced include) | **32** | > 0 |
+| Nothing changed | **0** | 0 |
 
-**What is not reached.** `cidx index` never asks for that plan.
-`plan_affected` has no caller outside the test suite, and target selection in
-`run_index_pass` takes only files whose own `index_status` is not `kOk`. A
-stale owned header is a header, so it is reported `deferred`; the translation
-units that include it are still `kOk`, so they are reported `already`. Measured
-directly on a 6-unit corpus: after appending a line to the high-fan-in header,
-`cidx index` reports `0 indexed, 0 failed, 7 already indexed`, extracts **zero**
-translation units, reports every `tu_dependency.*` counter at zero — the
-planner was never consulted — and leaves the canonical digest unchanged. The
-production harness's `high-fan-in-header` and `generated-input` stages show the
-same zero-extraction result on the **pre-feature** executable, so this is not a
-PERF-002 regression; it is a mechanism that shipped without being wired to the
-scheduler.
+Rebuilding nothing — the behaviour that shipped before S-078 — and rebuilding
+everything are each a count that does not match, and an unchanged run
+rebuilding anything at all fails too, which is what stops the closure paying
+for itself with invented work.
 
-**Owner: S-076.** Closing it means deciding what an index run does when the
-dependency plan is unavailable — the planner lives in the serial cache wrapper,
-which a multi-worker run bypasses entirely — and that decision changes what a
-plain `cidx index` costs after a header edit. It is deliberately not made here.
+**How it works.** Target selection closes over the reverse `include_edge`
+graph from every changed input. That table is Layer-0: written by every run
+regardless of worker topology or of whether the optional translation-unit fact
+cache is enabled, it records the destination path even when the destination has
+no `file` row, and it is transitive, so a change to a header included by
+another header reaches the units at the end of the chain. A forced include
+produces no include directive and therefore no edge, so the configuration's
+recorded generated inputs are consulted as a second reverse lookup — gated on
+there being a changed input that is not already a target, so an ordinary
+one-source edit pays nothing for it.
 
-**Operator guidance until it is closed:** after editing a header, run
-`cidx index rebuild` (or `cidx index rebuild --clean` for an atomically
-published rebuild). `cidx index` alone will not pick up dependents.
+Dependents are merged in `list_files()` order rather than appended, because
+dispatch order *is* the legacy apply key that cross-unit identity resolution at
+publication and the parallel reorder buffer are both defined against.
+
+**What it cannot see** is a change to an input cidx never recorded a digest
+for — a system or toolchain header, or an unresolved directive. Those are
+deliberately not content-hashed (see [tu-fact-cache.md](tu-fact-cache.md)); the
+normalized toolchain and configuration identities cover their *set*, and the
+translation-unit fact cache refuses a hit for a unit that records one.
 
 ## Artifacts, failure atomicity and recovery
 
@@ -232,33 +243,24 @@ violations, and the resumed run exited 0 — the interruption itself is clean.
 The probe nonetheless reports `recovered: false`, because it compares the
 resumed database against the pre-kill original and they differ. That difference
 is **not caused by the interruption**: an *uninterrupted* forced re-index of the
-same database produces the identical difference. Its content is two `contains`
-edge counts moving from 1 to 2 plus a handful of applicability rows, because
-the probe clears `indexed` on every row including already-indexed owned
-headers, and the `contains` edge kind accumulates its count by design
-(`count = edge.count + excluded.count`). Re-registering an already-indexed
-owned header for extraction therefore double-counts its namespace containment.
-No supported invalidation route reaches that state — a source edit and revert,
-and a header edit and revert, both produce a database canonically identical to
-a cold build — so it is reported here as a characterised property of the probe,
-owned by the accumulating edge-count semantics, rather than as an interruption
-defect.
+same database produces the identical difference. See
+[Disclosed, not fixed](#disclosed-not-fixed) for what it is and who owns it.
 
 ## Operating bounds
 
-Squeezed to the tightest settings the CLI accepts, on a 24-unit corpus, all
-publishing facts identical to the unbounded arm:
+Squeezed to the tightest settings the CLI accepts, all publishing facts
+identical to the unbounded arm:
 
 | Setting | Bound exercised | Peak RSS |
 | --- | --- | ---: |
-| `--jobs 4` (control) | — | 69.7 MiB |
-| `--jobs 4 --max-queue-items 1` | extracted-but-unpublished translation units | 68.7 MiB |
-| `--jobs 4 --max-queue-bytes 65536` | extracted-but-unpublished payload bytes | 68.7 MiB |
-| `--memory-budget-bytes 67108864` | resident-memory ceiling deriving the worker count | 59.3 MiB |
+| `--jobs 4` (control) | — | 68.4 MiB |
+| `--jobs 4 --max-queue-items 1` | extracted-but-unpublished translation units | 68.2 MiB |
+| `--jobs 4 --max-queue-bytes 65536` | extracted-but-unpublished payload bytes | 68.0 MiB |
+| `--memory-budget-bytes 67108864` | resident-memory ceiling deriving the worker count | 59.1 MiB |
 
 The memory budget visibly bites: it is the only setting that moves peak RSS,
 and it moves it down. Cold peak RSS at 1,000 units is 109.1 MiB parallel and
-80.1 MiB serial — the difference is the bounded in-flight extraction the queue
+80.5 MiB serial — the difference is the bounded in-flight extraction the queue
 budgets govern. Every knob and its default is documented in
 [indexing-parallelism.md](indexing-parallelism.md); artifact retention, leases
 and pins in [tu-fact-cache.md](tu-fact-cache.md).
@@ -266,24 +268,24 @@ and pins in [tu-fact-cache.md](tu-fact-cache.md).
 ## SQLite profile qualification
 
 The shipped rollback-journal profile is **retained**. Alternatives were
-measured on a disposable 32-unit corpus with the shipped profile as control:
+measured on a disposable corpus with the shipped profile as control:
 
 | Setting | Cold median | Outcome |
 | --- | ---: | --- |
-| shipped control (`DELETE` / `FULL`) | 0.349 s | retained |
-| `cache_size = -65536` | 0.382 s | no improvement |
-| `mmap_size = 256 MiB` | 0.363 s | no improvement |
-| `temp_store = MEMORY` | 0.357 s | no improvement |
-| `journal_mode = DELETE, synchronous = FULL` (explicit) | 0.363 s | equals the control, as it must |
+| shipped control (`DELETE` / `FULL`) | 0.380 s | retained |
+| `cache_size = -65536` | 0.376 s | no material change |
+| `mmap_size = 256 MiB` | 0.375 s | no material change |
+| `temp_store = MEMORY` | 0.389 s | no improvement |
+| `journal_mode = DELETE, synchronous = FULL` (explicit) | 0.378 s | equals the control, as it must |
 | `journal_mode = WAL, synchronous = NORMAL` | — | **refused: incompatible with the shipped indexer** |
 
 The WAL row is an evidence-backed do-not-ship, not a missing measurement. Under
 bounded parallel extraction every worker opens a read-only handle to a snapshot
 of the database; a WAL database is not wholly contained in its main file, and
-the run fails with `unable to open database file` on every translation unit.
-This is the same containment property the clean rebuild refuses a WAL serving
-database for. No alternative setting is recommended for production, and none
-was faster than the control.
+the run fails with `unable to open database file` on every translation unit —
+the same containment property the clean rebuild refuses a WAL serving database
+for. No alternative setting is recommended for production, and none beat the
+control by more than measurement noise.
 
 ## Residual costs, with owners and thresholds
 
@@ -293,30 +295,29 @@ measurement with stated headroom; from here on, crossing one reopens the term.
 
 | Term | Shape | Owner | Threshold | Measured | Status |
 | --- | --- | --- | ---: | ---: | --- |
-| Per-translation-unit rooted AST traversals | fixed multiplier per unit | T-139 (symbol root) / S-078 (aggregate) | fixed routed-root median < 0.025 s | **0.023113 s** | within |
-| Superlinear per-unit cost against corpus size | corpus-growth-sensitive | S-068 (HSE-103) | implied growth exponent <= 1.4 | **1.0007** | within |
-| Serial controlled-writer publication | fixed multiplier, not parallelised | S-073 / S-074 | publication share of cold wall <= 0.85 | **0.755** | within |
-| Per-invocation derived-transform readiness evaluation | corpus-growth-sensitive, paid every invocation | S-077 | unchanged-warm median <= 1.0 s | **0.692 s** | within |
+| Per-translation-unit rooted AST traversals | fixed multiplier per unit | T-139 (symbol root) / S-078 (aggregate) | fixed routed-root median < 0.025 s | **0.023845 s** | within |
+| Superlinear per-unit cost against corpus size | corpus-growth-sensitive | S-068 (HSE-103) | implied growth exponent <= 1.4 | **1.0036** | within |
+| Serial controlled-writer publication | fixed multiplier, not parallelised | S-073 / S-074 | publication share of cold wall <= 0.85 | **0.771** | within |
+| Per-invocation derived-transform readiness evaluation | corpus-growth-sensitive, paid every invocation | S-077 | unchanged-warm median <= 1.0 s | **0.719 s** | within |
 
 **Rooted traversals after S-098.** The two-root fusion shipped in PR #86. Two
 rooted whole-translation-unit walks remain per unit, and they are budgeted,
 observed and published rather than left implicit: on the pinned
 `header-heavy:8:forward` corpus, **16 registered and 16 observed** traversals in
-every trial, fixed routed-root median 0.023113 s against the strict 0.025 s
+every trial, fixed routed-root median 0.023845 s against the strict 0.025 s
 threshold, down from the pre-fusion 0.040611 s baseline. Their measured share of
-cold wall time on that corpus is **7.69%**; on the larger `header-heavy:32`
-corpus the same component is 0.050674 s, **2.76%** of cold wall. Re-deriving
-S-098's ship decision from this build's report returns `ship_eligible: true`
-with no refusal reason. No do-not-ship decision remains open.
+cold wall time on the header-heavy corpus is **8.37%**. Re-deriving S-098's ship
+decision from this build's report returns `ship_eligible: true` with no refusal
+reason. No do-not-ship decision remains open.
 
 **The publication term is now the dominant one.** At 1,000 units the controlled
-writer accounts for 7.936 s of a 10.511 s cold wall. That is what bounds any
-further parallel gain, and it is why the front-end share (44.88%) and the
-publication share (75.5%) sum past 100%: the front end runs on workers, the
-writer on the scheduler thread, and they overlap. The threshold is set at 0.85,
-about 12% headroom; the placeholder carried while the harness was being written
-was 0.75, and the measurement is what set the published value. That revision is
-recorded rather than quietly applied.
+writer accounts for 8.554 s of an 11.089 s cold wall. That is what bounds any
+further parallel gain, and it is why the front-end share (45.99%) and the
+publication share (77.1%) sum past 100%: the front end runs on workers, the
+writer on the scheduler thread, and they overlap. The threshold is set at 0.85;
+the placeholder carried while the harness was being written was 0.75, and the
+measurement is what set the published value. That revision is recorded rather
+than quietly applied.
 
 ## Regression guard
 
@@ -330,38 +331,76 @@ actually breaks:
 | Job | Trigger | Cost | Gates |
 | --- | --- | --- | --- |
 | `contract` | every change to the indexing paths | seconds | the SLO contract and the matrix decision rules, offline |
-| `equivalence` | every change to the indexing paths | minutes | cross-mode fact equivalence and the operating bounds, on a 6-unit and an 8-unit corpus |
+| `equivalence` | every change to the indexing paths | minutes | cross-mode fact equivalence and the operating bounds, `--profile quick` |
 | `production-scale` | weekly, or on demand | hours | the full matrix at 1,000 units in both topologies, uploading the reports the SLO is re-derived from |
+
+Both harnesses default to `--profile quick`, which keeps every corpus shape,
+every change state, every worker topology and the full three trials and shrinks
+only the corpus — the one dimension that costs hours instead of minutes. The
+scale is recorded in every report, so a decision cannot read as though it were
+measured at a size it was not.
 
 ## Defects this integration found and fixed
 
-Three, all invisible until every mechanism was in one binary, none of them a
-PERF-002 regression on its own:
+Four, all invisible until every mechanism was in one binary. Each has a
+regression test that fails without its fix; none is a PERF-002 regression on
+its own.
 
-1. **Diagnostic applicability depended on index history.** Publication was
+1. **A changed dependency rebuilt nothing.** `plan_affected_translation_units`
+   shipped with S-076 and had no caller outside the test suite. A stale header
+   was reported `deferred` while every unit including it was reported
+   `already`, so editing a header re-extracted nothing and the index silently
+   kept the old facts. Measured before the fix: `0 indexed, 0 failed, 7 already
+   indexed`, canonical digest unchanged. The pre-feature executable behaved
+   identically.
+2. **Diagnostic applicability depended on index history.** Publication was
    gated on a single-route publication as well as on the route matching the
-   diagnostic's own file, so a cold run that also minted the translation unit's
-   owned headers dropped the row while a later re-index of the same unchanged
-   source added it. One corpus produced two different databases depending on
-   how it was reached. Reproduces identically on the pre-feature executable.
-2. **The parallel scheduler published no writer telemetry.** It owns its own
+   diagnostic's own file, so a cold run that also minted the unit's owned
+   headers dropped the row while a later re-index of the same unchanged source
+   added it. One corpus produced two different databases depending on how it
+   was reached.
+3. **The parallel scheduler published no writer telemetry.** It owns its own
    controlled writer, so `record_writer_profile` was never called: the shipped
-   configuration reported no `fact_batch_writer.*` counters or timings at all,
-   and the production measurement gate could not run against it.
-3. **Every parallel translation unit reported corpus position 0.** The position
+   configuration reported no `fact_batch_writer.*` counters at all, and the
+   production measurement gate could not run against it.
+4. **Every parallel translation unit reported corpus position 0.** The position
    was read as "how many units have been recorded so far", which is the
    dispatch position only when units run one at a time. The per-unit
    cost-versus-position analysis this report is fitted against had no abscissa.
 
+## Disclosed, not fixed
+
+**Re-publishing a file inflates its `contains` edge counts.** The controlled
+writer accumulates `count` for that edge kind across publications, which is
+right when two different files each declare a containment and wrong when the
+*same* file is published twice: re-indexing a header adds its contribution
+again instead of replacing it. Two header edits move one measured count from 1
+to 3.
+
+Fixing it needs per-file attribution of the count, which the schema does not
+carry. Recomputing the count from `fact_applicability` looked promising and is
+not sound: it agrees for 3,740 of the 3,840 `contains` edges in the committed
+`index.db` and disagrees for the rest, so the intended semantics are genuinely
+S-073's to define rather than something a qualification story should decide.
+
+Owner: S-073. Two things about its blast radius are worth stating plainly. It
+became reachable through a supported route only because of fix 1 above — before
+that a header edit rebuilt nothing, so nothing was ever re-published — and it
+is strictly better than what it replaced, which was an index quietly serving
+facts the header no longer supported. It affects a derived usage count, not the
+graph structure, and it is the reason the SQLite interruption probe reports
+`recovered: false` for a database that is otherwise sound.
+
 ## Reproducing this report
 
-Run on a quiescent host. All four commands write outside the checkout; the
-committed `index.db` is never opened.
+Run on a quiescent host. All commands write outside the checkout; the committed
+`index.db` is never opened. `--profile full` is what the published figures came
+from; `--profile quick` is the default and is what an ordinary change runs.
 
 ```sh
 # The shipped automatic topology: an SLO describes the mode that ships.
 python3 benchmarks/indexing/production.py --cidx build/cidx --checkout . \
-  --skip-self-index --representative-files 32 --scale-files 1000 --trials 3 \
+  --skip-self-index --profile full --trials 3 \
   --work-root /tmp/s078-A.noindex --output /tmp/s078-A.json
 
 # The pinned S-098 header-heavy corpus, for the routed-root ship decision.
@@ -373,16 +412,14 @@ python3 benchmarks/indexing/production.py --cidx build/cidx --checkout . \
 # The serial topology, which additionally publishes the translation-unit cache
 # and dependency taxonomies.
 python3 benchmarks/indexing/production.py --cidx build/cidx --checkout . \
-  --skip-self-index --skip-sqlite-matrix --index-jobs 1 \
-  --representative-files 32 --scale-files 1000 --trials 3 \
-  --work-root /tmp/s078-B.noindex --output /tmp/s078-B.json
+  --skip-self-index --skip-sqlite-matrix --index-jobs 1 --profile full \
+  --trials 3 --work-root /tmp/s078-B.noindex --output /tmp/s078-B.json
 
 # The cross-mode matrix, the operating bounds, the cited qualification tests,
 # and the pre-feature A/B. Build the pre-feature executable from d9f4754.
 python3 benchmarks/indexing/integrated.py --cidx build/cidx \
   --pre-feature-cidx /path/to/d9f4754/build/cidx --build-dir build \
-  --equivalence-files 12 --equivalence-shape header-heavy --bounds-files 24 \
-  --pre-feature-files 1000 --pre-feature-shape baseline --trials 3 \
+  --profile quick --pre-feature-files 256 --trials 3 \
   --work-root /tmp/s078-D.noindex --output /tmp/s078-D.json
 
 # Judge all four against the contract. Exits non-zero if the decision is not ok.
