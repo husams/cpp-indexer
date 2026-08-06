@@ -2791,27 +2791,63 @@ class GraphQuery:
         )
         return self._slot_type_facts(declared, adjusted)
 
+    # Slot roles in the order the signature_slot view itself declares them
+    # (queryplan.py: symbol_type=1, parameter=2, template_param=3,
+    # template_arg=4). Used to reproduce that view's ORDER BY when the plan
+    # cannot -- see signature_slots.
+    _SLOT_ROLE_RANK = {
+        "return": 1,
+        "parameter": 2,
+        "template_parameter": 3,
+        "template_argument": 4,
+    }
+
     def signature_slots(self, sym) -> list[SignatureSlot]:
-        """Unified return/parameter view used by the E2E and public clients."""
+        """Unified return/parameter view used by the E2E and public clients.
+
+        This is the CALLABLE's signature: the return slot first, then the
+        parameters by (position, pack_index). Template parameters and template
+        arguments live in the same underlying ``signature_slot`` view but are
+        not part of a callable's signature -- C++ ``GraphQuery::signature``
+        carries only ``returns`` and ``parameters`` too -- so they are not
+        returned here. Query the view directly for those.
+
+        The plan's ``order_by`` cannot produce that order on its own. The
+        return slot carries position -1 in the view's key, but the projected
+        ``position`` cell is normalised to NULL for it (a return has no
+        ordinal), and the executor's cell ranking puts NULL *last* -- ints <
+        strings < null, which mirrors the C++ cell_rank and must not change.
+        So the rows arrive with the return slot trailing the parameters, and
+        the declared order is restored here, on the key semantics the view
+        defines rather than on the nullable public column.
+        """
         sid = self._resolve_id(sym)
-        rows: list[SignatureSlot] = []
+        ordered: list[tuple[tuple[int, int, int], SignatureSlot]] = []
         for r in self._adapter_signature_slot_rows(sid):
             (slot_kind, position, pack_index, name, type_id_value,
              declared_value, adjusted_value, default_text, default_origin,
              reference_semantics, mode, value_kind, named_decl) = r
+            if slot_kind not in ("return", "parameter"):
+                continue
             declared_id = declared_value or type_id_value
             adjusted_id = adjusted_value or type_id_value
             declared = self._type_info(declared_id) if declared_id is not None else None
             adjusted = self._type_info(adjusted_id) if adjusted_id is not None else None
             if slot_kind == "return":
                 declared = adjusted = self._type_info(type_id_value) if type_id_value is not None else None
-            rows.append(SignatureSlot(
+            # -1 is the view's own sentinel for "no ordinal", which is exactly
+            # what makes the return slot sort ahead of position 0.
+            sort_position = -1 if position is None else position
+            sort_pack = -1 if pack_index is None else pack_index
+            role = self._SLOT_ROLE_RANK.get(slot_kind, len(self._SLOT_ROLE_RANK) + 1)
+            ordered.append(((sort_position, sort_pack, role), SignatureSlot(
                 slot_kind, None if position is None or position < 0 else position,
                 None if pack_index is None or pack_index < 0 else pack_index,
                 name, declared, adjusted, mode or "value", value_kind or "other",
                 named_decl, reference_semantics, default_text, default_origin,
-            ))
-        return rows
+            )))
+        ordered.sort(key=lambda entry: entry[0])
+        return [slot for _, slot in ordered]
 
     def type_users(self, sym, limit: int = 500) -> list[TypeUser]:
         """Symbols whose signature/type facts reach the type named by `sym`,
