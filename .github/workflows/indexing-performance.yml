@@ -70,12 +70,14 @@ jobs:
           python3 -m unittest \
             benchmarks.indexing.slo_test \
             benchmarks.indexing.integrated_test \
+            benchmarks.indexing.publish_slo_test \
             benchmarks.indexing.production_test
       - name: Reject an unparseable harness
         run: |
           python3 -m py_compile \
             benchmarks/indexing/slo.py \
             benchmarks/indexing/integrated.py \
+            benchmarks/indexing/publish_slo.py \
             benchmarks/indexing/production.py
 
   # Minutes, one build, a deliberately small corpus. This is the affordable
@@ -132,9 +134,8 @@ jobs:
           python3 benchmarks/indexing/integrated.py
           --cidx build/cidx
           --build-dir build
-          --equivalence-files 6
+          --profile quick
           --equivalence-shape header-heavy
-          --bounds-files 8
           --skip-qualification-tests
           --work-root "$RUNNER_TEMP/s078-equivalence"
           --output "$RUNNER_TEMP/s078-equivalence.json"
@@ -204,7 +205,7 @@ jobs:
           --cidx build/cidx
           --checkout .
           --skip-self-index
-          --representative-files 32
+          --profile full
           --scale-files "$SCALE_FILES"
           --trials 3
           --work-root "$RUNNER_TEMP/s078-shipped"
@@ -219,7 +220,7 @@ jobs:
           --skip-self-index
           --skip-sqlite-matrix
           --index-jobs 1
-          --representative-files 32
+          --profile full
           --scale-files "$SCALE_FILES"
           --trials 3
           --work-root "$RUNNER_TEMP/s078-serial"
@@ -229,9 +230,8 @@ jobs:
           python3 benchmarks/indexing/integrated.py
           --cidx build/cidx
           --build-dir build
-          --equivalence-files 12
+          --profile full
           --equivalence-shape header-heavy
-          --bounds-files 24
           --skip-qualification-tests
           --work-root "$RUNNER_TEMP/s078-integrated"
           --output "$RUNNER_TEMP/s078-integrated.json"

@@ -158,6 +158,14 @@ def _main_shaped_report(*, trials: int = 3, disabled: bool = False) -> dict:
         trials=trials, disabled=disabled
     )
     report["attribution_experiments"] = production.ATTRIBUTION_EXPERIMENTS
+    # The frozen S-071 evidence was measured at the production scale, before
+    # the affordable profile existed.
+    report["scale"] = {
+        "profile": "full",
+        "representative_files": 8,
+        "scale_files": 9,
+        "trials": trials,
+    }
     # The frozen S-071 evidence predates bounded parallel extraction, so the
     # topology it was measured under is the serial one.
     report["index_topology"] = {

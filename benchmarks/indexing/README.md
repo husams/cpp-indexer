@@ -45,6 +45,34 @@ python3 benchmarks/indexing/fact_batch_scaling.py \
   --output /tmp/s072-fact-batch-scaling.json
 ```
 
+## Corpus scale: `--profile quick` and `--profile full`
+
+`production.py` and `integrated.py` both take `--profile`, and both default to
+**`quick`**. A quick run keeps every corpus shape, every change state, every
+worker topology and the full three trials -- it only shrinks the corpus, which
+is the one dimension that costs hours rather than minutes. That is what an
+ordinary change should run.
+
+`--profile full` is the production-scale matrix the published SLO is derived
+from. It is the scheduled job's setting, not a per-change one: a full run
+indexes a 1,000-translation-unit corpus repeatedly, and the pre-feature A/B
+indexes it again with an executable that predates every PERF-002 change and is
+an order of magnitude slower cold.
+
+| | quick | full |
+| --- | ---: | ---: |
+| `production.py --representative-files` | 8 | 32 |
+| `production.py --scale-files` | 64 | 1,000 |
+| `integrated.py --equivalence-files` | 6 | 12 |
+| `integrated.py --bounds-files` | 8 | 24 |
+| `integrated.py --pre-feature-files` | 64 | 1,000 |
+
+An explicit `--*-files` always overrides the profile. Whichever is used, the
+sizes land in the report's `scale` section and in every case key, so a decision
+can never read as though it were measured at a size it was not -- and the
+1,000-unit figure an acceptance criterion names is not something a quick run
+may stand in for. See [docs/indexing-slo.md](../../docs/indexing-slo.md).
+
 ## Production measurement gate (HSE-103)
 
 `production.py` is the supported end-to-end command for the PERF-002

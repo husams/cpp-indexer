@@ -165,6 +165,31 @@ CITED_QUALIFICATION = (
 )
 
 
+#: Affordable sizes that still exercise every axis and every bound. The
+#: expensive part of a full run is the pre-feature A/B, which indexes the same
+#: corpus with an executable that predates every PERF-002 change and is an
+#: order of magnitude slower cold. Its job is a *ratio*, and a ratio does not
+#: need the largest corpus available -- the absolute figures the acceptance
+#: criteria name come from `production.py`, which is measured separately.
+#:
+#: `--profile quick` is what an ordinary change should run. `--profile full`
+#: is for the scheduled production-scale job. Whichever is used, the corpus
+#: size lands in the report as part of the case key, so a decision can never
+#: read as though it were measured at a scale it was not.
+SCALE_PROFILES: dict[str, dict[str, int]] = {
+    "quick": {
+        "equivalence_files": 6,
+        "bounds_files": 8,
+        "pre_feature_files": 64,
+    },
+    "full": {
+        "equivalence_files": 12,
+        "bounds_files": 24,
+        "pre_feature_files": 1000,
+    },
+}
+
+
 class MatrixError(RuntimeError):
     """The matrix cannot produce trustworthy evidence."""
 
@@ -1054,10 +1079,20 @@ def main() -> int:
     parser.add_argument("--build-dir", type=Path, default=Path("build"))
     parser.add_argument("--work-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--equivalence-files", type=int, default=12)
+    parser.add_argument(
+        "--profile",
+        choices=tuple(SCALE_PROFILES),
+        default="quick",
+        help=(
+            "corpus sizes: 'quick' for an ordinary change, 'full' for the "
+            "scheduled production-scale run. An explicit --*-files overrides "
+            "the profile."
+        ),
+    )
+    parser.add_argument("--equivalence-files", type=int)
     parser.add_argument("--equivalence-shape", default="header-heavy")
-    parser.add_argument("--bounds-files", type=int, default=24)
-    parser.add_argument("--pre-feature-files", type=int, default=32)
+    parser.add_argument("--bounds-files", type=int)
+    parser.add_argument("--pre-feature-files", type=int)
     parser.add_argument("--pre-feature-shape", default="baseline")
     parser.add_argument("--trials", type=int, default=SLO.MINIMUM_TRIALS)
     parser.add_argument(
@@ -1072,6 +1107,14 @@ def main() -> int:
         help="record non-authoritative smoke data on a busy host",
     )
     args = parser.parse_args()
+    profile = SCALE_PROFILES[args.profile]
+    for name, key in (
+        ("equivalence_files", "equivalence_files"),
+        ("bounds_files", "bounds_files"),
+        ("pre_feature_files", "pre_feature_files"),
+    ):
+        if getattr(args, name) is None:
+            setattr(args, name, profile[key])
 
     checkout = REPOSITORY_ROOT
     executable = args.cidx.resolve()
@@ -1108,6 +1151,13 @@ def main() -> int:
         "identity": PRODUCTION.environment_identity(executable, checkout, []),
         "capabilities": {"candidate": capabilities},
         "cited_qualification": [dict(entry) for entry in CITED_QUALIFICATION],
+        "scale": {
+            "profile": args.profile,
+            "equivalence_files": args.equivalence_files,
+            "bounds_files": args.bounds_files,
+            "pre_feature_files": args.pre_feature_files,
+            "trials": args.trials,
+        },
         "failures": [],
     }
 

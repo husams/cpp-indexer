@@ -32,6 +32,20 @@ DEFAULT_MANY_HEADER_TARGET = 128
 #: Every other row in the matrix is judged against it, so a run in which it
 #: could not complete measured nothing at all.
 SQLITE_CONTROL_EXPERIMENT = "shipped-control"
+#: Affordable corpus sizes. The scale a run was measured at is recorded in
+#: the report's `scale` section and in every case key, so a decision can never
+#: read as though it were measured at a size it was not.
+#:
+#: `quick` is what an ordinary change should run: it keeps every corpus shape,
+#: every change state and every trial, and only shrinks the corpus. `full` is
+#: the production-scale matrix the published SLO is derived from -- the 1,000
+#: translation-unit figure is named by an acceptance criterion, so it is not a
+#: number a quick run may stand in for.
+SCALE_PROFILES: dict[str, dict[str, int]] = {
+    "quick": {"representative_files": 8, "scale_files": 64},
+    "full": {"representative_files": 32, "scale_files": 1000},
+}
+
 SQLITE_EXPERIMENTS: dict[str, dict[str, Any]] = {
     "shipped-control": {},
     "cache-64m": {"cache_size": -65_536},
@@ -2276,8 +2290,18 @@ def main() -> int:
     )
     parser.add_argument("--checkout", type=Path, default=Path.cwd())
     parser.add_argument("--self-compile-db", type=Path)
-    parser.add_argument("--representative-files", type=int, default=32)
-    parser.add_argument("--scale-files", type=int, default=1000)
+    parser.add_argument(
+        "--profile",
+        choices=tuple(SCALE_PROFILES),
+        default="quick",
+        help=(
+            "corpus sizes: 'quick' for an ordinary change, 'full' for the "
+            "production-scale matrix the published SLO is derived from. An "
+            "explicit --representative-files/--scale-files overrides it."
+        ),
+    )
+    parser.add_argument("--representative-files", type=int)
+    parser.add_argument("--scale-files", type=int)
     parser.add_argument(
         "--many-header-target", type=int, default=DEFAULT_MANY_HEADER_TARGET
     )
@@ -2313,6 +2337,11 @@ def main() -> int:
         help="record non-authoritative smoke data even when cidx competitors exist",
     )
     args = parser.parse_args()
+    profile = SCALE_PROFILES[args.profile]
+    if args.representative_files is None:
+        args.representative_files = profile["representative_files"]
+    if args.scale_files is None:
+        args.scale_files = profile["scale_files"]
 
     checkout = args.checkout.resolve()
     executable = args.cidx.resolve()
@@ -2384,6 +2413,12 @@ def main() -> int:
             checkout,
             [] if args.skip_self_index else [self_compile_db],
         ),
+        "scale": {
+            "profile": args.profile,
+            "representative_files": args.representative_files,
+            "scale_files": args.scale_files,
+            "trials": args.trials,
+        },
         "corpus_contract": {
             "baseline_distinct_owned_headers": BASELINE_DISTINCT_OWNED_HEADERS,
             "many_header_target": args.many_header_target,
