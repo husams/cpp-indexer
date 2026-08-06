@@ -213,28 +213,17 @@ TEST_CASE("capture of a missing database yields empty inputs") {
   CHECK(inputs.source_digest.empty());
 }
 
-// AC4, migration compatibility. Capture reads the serving database through a
-// handle that deliberately does not migrate, so the version it reports must be
-// the version ON DISK, and an out-of-date database must not be readable through
-// it at all. Both halves are asserted: the read-only handle refuses (so a
-// rebuild can never proceed from a misread catalog) and the version is reported
-// faithfully for a current database.
+// AC4, migration compatibility -- the version reported must be the version ON
+// DISK, and the captured catalog must travel with the inputs rather than being
+// re-read from the serving file afterwards.
 TEST_CASE("capture reports the schema version the serving database carries") {
   const Fixture fixture("capture-schema");
-  CHECK(capture_clean_rebuild_inputs(fixture.index_path.string())
-            .schema_version == cidx::kSchemaVersion);
-
-  {
-    cidx::SqliteDb raw(fixture.index_path.string());
-    raw.exec("UPDATE meta SET value = '11' WHERE key = 'schema_version'");
-  }
-  CHECK(cidx::storage::inspect_database_integrity(fixture.index_path.string())
-            .schema_version == 11);
-  const auto capture_version = [&] {
-    return capture_clean_rebuild_inputs(fixture.index_path.string())
-        .schema_version;
-  };
-  CHECK_THROWS(capture_version());
+  const CleanRebuildInputs inputs =
+      capture_clean_rebuild_inputs(fixture.index_path.string());
+  CHECK(inputs.schema_version == cidx::kSchemaVersion);
+  CHECK_FALSE(inputs.migrated_for_capture);
+  CHECK(inputs.catalog == cidx::storage::read_database_catalog_identity(
+                              fixture.index_path.string()));
 }
 
 TEST_CASE(
@@ -248,20 +237,53 @@ TEST_CASE("no database in service is an acceptable source") {
   CHECK(clean_rebuild_source_refusal((root / "absent.db").string()).empty());
 }
 
-// AC4, migration compatibility. An out-of-date database is refused up front,
-// with the remedy named, instead of being rebuilt from a catalog that today's
-// queries cannot read faithfully.
-TEST_CASE("an out-of-date serving database is refused with the remedy named") {
-  const Fixture fixture("source-schema");
+// AC4, migration compatibility -- the property the criterion actually asks for.
+// An older serving database is NOT refused: it is brought forward on a PRIVATE
+// COPY, the inputs are captured from that copy, and the file in service is left
+// byte-for-byte unchanged. Preservation, not refusal.
+TEST_CASE("an out-of-date serving database is migrated on a private copy") {
+  const Fixture fixture("capture-migrate");
+  const auto expected = cidx::storage::read_database_catalog_identity(
+      fixture.index_path.string());
   {
     cidx::SqliteDb raw(fixture.index_path.string());
-    raw.exec("UPDATE meta SET value = '11' WHERE key = 'schema_version'");
+    raw.exec("UPDATE meta SET value = '39' WHERE key = 'schema_version'");
+  }
+  const std::string before = digest_of(fixture.index_path);
+  REQUIRE(clean_rebuild_source_refusal(fixture.index_path.string()).empty());
+
+  const CleanRebuildInputs inputs =
+      capture_clean_rebuild_inputs(fixture.index_path.string());
+  CHECK(inputs.migrated_for_capture);
+  CHECK(inputs.schema_version == 39);
+  // The catalog survived the migration intact: this is the "preserves" half.
+  CHECK(inputs.catalog == expected);
+  CHECK(inputs.files.size() == 3);
+  CHECK(inputs.components.size() == 2);
+
+  // And the database in service was never written to.
+  CHECK(digest_of(fixture.index_path) == before);
+  CHECK(cidx::storage::inspect_database_integrity(fixture.index_path.string())
+            .schema_version == 39);
+  // The working copy is a working file, not a result.
+  CHECK_FALSE(std::filesystem::exists(
+      cidx::application::clean_rebuild_migration_copy_path(
+          fixture.index_path.string())));
+}
+
+// The other direction is refused: this binary cannot bring a future schema
+// backwards, and must say so rather than misread it.
+TEST_CASE("a newer-than-binary serving database is refused") {
+  const Fixture fixture("source-newer");
+  {
+    cidx::SqliteDb raw(fixture.index_path.string());
+    raw.exec("UPDATE meta SET value = '9999' WHERE key = 'schema_version'");
   }
   const std::string refusal =
       clean_rebuild_source_refusal(fixture.index_path.string());
   REQUIRE_FALSE(refusal.empty());
-  CHECK(refusal.contains("schema v11"));
-  CHECK(refusal.contains("cidx migrate"));
+  CHECK(refusal.contains("schema v9999"));
+  CHECK(refusal.contains("cannot downgrade"));
 }
 
 // AC4, backup/recovery. Publication replaces the main database file with one

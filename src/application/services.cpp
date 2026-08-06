@@ -596,7 +596,10 @@ protocol::ResultEnvelope run_clean_rebuild(const std::string &index_path,
   try {
     inputs = capture_clean_rebuild_inputs(index_path);
     if (had_serving_database) {
-      expected = storage::read_database_catalog_identity(index_path);
+      // From the capture, not re-read from the serving file: when the serving
+      // database was older, the catalog was read from the migrated copy and
+      // re-reading the original would compare against a pre-migration shape.
+      expected = inputs.catalog;
     }
   } catch (const std::exception &error) {
     return service_error("index", context, "backend_error",

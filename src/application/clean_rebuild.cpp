@@ -4,6 +4,7 @@
 #include <array>
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <ranges>
 #include <string>
 #include <system_error>
@@ -51,6 +52,29 @@ auto parent_directory(const std::string &path) -> std::string {
       std::filesystem::path(path).parent_path();
   return parent.empty() ? std::string(".") : parent.string();
 }
+
+// Owns the private copy a capture migrates. The copy is a working file, not a
+// result: it must not outlive the capture, including on the throwing path, or
+// the next run would find a stale sibling.
+class MigrationCopy {
+public:
+  explicit MigrationCopy(const std::string &path)
+      : file_(path), journal_(path + "-journal") {}
+  ~MigrationCopy() noexcept {
+    std::error_code discard;
+    std::filesystem::remove(file_, discard);
+    std::filesystem::remove(journal_, discard);
+  }
+  MigrationCopy(const MigrationCopy &) = delete;
+  auto operator=(const MigrationCopy &) -> MigrationCopy & = delete;
+  MigrationCopy(MigrationCopy &&) = delete;
+  auto operator=(MigrationCopy &&) -> MigrationCopy & = delete;
+
+private:
+  // Held as paths so removal constructs nothing on the destructor path.
+  std::filesystem::path file_;
+  std::filesystem::path journal_;
+};
 
 } // namespace
 
@@ -115,6 +139,15 @@ auto clean_rebuild_file_digest(const std::string &path)
   return sha256_of(path);
 }
 
+auto clean_rebuild_migration_copy_path(const std::string &index_path)
+    -> std::string {
+  const std::filesystem::path target(index_path);
+  const std::string name = ".cidx-rebuild-migrate-" +
+                           std::to_string(util::current_process_id()) + "-" +
+                           target.filename().string();
+  return (std::filesystem::path(parent_directory(index_path)) / name).string();
+}
+
 auto clean_rebuild_candidate_path(const std::string &index_path)
     -> std::string {
   const std::filesystem::path target(index_path);
@@ -165,12 +198,14 @@ auto clean_rebuild_source_refusal(const std::string &index_path)
     return "cannot read the index database at " + index_path + ": " +
            report.detail;
   }
-  if (report.schema_version != kSchemaVersion) {
+  // Older is fine — the capture migrates a private copy. Newer is not: this
+  // binary has no way to bring a future schema backwards.
+  if (report.schema_version > kSchemaVersion) {
     return "the index database at " + index_path + " is schema v" +
            std::to_string(report.schema_version) + " but this binary builds v" +
            std::to_string(kSchemaVersion) +
-           ". A clean rebuild captures its inputs through a read-only handle, "
-           "which does not migrate; run `cidx migrate` first";
+           ". A clean rebuild cannot downgrade a database; use a build that "
+           "matches it";
   }
   return {};
 }
@@ -197,9 +232,49 @@ auto capture_clean_rebuild_inputs(const std::string &index_path)
   inputs.schema_version =
       storage::inspect_database_integrity(index_path).schema_version;
 
+  // Migration compatibility. An older database is brought forward on a PRIVATE
+  // COPY: the file in service is copied, the copy is migrated by an ordinary
+  // read-write open, and the inputs are read from the copy. The file in service
+  // is never opened for writing, so the byte-for-byte guarantee is untouched
+  // and the rebuild still publishes a database at the current schema.
+  //
+  // Declared before `serving` so the read-only handle is closed before the copy
+  // is removed.
+  std::optional<MigrationCopy> migration;
+  std::string read_path = index_path;
+  if (inputs.schema_version > 0 && inputs.schema_version < kSchemaVersion) {
+    const std::string copy_path = clean_rebuild_migration_copy_path(index_path);
+    std::filesystem::remove(copy_path, ec);
+    std::filesystem::copy_file(
+        index_path, copy_path,
+        std::filesystem::copy_options::overwrite_existing, ec);
+    if (ec) {
+      throw CidxError("cannot copy " + index_path +
+                      " for migration: " + ec.message());
+    }
+    migration.emplace(copy_path);
+    {
+      // An ordinary read-write open migrates. Scoped so the writer is closed
+      // before anything reads the result.
+      Storage upgrading(copy_path);
+    }
+    const int migrated =
+        storage::inspect_database_integrity(copy_path).schema_version;
+    if (migrated != kSchemaVersion) {
+      throw CidxError("migrating a copy of " + index_path +
+                      " reached schema v" + std::to_string(migrated) +
+                      ", expected v" + std::to_string(kSchemaVersion));
+    }
+    inputs.migrated_for_capture = true;
+    read_path = copy_path;
+  }
+
   // A read-only Storage performs no mutation on connect: no directory
   // creation, no migrate(), no schema script, no backfill.
-  Storage serving(index_path, Storage::OpenMode::read_only);
+  Storage serving(read_path, Storage::OpenMode::read_only);
+  // Read from the same database the inputs come from, so a migrated capture is
+  // held to the catalog it actually captured.
+  inputs.catalog = storage::read_database_catalog_identity(read_path);
 
   std::map<std::int64_t, std::string> universe_key;
   for (const SemanticUniverse &universe : serving.list_semantic_universes()) {

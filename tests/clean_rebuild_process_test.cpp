@@ -23,6 +23,7 @@
 
 #include "application/clean_rebuild.hpp"
 #include "storage/database_verification.hpp"
+#include "storage/sqlite.hpp"
 #include "storage/storage.hpp"
 
 extern char **environ;
@@ -196,6 +197,95 @@ TEST_SUITE("clang") {
               corpus.index_path.string()) == 0);
     CHECK(cidx::storage::read_database_semantic_digest(
               corpus.index_path.string()) == before_semantic);
+    CHECK(corpus.leftover_candidates().empty());
+  }
+
+  // AC4, backup/recovery of the PUBLISHED output. A published database is only
+  // useful if it can be backed up and the backup restored, so this takes a real
+  // backup through SQLite's online backup API, restores it to a third path, and
+  // holds the restored copy to every property the published file has to carry.
+  TEST_CASE("a published database survives a backup and restore round trip") {
+    Corpus corpus("backup-restore");
+    REQUIRE(corpus.ready);
+
+    REQUIRE(run_cidx({"index", "rebuild", "--clean"}, corpus.cache.string())
+                .exit_code == 0);
+    const std::string published_semantic =
+        cidx::storage::read_database_semantic_digest(
+            corpus.index_path.string());
+    const cidx::storage::DatabaseCatalogIdentity published_catalog =
+        cidx::storage::read_database_catalog_identity(
+            corpus.index_path.string());
+
+    const std::filesystem::path backup = corpus.cache / "backup.db";
+    {
+      // Read-only: taking a backup must not modify what it backs up.
+      cidx::Storage published(corpus.index_path.string(),
+                              cidx::Storage::OpenMode::read_only);
+      published.backup_to(backup.string());
+    }
+    const std::string after_backup = digest_of(corpus.index_path);
+
+    // Restore is a plain file copy of the backup to a new location, which is
+    // what an operator's restore actually is.
+    const std::filesystem::path restored = corpus.cache / "restored.db";
+    std::filesystem::copy_file(backup, restored);
+
+    const cidx::storage::DatabaseIntegrityReport report =
+        cidx::storage::inspect_database_integrity(restored.string());
+    CHECK(report.opened);
+    CHECK(report.integrity_ok);
+    CHECK(report.foreign_keys_ok);
+    CHECK(report.schema_version == cidx::kSchemaVersion);
+    CHECK(cidx::storage::read_database_pending_file_count(restored.string()) ==
+          0);
+    // The restored database holds the same facts and the same catalog.
+    CHECK(cidx::storage::read_database_semantic_digest(restored.string()) ==
+          published_semantic);
+    CHECK(cidx::storage::read_database_catalog_identity(restored.string()) ==
+          published_catalog);
+    // Backing up did not disturb the published file, and the backup is itself
+    // a self-contained rollback-journal database.
+    CHECK(digest_of(corpus.index_path) == after_backup);
+    CHECK_FALSE(
+        cidx::storage::database_uses_write_ahead_log(restored.string()));
+
+    // A restored database is a legitimate source for the next clean rebuild.
+    CHECK(cidx::application::clean_rebuild_source_refusal(restored.string())
+              .empty());
+  }
+
+  // AC4, migration compatibility, end to end through the real binary: an older
+  // serving database is rebuilt and published at the current schema, and is
+  // untouched until the rename.
+  TEST_CASE("a clean rebuild brings an out-of-date serving database forward") {
+    Corpus corpus("migrate");
+    REQUIRE(corpus.ready);
+    {
+      cidx::SqliteDb raw(corpus.index_path.string());
+      raw.exec("UPDATE meta SET value = '39' WHERE key = 'schema_version'");
+    }
+    REQUIRE(
+        cidx::storage::inspect_database_integrity(corpus.index_path.string())
+            .schema_version == 39);
+    const std::string before = digest_of(corpus.index_path);
+
+    const RunOutcome outcome =
+        run_cidx({"index", "rebuild", "--clean"}, corpus.cache.string());
+    CHECK(outcome.exit_code == 0);
+
+    // Published at the current schema, from a database that was two versions
+    // behind, and healthy.
+    CHECK(digest_of(corpus.index_path) != before);
+    const cidx::storage::DatabaseIntegrityReport report =
+        cidx::storage::inspect_database_integrity(corpus.index_path.string());
+    CHECK(report.opened);
+    CHECK(report.integrity_ok);
+    CHECK(report.foreign_keys_ok);
+    CHECK(report.schema_version == cidx::kSchemaVersion);
+    CHECK(cidx::storage::read_database_pending_file_count(
+              corpus.index_path.string()) == 0);
+    // Neither the candidate nor the migration copy outlives the run.
     CHECK(corpus.leftover_candidates().empty());
   }
 

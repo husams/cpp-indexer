@@ -98,11 +98,13 @@ scopes rather than publishing an incomplete database:
 Two properties of the database in service are checked read-only, before anything
 is built, and a failure is an early refusal naming the remedy:
 
-- **schema identity** — the serving database must already be at the current
-  schema version. Input capture reads it through the ordinary read-only storage
-  handle, which by design does not migrate, and that handle refuses an
-  out-of-date database outright rather than misreading its catalog. Run
-  `cidx migrate` first.
+- **schema identity** — an **older** serving database is accepted and brought
+  forward. The file in service is copied to a private sibling, the *copy* is
+  migrated by an ordinary read-write open, and the inputs and catalog identity
+  are read from it; the copy is removed when the capture returns. The database
+  in service is never opened for writing and stays byte-for-byte unchanged, and
+  the rebuild publishes at the current schema. A **newer** database is refused —
+  this binary cannot bring a future schema backwards.
 - **whole-file containment** — the database must be wholly contained in its main
   file, because publication replaces that file and nothing else. A **WAL**
   database is refused: its committed content also lives in the `-wal` sidecar,
@@ -114,6 +116,17 @@ is built, and a failure is an early refusal naming the remedy:
 
 The containment check is re-established at the rename itself, not only at
 capture, so a sidecar that appears while the rebuild runs also refuses.
+
+## Backup and recovery
+
+The published database is a self-contained rollback-journal file, so an ordinary
+backup and restore round trip preserves it: back it up with SQLite's online
+backup API (`Storage::backup_to`) or copy the file while no writer holds it, and
+the restored copy carries the same `integrity_check`, `foreign_key_check`,
+schema version, zero pending files, catalog identity and canonical semantic
+digest as the file it came from. A restored database is itself a legitimate
+source for the next clean rebuild. This is covered by
+`clean_rebuild_process_test`, not asserted only in prose.
 
 ## Failure injection
 

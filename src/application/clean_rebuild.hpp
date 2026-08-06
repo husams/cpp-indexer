@@ -135,10 +135,20 @@ struct CleanRebuildInputs {
   std::vector<CleanRebuildComponentInput> components;
   std::vector<CleanRebuildFileInput> files;
   std::vector<std::pair<std::string, std::string>> labels;
+  // The schema version the SERVING database carried, which may be older than
+  // this binary's; the capture migrates a private copy to read it.
   int schema_version = 0;
+  // True when the serving database was older than kSchemaVersion and the
+  // catalog was therefore read from a migrated copy rather than from the file
+  // in service. The file in service is never migrated.
+  bool migrated_for_capture = false;
   // sha256 of the serving database file at capture time; empty when no
   // database was in service yet.
   std::string source_digest;
+  // Catalog identity of the captured inputs, read from the same database the
+  // inputs came from (the migrated copy when one was used). This is what the
+  // candidate is held to, so it must not be re-read from the serving file.
+  storage::DatabaseCatalogIdentity catalog;
 };
 
 struct CleanRebuildVerification {
@@ -178,30 +188,40 @@ verify_clean_rebuild_candidate(const std::string &candidate_path,
 // Whether a serving database may be the source of a clean rebuild at all.
 // Returns an empty string when it may, or the refusal reason.
 //
-// Two properties are checked, both read-only, both BEFORE anything is built:
+// Checked read-only, BEFORE anything is built:
 //
-//   * schema identity — capture reads the serving database through the ordinary
-//     read-only handle, which by design does not migrate. Reading an older (or
-//     newer) schema through today's queries would silently mis-capture the
-//     catalog, so an out-of-date database is refused with an actionable message
-//     rather than rebuilt from a misread input set;
 //   * whole-file containment — publication replaces the main database file with
 //     one rename. That is only equivalent to replacing the database when the
 //     database IS the main file. A WAL-mode database keeps committed content in
 //     its `-wal` sidecar, and a leftover sidecar of any kind would survive the
 //     rename and be interpreted against the newly published file. Refused.
+//   * a readable database, and one this binary can bring forward. An OLDER
+//     schema is accepted — see capture_clean_rebuild_inputs, which migrates a
+//     private copy. A NEWER schema is refused: this binary cannot downgrade it.
 //
-// A path with no database in service is accepted: there is nothing to misread
-// and nothing to strand.
+// A path with no database in service is accepted: there is nothing to strand.
 [[nodiscard]] auto clean_rebuild_source_refusal(const std::string &index_path)
     -> std::string;
 
+// The private copy a capture migrates when the serving database is older than
+// this binary. Deterministic given the pid, and a sibling of the target.
+[[nodiscard]] auto
+clean_rebuild_migration_copy_path(const std::string &index_path) -> std::string;
+
 // Capture the rebuild inputs from a serving database WITHOUT writing to it.
-// Throws CidxError when the database cannot be opened read-only.
 //
-// `schema_version` reports the version the SERVING database actually carries,
-// not the version this binary was built for; the two are compared by
-// clean_rebuild_source_refusal.
+// Migration compatibility: when the serving database is older than
+// kSchemaVersion, the file in service is COPIED to a private sibling, the COPY
+// is migrated, and the inputs and catalog identity are read from it. The file
+// in service is never opened for writing, never migrated, and remains
+// byte-for-byte unchanged — the whole clean-rebuild guarantee still holds, and
+// the rebuild that follows publishes a database at the current schema. The copy
+// is removed before this returns.
+//
+// `schema_version` reports the version the SERVING database carried;
+// `migrated_for_capture` says whether the copy path was taken.
+//
+// Throws CidxError when the database cannot be read or migrated.
 [[nodiscard]] auto capture_clean_rebuild_inputs(const std::string &index_path)
     -> CleanRebuildInputs;
 
