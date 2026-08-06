@@ -17,6 +17,7 @@
   "module_layer_mapping": {
     "model.contracts": "model",
     "foundation.util": "foundation",
+    "foundation.scheduling": "foundation",
     "workspace.toolchain": "workspace",
     "frontend.compiledb": "frontend",
     "extraction.ast": "extraction",
@@ -27,6 +28,7 @@
     "query.plan": "query",
     "refactor.include-hygiene": "derivation",
     "analysis.diff": "derivation",
+    "product.index-scheduler": "product",
     "product.application": "product",
     "product.cli": "product",
     "compat.core-bundle": "product",
