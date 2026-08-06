@@ -1198,6 +1198,37 @@ class TelemetryScopeTest(unittest.TestCase):
             self.assertIn("fact_batch_writer.statements_prepared",
                           str(raised.exception))
 
+    def test_a_stage_that_extracted_nothing_is_not_required_to_report_either(
+        self,
+    ) -> None:
+        # `resolve`, and an index pass that found everything current, never
+        # reach the per-translation-unit wrapper that owns these counters --
+        # the same reason the writer families are already waived there.
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "p.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "summary": {
+                            "timings": {
+                                name: 0.001
+                                for name in production.REQUIRED_PROFILE_TIMINGS
+                            },
+                            "counters": self._without_serial_only(),
+                        },
+                        "translation_units": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            loaded = production._load_profile(
+                path, require_serial_only_metrics=True
+            )
+            self.assertEqual(
+                loaded["unavailable_counters"]["reason"],
+                "this stage extracted no translation unit",
+            )
+
     def test_only_the_two_named_prefixes_are_topology_dependent(self) -> None:
         self.assertEqual(
             production.SERIAL_ONLY_COUNTER_PREFIXES,

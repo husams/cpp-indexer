@@ -1,0 +1,17 @@
+{
+  "unchanged-warm": {
+    "benefit": "Cold indexing of the 1,000-translation-unit production corpus improved 10.26x against the pre-feature executable (three-trial medians 105.129 s -> 10.245 s), and the warm median stays at 14% of the 5 s absolute warm contract.",
+    "cause": "The S-077 derived-publication pipeline evaluates transform readiness on every `cidx index`, with work proportional to the corpus rather than to what changed: measured 0.376 s of the 0.715 s warm run at 1,000 units, with no individual transform executing (4.2M SQLite virtual-machine steps, 237k full-scan steps, 16.6k prepared statements for a run that extracted nothing).",
+    "owner": "S-077 (derived publication and incremental transforms). Carried in the published residual list with a 1.0 s unchanged-warm regression threshold, guarded by the scheduled production-scale job."
+  },
+  "one-source-incremental": {
+    "benefit": "Same 10.26x cold improvement; the one-source median stays at 36% of the 2 s absolute one-translation-unit contract.",
+    "cause": "The same per-invocation transform readiness evaluation: 0.315 s of the 0.713 s one-source run is `transforms`, of which only 0.071 s is individually timed transform execution; `entity-graph-rollup` additionally scans 20,018 rows under its generation-gated full-rebuild contract even for a single changed source.",
+    "owner": "S-077 (derived publication and incremental transforms). Same residual term and threshold as unchanged-warm."
+  },
+  "high-fan-in-header": {
+    "benefit": "Same 10.26x cold improvement; the stage median stays at 15% of the 2 s absolute incremental contract.",
+    "cause": "Per-invocation fixed cost that scales with the registered file count rather than with the change: this stage extracts no translation unit on either executable, spends 0 s in transforms, and still issues 13,131 prepared statements at 1,000 registered files, from the run-wide session/workspace snapshot and the include and dependency readiness evaluation.",
+    "owner": "S-069 (run-wide indexing session) and S-077 (readiness evaluation), reported together with the transform residual term."
+  }
+}

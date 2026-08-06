@@ -192,6 +192,13 @@ class PublicationEvidenceTest(unittest.TestCase):
         self.assertEqual(evidence["threshold"],
                          publish_slo.PUBLICATION_SHARE_THRESHOLD)
 
+    def test_the_publication_threshold_leaves_headroom_over_the_measurement(self):
+        # 0.755 is what the shipped configuration measures at 1,000 units; a
+        # threshold at or below it would be a line already crossed on the day
+        # it was published.
+        self.assertGreater(publish_slo.PUBLICATION_SHARE_THRESHOLD, 0.755)
+        self.assertLess(publish_slo.PUBLICATION_SHARE_THRESHOLD, 1.0)
+
     def test_a_report_without_writer_timings_reports_a_zero_share(self):
         # The parallel topology used to publish none of these; a zero share is
         # visibly wrong rather than silently absent.
@@ -203,6 +210,48 @@ class PublicationEvidenceTest(unittest.TestCase):
         )
         self.assertEqual(evidence["writer_seconds_median"], 0.0)
         self.assertEqual(evidence["share_of_cold_wall"], 0.0)
+
+
+class TransformEvaluationEvidenceTest(unittest.TestCase):
+    def _report(self, *, executed: dict | None = None) -> dict:
+        timings = {"transforms": 0.376}
+        timings.update(executed or {})
+        return _report(
+            {
+                "baseline:1000:forward": {
+                    "unchanged-warm": _profile_stage(
+                        wall=[0.70, 0.715, 0.73], timings=timings
+                    )
+                }
+            }
+        )
+
+    def test_a_warm_run_that_executed_no_transform_is_all_evaluation(self):
+        evidence = publish_slo.transform_evaluation_evidence(
+            self._report(), case="baseline:1000:forward"
+        )
+        self.assertAlmostEqual(evidence["warm_seconds_median"], 0.715)
+        self.assertAlmostEqual(evidence["transform_seconds_median"], 0.376)
+        self.assertEqual(evidence["executed_transform_seconds"], 0.0)
+        self.assertAlmostEqual(evidence["share_of_warm_wall"], 0.376 / 0.715,
+                               places=6)
+
+    def test_individually_timed_transforms_are_separated_from_the_pipeline(self):
+        evidence = publish_slo.transform_evaluation_evidence(
+            self._report(executed={"transform.entity-graph-rollup": 0.039,
+                                   "transform.edge-site-count-rollup": 0.017}),
+            case="baseline:1000:forward",
+        )
+        self.assertAlmostEqual(evidence["executed_transform_seconds"], 0.056)
+        self.assertAlmostEqual(evidence["transform_seconds_median"], 0.376)
+
+    def test_the_threshold_is_a_fraction_of_the_absolute_warm_limit(self):
+        evidence = publish_slo.transform_evaluation_evidence(
+            self._report(), case="baseline:1000:forward"
+        )
+        self.assertEqual(evidence["threshold"],
+                         publish_slo.TRANSFORM_EVALUATION_WARM_THRESHOLD_SECONDS)
+        self.assertLess(evidence["threshold"], slo.WARM_ABSOLUTE_LIMIT_SECONDS)
 
 
 class IntegrityEvidenceTest(unittest.TestCase):

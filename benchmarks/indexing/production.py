@@ -28,6 +28,10 @@ except ModuleNotFoundError:  # direct script execution from benchmarks/indexing
 MINIMUM_TRIALS = 3
 BASELINE_DISTINCT_OWNED_HEADERS = 2
 DEFAULT_MANY_HEADER_TARGET = 128
+#: The experiment that is not an experiment: the profile the product ships.
+#: Every other row in the matrix is judged against it, so a run in which it
+#: could not complete measured nothing at all.
+SQLITE_CONTROL_EXPERIMENT = "shipped-control"
 SQLITE_EXPERIMENTS: dict[str, dict[str, Any]] = {
     "shipped-control": {},
     "cache-64m": {"cache_size": -65_536},
@@ -603,7 +607,13 @@ def _load_profile(
     counters = summary.get("counters", {})
     missing_timings = sorted(REQUIRED_PROFILE_TIMINGS.difference(timings))
     missing_counters = sorted(REQUIRED_PROFILE_COUNTERS.difference(counters))
-    if not require_serial_only_metrics:
+    translation_units = profile.get("translation_units", [])
+    # The cache and dependency taxonomies come from the serial per-translation
+    # unit wrapper, so they are required only of a serial stage that actually
+    # extracted something. A `resolve` pass, or an index pass that found
+    # everything current, never reaches that wrapper -- exactly as it never
+    # reaches the controlled writer below.
+    if not require_serial_only_metrics or not translation_units:
         withheld = [
             name
             for name in missing_counters
@@ -616,9 +626,12 @@ def _load_profile(
         ]
         profile["unavailable_counters"] = {
             "names": withheld,
-            "reason": SERIAL_ONLY_COUNTER_REASON,
+            "reason": (
+                SERIAL_ONLY_COUNTER_REASON
+                if not require_serial_only_metrics
+                else "this stage extracted no translation unit"
+            ),
         }
-    translation_units = profile.get("translation_units", [])
     if not require_writer_metrics or not translation_units:
         missing_timings = [
             name
@@ -693,10 +706,11 @@ def run_stage(
             require_writer_metrics=(
                 require_writer_metrics and args[0] == "index"
             ),
-            # Only a pinned single-worker run is required to publish the
-            # cache/dependency taxonomy; the automatic policy and any explicit
-            # multi-worker setting bypass the wrapper that owns it.
-            require_serial_only_metrics=(index_jobs == 1),
+            # Only a pinned single-worker index stage is required to
+            # publish the cache/dependency taxonomy; the automatic policy and
+            # any explicit multi-worker setting bypass the wrapper that owns
+            # it, and `resolve` never enters it at all.
+            require_serial_only_metrics=(index_jobs == 1 and args[0] == "index"),
         )
         if profile and args[0] in {"index", "resolve"}
         else None
@@ -2536,20 +2550,49 @@ def main() -> int:
     if not args.skip_sqlite_matrix:
         for name, configuration in SQLITE_EXPERIMENTS.items():
             trials = []
+            refusal: str | None = None
             for trial in range(1, args.trials + 1):
                 case_root = args.work_root / "sqlite-matrix" / name / f"trial-{trial}"
                 case_root.mkdir(parents=True)
-                result = run_synthetic_case(
-                    executable,
-                    args.representative_files,
-                    "baseline",
-                    args.many_header_target,
-                    "forward",
-                    case_root,
-                    sqlite_experiment=configuration,
-                    index_jobs=args.index_jobs,
-                )
+                try:
+                    result = run_synthetic_case(
+                        executable,
+                        args.representative_files,
+                        "baseline",
+                        args.many_header_target,
+                        "forward",
+                        case_root,
+                        sqlite_experiment=configuration,
+                        index_jobs=args.index_jobs,
+                    )
+                except RuntimeError as error:
+                    # An alternative runtime setting that the shipped indexer
+                    # cannot run under is a *result*, not a crash: it is an
+                    # evidence-backed refusal of that setting. Aborting the
+                    # whole matrix here would also throw away every experiment
+                    # that did run. The shipped control is different -- if that
+                    # cannot run, the run measured nothing.
+                    refusal = str(error)[-4000:]
+                    break
                 trials.append(result)
+            if refusal is not None:
+                report["sqlite_matrix"][name] = {
+                    "configuration": configuration,
+                    "status": "refused",
+                    "trials_completed": len(trials),
+                    "error": refusal,
+                    "production_change_recommended": False,
+                    "recommendation_gate": (
+                        "The shipped indexer could not complete a run under "
+                        "this setting, so it is refused rather than measured."
+                    ),
+                }
+                if name == SQLITE_CONTROL_EXPERIMENT:
+                    report["parity_failures"].append(
+                        f"sqlite:{name}: the shipped control profile could not "
+                        "complete a run"
+                    )
+                continue
             aggregate = aggregate_trials(trials)
             control_database = (
                 args.work_root

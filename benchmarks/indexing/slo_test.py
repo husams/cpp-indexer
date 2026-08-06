@@ -352,6 +352,12 @@ class ResidualTest(unittest.TestCase):
                             "writer_seconds_median": 10.0,
                             "cold_wall_seconds_median": 20.0,
                             "corpus": "baseline:1000:forward"},
+            "transform_evaluation": {"threshold": 1.0,
+                                     "warm_seconds_median": 0.715,
+                                     "transform_seconds_median": 0.376,
+                                     "executed_transform_seconds": 0.0,
+                                     "share_of_warm_wall": 0.525,
+                                     "corpus": "baseline:1000:forward"},
         }
         base.update(overrides)
         return base
@@ -359,7 +365,7 @@ class ResidualTest(unittest.TestCase):
     def test_every_term_is_named_with_an_owner_and_a_threshold(self):
         result = slo.residual_terms(**self._inputs())
         self.assertTrue(result["ok"])
-        self.assertEqual(len(result["terms"]), 3)
+        self.assertEqual(len(result["terms"]), 4)
         for term in result["terms"]:
             self.assertTrue(term["owner"])
             self.assertTrue(term["threshold_name"])
@@ -391,6 +397,32 @@ class ResidualTest(unittest.TestCase):
         inputs["publication"]["share_of_cold_wall"] = True
         result = slo.residual_terms(**inputs)
         self.assertEqual(result["terms"][2]["status"], "unmeasured")
+
+    def test_the_transform_evaluation_term_is_named_with_its_owner(self):
+        result = slo.residual_terms(**self._inputs())
+        term = result["terms"][3]
+        self.assertIn("derived-transform readiness", term["term"])
+        self.assertIn("S-077", term["owner"])
+        self.assertEqual(term["status"], "within-threshold")
+        self.assertEqual(
+            term["context"]["absolute_limit_seconds"],
+            slo.WARM_ABSOLUTE_LIMIT_SECONDS,
+        )
+
+    def test_a_warm_median_past_its_threshold_reopens_the_transform_term(self):
+        inputs = self._inputs()
+        inputs["transform_evaluation"]["warm_seconds_median"] = 1.5
+        result = slo.residual_terms(**inputs)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["terms"][3]["status"], "over-threshold")
+
+    def test_the_transform_threshold_leaves_headroom_under_the_warm_limit(self):
+        # A term bounded at the absolute limit itself would be no bound at all.
+        inputs = self._inputs()
+        self.assertLess(
+            inputs["transform_evaluation"]["threshold"],
+            slo.WARM_ABSOLUTE_LIMIT_SECONDS / 2,
+        )
 
 
 class SloDecisionTest(unittest.TestCase):

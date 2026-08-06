@@ -33,6 +33,7 @@ per component plus a few cross-cutting pages. Start with the
 | [Query DSL guide](query-dsl.md) | using the CXQ QueryPlan pipeline DSL from C++ and Python, with runnable samples |
 | [QueryPlan contract](query-plan.md) | the normative CXQ spec: IR grammar, canonical JSON, validation codes, execution semantics |
 | [Parallel translation-unit extraction](indexing-parallelism.md) | `cidx index --jobs` and the extraction budgets: worker selection, ordering guarantees, shared-header amortisation, failure handling, telemetry |
+| [Production indexing SLO](indexing-slo.md) | the published cold/warm/incremental service level, the measured front-end share and Amdahl ceiling, cross-mode equivalence, the residual-cost list with owners and thresholds, and the regression guard |
 | [Module architecture and dependency rules](adr/ADR-011-module-architecture-and-dependency-rules.md) | enforceable layer ownership, dependency direction, exceptions, and review policy |
 | [Storage M3 accelerator qualification](benchmarks/storage-m3.md) | optional graph projections, lifecycle evidence, and the custom-store gate |
 | [Architecture contribution guide](architecture-contributing.md) | how to add a module, target, or dependency without bypassing the contract |

@@ -23,6 +23,33 @@ uses, under a content-equality source check.
 `CIDX_TU_FACT_CACHE=0` disables the layer for a run; `CIDX_TU_FACT_CACHE_ROOT`
 overrides the artifact root.
 
+## When a hit is actually reachable
+
+Two things bound where this layer runs today, and both are visible in the
+profile rather than inferred:
+
+* **A multi-worker run does not use it at all.** `TuFactCacheIndexer` is the
+  serial wrapper, and the bounded parallel scheduler calls extraction directly,
+  so a run that planned more than one worker publishes no `tu_fact_cache.*`
+  counters. Since omitting `--jobs` selects the automatic policy, an ordinary
+  cold index of a multi-unit corpus takes the uncached path. `--jobs 1` puts
+  the cache back in the loop. See
+  [indexing-parallelism.md](indexing-parallelism.md).
+* **An unchanged file is not re-extracted at all**, so it never asks the cache.
+  Currentness is content-hash based: touching a file without changing its bytes
+  is a no-op, and the cache is consulted only for a unit that is actually being
+  re-extracted — after an edit, an invalidating dependency change, or a resumed
+  run whose units were left pending.
+
+There is also a settling effect worth knowing about before reading a profile.
+The slot key includes the workspace identity, and that identity covers the
+index's own freshness and source fingerprint. Completing a cold index therefore
+changes it, so entries written by the cold run are keyed under an identity no
+later run observes and the first re-extraction after a cold index reports
+`missing` rather than `hit`. From the second re-extraction on the identity is
+stable and entries are found. `benchmarks/indexing/integrated.py` runs its
+replay arms twice for exactly this reason.
+
 ## What invalidates an entry
 
 Editing the main source, any owned header, or any unowned/generated

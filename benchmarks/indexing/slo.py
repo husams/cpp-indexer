@@ -440,6 +440,7 @@ def residual_terms(
     root_traversals: Mapping[str, Any],
     scaling: Mapping[str, Any],
     publication: Mapping[str, Any],
+    transform_evaluation: Mapping[str, Any],
 ) -> dict[str, Any]:
     """The named residual-cost list, each term with an owner and a threshold.
 
@@ -509,6 +510,34 @@ def residual_terms(
                 "One controlled writer publishes every translation unit's "
                 "facts; parallel extraction shrinks only the parse side, so "
                 "this term bounds the achievable parallel speedup."
+            ),
+        },
+        {
+            "term": "per-invocation derived-transform readiness evaluation",
+            "shape": "corpus-growth-sensitive, paid on every invocation",
+            "owner": "S-077 (derived publication and incremental transforms)",
+            "threshold_name": "unchanged-warm median seconds",
+            "threshold": transform_evaluation.get("threshold"),
+            "measured": transform_evaluation.get("warm_seconds_median"),
+            "context": {
+                "transform_seconds_median": transform_evaluation.get(
+                    "transform_seconds_median"
+                ),
+                "share_of_warm_wall": transform_evaluation.get("share_of_warm_wall"),
+                "executed_transform_seconds": transform_evaluation.get(
+                    "executed_transform_seconds"
+                ),
+                "absolute_limit_seconds": WARM_ABSOLUTE_LIMIT_SECONDS,
+                "corpus": transform_evaluation.get("corpus"),
+            },
+            "note": (
+                "The derived-publication pipeline evaluates readiness on every "
+                "`cidx index`, including a run with nothing to do, and that "
+                "evaluation scales with the corpus rather than with what "
+                "changed. It is the measured cause of the warm and one-source "
+                "regression against the pre-feature baseline, and its "
+                "threshold is a fraction of the absolute warm limit so the "
+                "term stays bounded well inside the published SLO."
             ),
         },
     )
