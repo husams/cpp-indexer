@@ -438,7 +438,7 @@ TEST_CASE("v34 database is upgraded with the artifact manifest") {
     auto schema = migrated.raw_db().prepare(
         "SELECT value FROM meta WHERE key = 'schema_version'");
     REQUIRE(schema.step());
-  CHECK(schema.col_text(0) == "40");
+  CHECK(schema.col_text(0) == std::to_string(cidx::kSchemaVersion));
     auto artifact =
         migrated.raw_db().prepare("SELECT name FROM sqlite_master WHERE type = "
                                   "'table' AND name = 'artifact'");
@@ -505,7 +505,7 @@ TEST_CASE("v35 artifact manifests migrate to the generated contract") {
     auto schema = migrated.raw_db().prepare(
         "SELECT value FROM meta WHERE key = 'schema_version'");
     REQUIRE(schema.step());
-  CHECK(schema.col_text(0) == "40");
+  CHECK(schema.col_text(0) == std::to_string(cidx::kSchemaVersion));
     auto contract = migrated.raw_db().prepare(
         "SELECT catalog_version, catalog_hash, trust, evidence FROM artifact");
     REQUIRE(contract.step());

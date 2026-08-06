@@ -195,9 +195,9 @@ TEST_CASE(
   check_migrated(path);
 }
 
-TEST_CASE("predecessor catalog hash requires the v39 to v40 migration") {
+TEST_CASE("predecessor catalog hash requires the v40 to v41 migration") {
   const std::string tmp = make_temp_dir();
-  for (const char *wrong_version : {"38", "40"}) {
+  for (const char *wrong_version : {"39", "41"}) {
     const std::string path =
         std::string(tmp) + "/wrong-" + wrong_version + ".db";
     {
@@ -216,26 +216,50 @@ TEST_CASE("predecessor catalog hash requires the v39 to v40 migration") {
   }
 }
 
-TEST_CASE("current main v39 database upgrades to the candidate v40 schema") {
+TEST_CASE("current main v40 database upgrades to the candidate v41 schema") {
+  // v41 makes a containment edge's count history-independent: it is the number
+  // of (file, configuration) routes that declare into the edge, derived from
+  // the applicability rows, rather than a total the writer accumulated on
+  // every publication. A v40 database carries whatever that accumulation had
+  // reached, so the migration re-derives it. The same publication used to
+  // derive applicability for `entity_node` and `entity_edge`, which the entity
+  // roll-up owns and fills in later; nothing read those rows and they are
+  // dropped rather than left as a history-dependent residue.
   const std::string tmp = make_temp_dir();
-  const std::string path = tmp + "/main-v39.db";
+  const std::string path = tmp + "/main-v40.db";
   {
     cidx::Storage db(path);
-    cidx::Symbol before;
-    before.usr = "main-v39:before";
-    before.spelling = "before";
-    before.kind = "function";
-    db.add_symbol(before);
+    cidx::Symbol scope;
+    scope.usr = "main-v40:scope";
+    scope.spelling = "scope";
+    scope.kind = "namespace";
+    const int64_t scope_id = db.add_symbol(scope);
+    cidx::Symbol member;
+    member.usr = "main-v40:member";
+    member.spelling = "member";
+    member.kind = "function";
+    const int64_t member_id = db.add_symbol(member);
+    REQUIRE(scope_id > 0);
+    REQUIRE(member_id > 0);
   }
   {
     cidx::SqliteDb raw(path);
-    for (const char *column : {"callable_kind", "template_origin",
-                               "template_form"}) {
-      raw.exec(std::string("ALTER TABLE symbol DROP COLUMN ") + column);
-    }
-    raw.exec("ALTER TABLE type_node DROP COLUMN extent");
-    raw.exec("DELETE FROM type_kind WHERE id = 14");
-    raw.exec("UPDATE meta SET value = '39' WHERE key = 'schema_version'");
+    raw.exec("PRAGMA foreign_keys = OFF");
+    // One containment edge whose count a v40 writer had inflated to 5 while
+    // only two routes actually declare into it.
+    raw.exec("INSERT INTO edge(id, src_id, dst_id, kind, count) SELECT 900, "
+             "(SELECT id FROM symbol WHERE usr='main-v40:scope'), "
+             "(SELECT id FROM symbol WHERE usr='main-v40:member'), 3, 5");
+    raw.exec("INSERT INTO fact_applicability(fact_kind, fact_id, file_id, "
+             "config_id, generation) VALUES ('edge', 900, 1, 1, 1)");
+    raw.exec("INSERT INTO fact_applicability(fact_kind, fact_id, file_id, "
+             "config_id, generation) VALUES ('edge', 900, 2, 1, 1)");
+    // The write-only derived rows.
+    raw.exec("INSERT INTO fact_applicability(fact_kind, fact_id, file_id, "
+             "config_id, generation) VALUES ('entity_node', 900, 1, 1, 1)");
+    raw.exec("INSERT INTO fact_applicability(fact_kind, fact_id, file_id, "
+             "config_id, generation) VALUES ('entity_edge', 900, 1, 1, 1)");
+    raw.exec("UPDATE meta SET value = '40' WHERE key = 'schema_version'");
     raw.exec(
         "UPDATE meta SET value = "
         "'3337824260ee0afe1260859b6be88e6fb8280852fd736cde5e12cca5c3847ba4' "
@@ -244,17 +268,21 @@ TEST_CASE("current main v39 database upgrades to the candidate v40 schema") {
   {
     cidx::Storage db(path);
     CHECK(meta_version(db.raw_db()) == std::to_string(cidx::kSchemaVersion));
-    CHECK(db.lookup_symbol("main-v39:before").has_value());
+    CHECK(db.lookup_symbol("main-v40:scope").has_value());
   }
   cidx::SqliteDb raw(path);
-  for (const char *column : {"callable_kind", "template_origin",
-                             "template_form"}) {
-    CHECK(has_col(table_columns(raw, "symbol"), column));
-  }
-  CHECK(has_col(table_columns(raw, "type_node"), "extent"));
-  auto kind = raw.prepare("SELECT name FROM type_kind WHERE id = 14");
-  REQUIRE(kind.step());
-  CHECK(kind.col_text(0) == "pack-expansion");
+  auto count = raw.prepare("SELECT count FROM edge WHERE id = 900");
+  REQUIRE(count.step());
+  CHECK(count.col_text(0) == "2");
+  auto stray = raw.prepare("SELECT COUNT(*) FROM fact_applicability WHERE "
+                           "fact_kind IN ('entity_node', 'entity_edge')");
+  REQUIRE(stray.step());
+  CHECK(stray.col_text(0) == "0");
+  // The edge's own applicability rows are untouched.
+  auto routes = raw.prepare("SELECT COUNT(*) FROM fact_applicability WHERE "
+                            "fact_kind = 'edge' AND fact_id = 900");
+  REQUIRE(routes.step());
+  CHECK(routes.col_text(0) == "2");
 }
 
 TEST_CASE("v38 database migrates to the v39 scoped identity layer") {

@@ -4192,6 +4192,102 @@ TEST_SUITE("clang") {
     CHECK(symbol_count("generated_probe") > 0);
   }
 
+  TEST_CASE("the database a corpus produces does not depend on how it was "
+            "reached") {
+    // The property every history-dependence fix in this suite exists for.
+    // A containment count that accumulates on re-publication, an applicability
+    // row derived from a table the roll-up fills in later, a diagnostic
+    // association gated on the route count -- each one shows up here as a
+    // database that disagrees with a cold build of the same sources.
+    const std::string dir = make_temp_dir();
+    const std::string header = dir + "/history.hpp";
+    const std::string source = dir + "/history_main.cpp";
+    const std::string other = dir + "/history_other.cpp";
+    const std::string original_header =
+        "#pragma once\n"
+        "namespace hist {\n"
+        "inline int shared_value() { return 1; }\n"
+        "inline int shared_value();\n"  // redeclaration: multiplicity in one file
+        "}\n";
+    write_file(header, original_header);
+    write_file(source, "#include \"history.hpp\"\n"
+                       "#warning history probe\n"
+                       "int history_main() { return hist::shared_value(); }\n");
+    write_file(other, "#include \"history.hpp\"\n"
+                      "namespace hist { inline int other_value() "
+                      "{ return shared_value(); } }\n"
+                      "int history_other() { return hist::other_value(); }\n");
+
+    const auto build = [&](const std::string &name,
+                           const std::vector<std::string> &edits) {
+      const std::string cache = dir + "/" + name;
+      ::mkdir(cache.c_str(), 0755);
+      {
+        Storage db(cache + "/index.db");
+        db.add_component("history", dir);
+        for (const std::string &unit : {source, other}) {
+          db.add_file_path(unit, std::nullopt, std::nullopt,
+                           std::vector<std::string>{"-std=c++23", "-I", dir},
+                           std::string("clang++"));
+        }
+      }
+      REQUIRE(run_shipped({"index"}, cache) == 0);
+      for (const std::string &edit : edits) {
+        write_file(header, edit);
+        REQUIRE(run_shipped({"index"}, cache) == 0);
+      }
+      write_file(header, original_header);
+      if (!edits.empty()) {
+        REQUIRE(run_shipped({"index"}, cache) == 0);
+      }
+      return cache;
+    };
+
+    // Ordered, database-id-free projection of the facts a history-dependent
+    // publication is known to disturb.
+    const auto project = [](const std::string &cache) {
+      Storage db(cache + "/index.db");
+      std::string out;
+      for (const auto &[name, sql] : std::vector<std::pair<const char *, const char *>>{
+               {"contains",
+                "SELECT s.usr, d.usr, e.count FROM edge e "
+                "JOIN symbol s ON s.id = e.src_id "
+                "JOIN symbol d ON d.id = e.dst_id "
+                "WHERE e.kind = 3 ORDER BY s.usr, d.usr"},
+               {"applicability",
+                "SELECT fa.fact_kind, COUNT(*) FROM fact_applicability fa "
+                "GROUP BY fa.fact_kind ORDER BY fa.fact_kind"},
+           }) {
+        out += std::string("== ") + name + "\n";
+        auto statement = db.raw_db().prepare(sql);
+        while (statement.step()) {
+          out += statement.col_text(0);
+          out += '|';
+          out += statement.col_text(1);
+          out += '|';
+          out += statement.col_text(2);
+          out += '\n';
+        }
+      }
+      return out;
+    };
+
+    const std::string cold = build("cold", {});
+    const std::string edited = build(
+        "edited",
+        {original_header + "\n#define HISTORY_PROBE_1 1\n",
+         original_header + "\n#define HISTORY_PROBE_2 1\n",
+         original_header + "\n#define HISTORY_PROBE_3 1\n"});
+
+    // Non-vacuity: the fixture really does produce a containment edge that
+    // more than one file declares into, and a repeated declaration inside one.
+    const std::string cold_projection = project(cold);
+    CHECK(cold_projection.find("== contains") != std::string::npos);
+    CHECK(cold_projection.find("|3\n") == std::string::npos);
+
+    CHECK(project(edited) == cold_projection);
+  }
+
   // -- S-078: publication must not depend on index history -------------------
   //
   // A translation unit's diagnostics are TU-owned, so their applicability rows

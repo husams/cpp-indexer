@@ -11,10 +11,10 @@ inline constexpr std::string_view kFullProductVersion = "0.53.0";
 inline constexpr std::string_view kReleaseChannel = "stable";
 inline constexpr std::string_view kPrerelease = {};
 
-inline constexpr int kDatabaseSchemaVersion = 40;
+inline constexpr int kDatabaseSchemaVersion = 41;
 inline constexpr int kDatabaseMigrationFloor = 2;
-inline constexpr int kDatabaseReaderMin = 40;
-inline constexpr int kDatabaseReaderMax = 40;
+inline constexpr int kDatabaseReaderMin = 41;
+inline constexpr int kDatabaseReaderMax = 41;
 
 inline constexpr int kCatalogVersion = 1;
 inline constexpr std::string_view kCatalogHash =

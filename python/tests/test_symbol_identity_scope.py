@@ -252,6 +252,6 @@ def test_v34_migration_preserves_numeric_and_scoped_identity(tmp_path):
     conn = sqlite3.connect(path)
     assert conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
-    ).fetchone()[0] == "40"
+    ).fetchone()[0] == "41"
     assert conn.execute("SELECT src_id, dst_id FROM edge WHERE id = 11").fetchone() == (7, 7)
     conn.close()

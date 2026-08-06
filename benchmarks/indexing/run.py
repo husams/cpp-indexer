@@ -19,7 +19,7 @@ import time
 from typing import Any
 
 
-EXPECTED_SCHEMA_VERSION = 40
+EXPECTED_SCHEMA_VERSION = 41
 EXPECTED_CATALOG_VERSION = 1
 EXPECTED_CATALOG_HASH = "c4f426232c34739c83a3d15c3bd91b4d4f8934ec8853f8efaa7a27939e37e9f7"
 DUMP_LAYER0 = Path(__file__).resolve().parents[2] / "scripts/dump_layer0.sh"

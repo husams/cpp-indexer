@@ -18,6 +18,12 @@
 
 namespace cidx::storage {
 
+// The one edge kind several files legitimately contribute to: a namespace or
+// class contains members declared across many headers. `catalogs/core.json`
+// is the source of truth for the id; it is named here so the derivation below
+// reads as a rule about containment rather than about a magic number.
+constexpr int kContainsEdgeKind = 3;
+
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -1410,9 +1416,18 @@ void apply_relations(SqliteDb &database, FactBatchWriterResult &result,
       "JOIN temp.cidx_batch_symbol_map dst ON dst.batch=r.batch AND "
       "dst.handle=r.dst_handle "
       "WHERE r.batch=? ORDER BY r.ordinal "
+      // `count` is replaced, never accumulated. Accumulating was how a
+      // containment edge summed the contributions of the several files that
+      // each declare a member of the same namespace -- but the conflict fires
+      // against rows from *earlier publications* too, so re-publishing one
+      // file added its contribution a second time instead of replacing it, and
+      // the count drifted upward on every re-index. The multi-file total is
+      // re-derived below from the applicability rows, which are per
+      // (file, configuration) and are swept correctly when a file is
+      // republished, so the answer no longer depends on how many times a file
+      // has been indexed.
       "ON CONFLICT(src_id,dst_id,kind) DO UPDATE SET "
-      "count=CASE WHEN excluded.kind=3 THEN edge.count+excluded.count "
-      "ELSE excluded.count END,"
+      "count=excluded.count,"
       "base_access=COALESCE(excluded.base_access,edge.base_access),"
       "is_virtual=COALESCE(excluded.is_virtual,edge.is_virtual)");
   insert.bind(1, token);
@@ -2148,14 +2163,15 @@ void publish_applicability(SqliteDb &database, FactBatchWriterResult &result,
          "te.src_id,fa.file_id,fa.config_id,fa.generation FROM type_edge te "
          "JOIN fact_applicability fa ON fa.fact_kind='type_node' AND "
          "fa.fact_id=te.src_id");
-  derive("entity_node",
-         "en.id,fa.file_id,fa.config_id,fa.generation FROM entity_node en "
-         "JOIN fact_applicability fa ON fa.fact_kind='symbol' AND "
-         "fa.fact_id=en.id");
-  derive("entity_edge",
-         "ee.rowid,fa.file_id,fa.config_id,fa.generation FROM entity_edge ee "
-         "JOIN fact_applicability fa ON fa.fact_kind='symbol' AND "
-         "fa.fact_id=ee.src_id");
+  // `entity_node` and `entity_edge` are deliberately not derived here. They
+  // belong to the entity roll-up transform, which owns them under a
+  // generation-gated full rebuild and populates them *after* a translation
+  // unit publishes -- so at publication time a cold run finds those tables
+  // empty and derives nothing, while any later run finds them populated and
+  // derives rows. That made the applicability of a fact depend on how many
+  // times the index had been built rather than on the sources, which is the
+  // same history dependence S-078 removed from diagnostics. Nothing reads
+  // `fact_kind` `entity_node` or `entity_edge`: the rows were write-only.
   derive("template_param",
          "tp.owner_id,fa.file_id,fa.config_id,fa.generation FROM "
          "template_param tp JOIN fact_applicability fa ON "
@@ -2241,6 +2257,28 @@ void publish_applicability(SqliteDb &database, FactBatchWriterResult &result,
           "temp.cidx_batch_file_map fm ON fm.file_id=d.file_id WHERE "
           "fm.batch=" +
           token_text + " AND fm.planned=1");
+  // Re-derive the multi-file containment total, now that the stale sweep has
+  // removed the applicability rows of any route this publication replaced.
+  // `contains` is the one edge kind several files legitimately contribute to
+  // -- 82 distinct files reach the busiest one in this repository's own index
+  // -- and its count is the number of (file, configuration) routes that
+  // declare into it. Deriving it rather than accumulating it is what makes
+  // re-publication idempotent: indexing the same file twice can no longer
+  // raise a count, because the routes are a set, not a running total.
+  //
+  // Scoped to the edges this batch touched, so the statement is proportional
+  // to the publication rather than to the index.
+  static_cast<void>(execute(
+      database, result.report,
+      "UPDATE edge SET count=(SELECT COUNT(*) FROM fact_applicability fa "
+      "WHERE fa.fact_kind='edge' AND fa.fact_id=edge.id) "
+      "WHERE edge.kind=" +
+          std::to_string(kContainsEdgeKind) +
+          " AND edge.id IN (SELECT rm.relation_id FROM "
+          "temp.cidx_batch_relation_map rm WHERE rm.batch=" +
+          token_text +
+          ") AND EXISTS(SELECT 1 FROM fact_applicability fa "
+          "WHERE fa.fact_kind='edge' AND fa.fact_id=edge.id)"));
   static_cast<void>(execute(
       database, result.report,
       "UPDATE fact_applicability SET generation=1 WHERE config_id=" +
