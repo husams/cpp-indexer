@@ -199,10 +199,19 @@ dependents_of_changed_inputs(Storage &db,
   // A forced include (`-include x.hpp`) is a dependency the preprocessor never
   // sees as a directive, so it produces no `include_edge` row. The
   // configuration records it as a generated input, which is where the reverse
-  // lookup has to come from. Only consulted when something changed, and only
-  // for units the include closure did not already reach.
+  // lookup has to come from.
+  //
+  // Reaching for it costs a configuration read per registered unit, so it is
+  // gated on there being a changed input that is not already a target in its
+  // own right. An ordinary one-source edit changes exactly one file, that file
+  // is its own target, and this pays nothing.
+  const bool forced_include_possible =
+      std::ranges::any_of(changed, [&](const std::string &path) {
+        return !already_targeted.contains(path);
+      });
   for (const auto &entry : registered) {
-    if (visited.contains(entry.second) || files::is_header(entry.second)) {
+    if (!forced_include_possible || visited.contains(entry.second) ||
+        files::is_header(entry.second)) {
       continue;
     }
     // Resolved through `file_config`, not through `translation_unit`: the
