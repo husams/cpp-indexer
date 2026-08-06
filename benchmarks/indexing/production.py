@@ -208,6 +208,18 @@ REQUIRED_PROFILE_COUNTERS = frozenset(
         "tu_dependency.fallbacks",
     }
 )
+#: Counter families the bounded parallel scheduler cannot produce, because the
+#: mechanisms behind them live in the serial `TuFactCacheIndexer` wrapper that
+#: the scheduler bypasses. They are required of a serial measurement and
+#: recorded as unavailable -- with this reason -- for a parallel one, so a
+#: reader can tell "the cache reported nothing" from "the cache never ran".
+SERIAL_ONLY_COUNTER_PREFIXES = ("tu_fact_cache.", "tu_dependency.")
+SERIAL_ONLY_COUNTER_REASON = (
+    "bounded parallel extraction bypasses the serial translation-unit fact "
+    "cache wrapper, so its decision taxonomy and dependency-invalidation "
+    "counters are not published in this mode"
+)
+
 REQUIRED_TRANSLATION_UNIT_FIELDS = frozenset(
     {
         "path",
@@ -576,7 +588,10 @@ def _profile_path(case_root: Path, label: str) -> Path:
 
 
 def _load_profile(
-    path: Path, *, require_writer_metrics: bool = True
+    path: Path,
+    *,
+    require_writer_metrics: bool = True,
+    require_serial_only_metrics: bool = True,
 ) -> dict[str, Any]:
     if not path.exists():
         raise RuntimeError(f"profiling output was not created: {path}")
@@ -588,6 +603,21 @@ def _load_profile(
     counters = summary.get("counters", {})
     missing_timings = sorted(REQUIRED_PROFILE_TIMINGS.difference(timings))
     missing_counters = sorted(REQUIRED_PROFILE_COUNTERS.difference(counters))
+    if not require_serial_only_metrics:
+        withheld = [
+            name
+            for name in missing_counters
+            if name.startswith(SERIAL_ONLY_COUNTER_PREFIXES)
+        ]
+        missing_counters = [
+            name
+            for name in missing_counters
+            if not name.startswith(SERIAL_ONLY_COUNTER_PREFIXES)
+        ]
+        profile["unavailable_counters"] = {
+            "names": withheld,
+            "reason": SERIAL_ONLY_COUNTER_REASON,
+        }
     translation_units = profile.get("translation_units", [])
     if not require_writer_metrics or not translation_units:
         missing_timings = [
@@ -638,11 +668,14 @@ def run_stage(
     sqlite_experiment: dict[str, Any] | None = None,
     require_coverage: bool = True,
     require_writer_metrics: bool = True,
+    index_jobs: int | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     environment = dict(os.environ)
     environment["INDEXER_CACHE"] = str(cache)
     command = [str(executable), *args]
     profile_path = _profile_path(case_root, label)
+    if index_jobs is not None and args and args[0] == "index":
+        command.extend(["--jobs", str(index_jobs)])
     if profile and args and args[0] in {"index", "resolve"}:
         command.extend(["--profile-json", str(profile_path)])
         if sqlite_experiment is not None:
@@ -660,6 +693,10 @@ def run_stage(
             require_writer_metrics=(
                 require_writer_metrics and args[0] == "index"
             ),
+            # Only a pinned single-worker run is required to publish the
+            # cache/dependency taxonomy; the automatic policy and any explicit
+            # multi-worker setting bypass the wrapper that owns it.
+            require_serial_only_metrics=(index_jobs == 1),
         )
         if profile and args[0] in {"index", "resolve"}
         else None
@@ -732,6 +769,7 @@ def run_synthetic_case(
     profile: bool = True,
     sqlite_experiment: dict[str, Any] | None = None,
     require_writer_metrics: bool = True,
+    index_jobs: int | None = None,
 ) -> dict[str, Any]:
     corpus = generate_corpus(
         case_root / "corpus", count, shape, many_header_target, order
@@ -761,6 +799,7 @@ def run_synthetic_case(
             profile=profile,
             sqlite_experiment=sqlite_experiment,
             require_writer_metrics=require_writer_metrics,
+            index_jobs=index_jobs,
         )
         stages.append(measured)
 
@@ -776,6 +815,7 @@ def run_synthetic_case(
         profile=profile,
         sqlite_experiment=sqlite_experiment,
         require_writer_metrics=require_writer_metrics,
+        index_jobs=index_jobs,
     )
     stages.append(measured)
 
@@ -793,6 +833,7 @@ def run_synthetic_case(
             profile=profile,
             sqlite_experiment=sqlite_experiment,
             require_writer_metrics=require_writer_metrics,
+            index_jobs=index_jobs,
         )
         stages.append(measured)
 
@@ -808,6 +849,7 @@ def run_synthetic_case(
         profile=profile,
         sqlite_experiment=sqlite_experiment,
         require_writer_metrics=require_writer_metrics,
+        index_jobs=index_jobs,
     )
     stages.append(measured)
 
@@ -827,6 +869,7 @@ def run_synthetic_case(
         profile=profile,
         sqlite_experiment=sqlite_experiment,
         require_writer_metrics=require_writer_metrics,
+        index_jobs=index_jobs,
     )
     stages.append(measured)
 
@@ -848,6 +891,7 @@ def run_synthetic_case(
         profile=profile,
         sqlite_experiment=sqlite_experiment,
         require_writer_metrics=require_writer_metrics,
+        index_jobs=index_jobs,
     )
     stages.append(measured)
     mutate_header(generated, 2)
@@ -862,6 +906,7 @@ def run_synthetic_case(
         profile=profile,
         sqlite_experiment=sqlite_experiment,
         require_writer_metrics=require_writer_metrics,
+        index_jobs=index_jobs,
     )
     stages.append(measured)
 
@@ -887,6 +932,7 @@ def run_self_index_case(
     case_root: Path,
     *,
     require_writer_metrics: bool = True,
+    index_jobs: int | None = None,
 ) -> dict[str, Any]:
     cache = case_root / "cache"
     cache.mkdir()
@@ -923,6 +969,7 @@ def run_self_index_case(
             profile=profile,
             require_coverage=coverage,
             require_writer_metrics=require_writer_metrics,
+            index_jobs=index_jobs,
         )
         stages.append(measured)
     return {
@@ -940,6 +987,8 @@ def run_cold_only_case(
     executable: Path,
     count: int,
     case_root: Path,
+    *,
+    index_jobs: int | None = None,
 ) -> dict[str, Any]:
     corpus = generate_corpus(
         case_root / "corpus",
@@ -960,6 +1009,7 @@ def run_cold_only_case(
         ["index"],
         previous=previous,
         profile=False,
+        index_jobs=index_jobs,
     )
     commands = json.loads(corpus.compile_commands.read_text(encoding="utf-8"))
     order = [Path(command["file"]).name for command in commands]
@@ -976,15 +1026,19 @@ def compare_disabled_overhead(
     count: int,
     trials: int,
     root: Path,
+    *,
+    index_jobs: int | None = None,
 ) -> dict[str, Any]:
     paired = []
     parity_failures = []
     for trial in range(1, trials + 1):
         baseline = run_cold_only_case(
-            uninstrumented, count, root / f"trial-{trial}" / "uninstrumented"
+            uninstrumented, count, root / f"trial-{trial}" / "uninstrumented",
+            index_jobs=index_jobs,
         )
         candidate = run_cold_only_case(
-            instrumented, count, root / f"trial-{trial}" / "instrumented"
+            instrumented, count, root / f"trial-{trial}" / "instrumented",
+            index_jobs=index_jobs,
         )
         baseline_digest = baseline["sqlite"]["snapshot"]["canonical_sha256"]
         candidate_digest = candidate["sqlite"]["snapshot"]["canonical_sha256"]
@@ -2214,6 +2268,16 @@ def main() -> int:
         "--many-header-target", type=int, default=DEFAULT_MANY_HEADER_TARGET
     )
     parser.add_argument("--trials", type=int, default=MINIMUM_TRIALS)
+    parser.add_argument(
+        "--index-jobs",
+        type=int,
+        help=(
+            "worker topology for every measured index stage. Omitted selects "
+            "the shipped automatic policy, which is what a production SLO is "
+            "measured against; pass 1 for the serial run that additionally "
+            "publishes the translation-unit cache and dependency counters"
+        ),
+    )
     parser.add_argument("--work-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--skip-self-index", action="store_true")
@@ -2253,6 +2317,8 @@ def main() -> int:
     )
     if args.trials < MINIMUM_TRIALS:
         raise SystemExit(f"--trials must be at least {MINIMUM_TRIALS}")
+    if args.index_jobs is not None and args.index_jobs < 1:
+        raise SystemExit("--index-jobs must be a positive integer")
     if args.representative_files < 1 or args.scale_files < 1:
         raise SystemExit("corpus sizes must be positive")
     if platform.system() == "Darwin" and not args.work_root.name.endswith(".noindex"):
@@ -2283,6 +2349,20 @@ def main() -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     report: dict[str, Any] = {
         "method": "HSE-103",
+        # Which worker topology every measured index stage ran under. An SLO
+        # is only meaningful next to the mode it was measured in, and the
+        # available telemetry depends on it.
+        "index_topology": {
+            "index_jobs": args.index_jobs,
+            "mode": "serial" if args.index_jobs == 1
+            else ("automatic" if args.index_jobs is None
+                  else f"parallel:{args.index_jobs}"),
+            "serial_only_counters_required": args.index_jobs == 1,
+            "serial_only_counter_prefixes": list(SERIAL_ONLY_COUNTER_PREFIXES),
+            "serial_only_counter_reason": (
+                None if args.index_jobs == 1 else SERIAL_ONLY_COUNTER_REASON
+            ),
+        },
         "authoritative_timing": quiescence["quiescent"],
         "host_quiescence": quiescence,
         "identity": environment_identity(
@@ -2362,6 +2442,7 @@ def main() -> int:
                 args.many_header_target,
                 order,
                 case_root,
+                index_jobs=args.index_jobs,
             )
             report["individual_trials"][f"{case_key}:trial-{trial}"] = result
             trials.append(result)
@@ -2390,6 +2471,7 @@ def main() -> int:
                         order,
                         baseline_root,
                         require_writer_metrics=False,
+                        index_jobs=args.index_jobs,
                     )
                 )
             comparison = compare_commit_trials(baseline_trials, trials)
@@ -2409,7 +2491,8 @@ def main() -> int:
             case_root = args.work_root / "self-index" / f"trial-{trial}"
             case_root.mkdir(parents=True)
             result = run_self_index_case(
-                executable, checkout, self_compile_db, case_root
+                executable, checkout, self_compile_db, case_root,
+                index_jobs=args.index_jobs,
             )
             report["individual_trials"][f"self-index:trial-{trial}"] = result
             self_trials.append(result)
@@ -2436,6 +2519,7 @@ def main() -> int:
                         self_compile_db,
                         baseline_root,
                         require_writer_metrics=False,
+                        index_jobs=args.index_jobs,
                     )
                 )
             comparison = compare_commit_trials(baseline_self_trials, self_trials)
@@ -2463,6 +2547,7 @@ def main() -> int:
                     "forward",
                     case_root,
                     sqlite_experiment=configuration,
+                    index_jobs=args.index_jobs,
                 )
                 trials.append(result)
             aggregate = aggregate_trials(trials)
@@ -2500,6 +2585,7 @@ def main() -> int:
             args.scale_files,
             args.trials,
             args.work_root / "disabled-overhead",
+            index_jobs=args.index_jobs,
         )
         report["disabled_profiling_overhead"] = comparison
         report["parity_failures"].extend(comparison["parity_failures"])
