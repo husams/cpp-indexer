@@ -1242,6 +1242,21 @@ def main() -> int:
         }
         report["failures"].append("pre-feature: no baseline executable supplied")
 
+    # Same reasoning as `production.py`: a competitor that starts mid-run is
+    # invisible to the start-of-run check, and a matrix measured alongside
+    # another indexer must not be published as authoritative.
+    final_quiescence = PRODUCTION._host_quiescence()
+    report["host_quiescence_final"] = final_quiescence
+    report["authoritative_timing"] = (
+        quiescence["quiescent"] and final_quiescence["quiescent"]
+    )
+    if not final_quiescence["quiescent"]:
+        report["failures"].append(
+            "host stopped being quiescent during the run; competing cidx "
+            "indexers: "
+            + "; ".join(final_quiescence["competing_cidx_indexers"])
+        )
+
     report["ok"] = not report["failures"]
     args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(args.output)

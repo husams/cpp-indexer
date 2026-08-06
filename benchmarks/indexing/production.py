@@ -2689,6 +2689,24 @@ def main() -> int:
         report["parity_failures"].extend(comparison["parity_failures"])
     report["parity_failures"].extend(report["commit_ab"]["parity_failures"])
 
+    # Quiescence is re-checked at the end, not only before the first trial. A
+    # competitor that starts *during* a run is exactly as contaminating as one
+    # that was already there, and the start-of-run check cannot see it: a run
+    # whose figures were measured alongside another indexer would otherwise be
+    # published as authoritative. Both observations are recorded so a reader
+    # can tell which end of the run the contention was found at.
+    final_quiescence = _host_quiescence()
+    report["host_quiescence_final"] = final_quiescence
+    report["authoritative_timing"] = (
+        quiescence["quiescent"] and final_quiescence["quiescent"]
+    )
+    if not final_quiescence["quiescent"]:
+        report["parity_failures"].append(
+            "host stopped being quiescent during the run; competing cidx "
+            "indexers: "
+            + "; ".join(final_quiescence["competing_cidx_indexers"])
+        )
+
     report["attribution_results"] = attribution_summary(
         report["aggregates"], args.representative_files, args.scale_files
     )

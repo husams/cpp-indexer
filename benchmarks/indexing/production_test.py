@@ -177,6 +177,12 @@ def _main_shaped_report(*, trials: int = 3, disabled: bool = False) -> dict:
         ),
         "serial_only_counter_reason": None,
     }
+    # `main()` re-checks quiescence at the end of the run and records both
+    # observations; a shaped candidate carries the same envelope.
+    report["host_quiescence_final"] = {
+        "quiescent": True,
+        "competing_cidx_indexers": [],
+    }
     report["sqlite_matrix"] = {}
     report["disabled_profiling_overhead"] = None
     report["commit_ab"] = {"cases": {}, "parity_failures": []}
@@ -1105,6 +1111,37 @@ class BoundaryTest(unittest.TestCase):
     def test_suite_leaves_the_repository_backlog_tree_untouched(self) -> None:
         """C-1221 - checked here and again unconditionally in tearDownModule."""
         self.assertEqual(_snapshot_repository_backlog(), _REPOSITORY_SNAPSHOT)
+
+
+class RunQuiescenceTest(unittest.TestCase):
+    """S-078 -- a competitor that starts mid-run is as contaminating as one
+    that was already there, and the start-of-run check cannot see it. `main()`
+    re-checks at the end and only calls the run authoritative when both
+    observations agree, so a report measured alongside another indexer cannot
+    be published as though it were clean.
+    """
+
+    def _main_source(self) -> str:
+        return Path(production.__file__).read_text(encoding="utf-8")
+
+    def test_main_checks_quiescence_more_than_once(self) -> None:
+        self.assertEqual(self._main_source().count("_host_quiescence()"), 3)
+
+    def test_authoritative_timing_requires_both_observations(self) -> None:
+        source = self._main_source()
+        self.assertIn(
+            'quiescence["quiescent"] and final_quiescence["quiescent"]', source
+        )
+
+    def test_a_mid_run_competitor_is_a_parity_failure(self) -> None:
+        source = self._main_source()
+        self.assertIn("host stopped being quiescent during the run", source)
+        # Recorded as a parity failure, which is what the process exit code
+        # tracks -- not merely noted in a field a reader has to look for.
+        marker = source.index("host stopped being quiescent during the run")
+        self.assertIn(
+            'report["parity_failures"].append', source[max(0, marker - 400):marker]
+        )
 
 
 class TelemetryScopeTest(unittest.TestCase):
