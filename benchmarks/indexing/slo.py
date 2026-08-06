@@ -574,6 +574,7 @@ def slo_decision(
     residuals: Mapping[str, Any],
     integrity: Mapping[str, Any],
     regression_guard: Mapping[str, Any],
+    dependency_invalidation: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Assemble every verdict into the single publishable SLO decision.
 
@@ -604,6 +605,11 @@ def slo_decision(
             f"regression-guard: {reason}"
             for reason in regression_guard.get("failures", [])
         )
+    if not dependency_invalidation.get("ok"):
+        failures.extend(
+            f"dependency-invalidation: {reason}"
+            for reason in dependency_invalidation.get("failures", [])
+        )
 
     return {
         "contract": {
@@ -625,6 +631,7 @@ def slo_decision(
         "residuals": dict(residuals),
         "integrity": dict(integrity),
         "regression_guard": dict(regression_guard),
+        "dependency_invalidation": dict(dependency_invalidation),
         "failures": failures,
         "ok": not failures,
     }

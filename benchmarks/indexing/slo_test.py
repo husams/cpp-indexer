@@ -441,6 +441,7 @@ class SloDecisionTest(unittest.TestCase):
             "residuals": {"ok": True, "failures": [], "terms": []},
             "integrity": {"ok": True, "failures": []},
             "regression_guard": {"ok": True, "failures": []},
+            "dependency_invalidation": {"ok": True, "failures": []},
         }
 
     def test_a_fully_green_decision_publishes(self):
@@ -473,6 +474,9 @@ class SloDecisionTest(unittest.TestCase):
             ("regression_guard",
              {"ok": False, "failures": ["no CI subset is wired"]},
              "regression-guard: no CI subset is wired"),
+            ("dependency_invalidation",
+             {"ok": False, "failures": ["a high-fan-in header rebuilt 0 units"]},
+             "dependency-invalidation: a high-fan-in header rebuilt 0 units"),
         ):
             with self.subTest(component=key):
                 arguments = self._green()

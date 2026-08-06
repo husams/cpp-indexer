@@ -134,6 +134,11 @@ PUBLICATION_SHARE_THRESHOLD = 0.85
 #: relative one, so the term cannot creep as the corpus grows: at 20% of the
 #: 5 s warm contract there is 4x headroom before the SLO itself is at risk.
 TRANSFORM_EVALUATION_WARM_THRESHOLD_SECONDS = 1.0
+#: `production.generate_corpus` gives the controlled fan-in shape a low-fan-in
+#: header included by exactly `min(2, files)` units. That is what makes a
+#: dependency-invalidation claim falsifiable: rebuilding nothing and rebuilding
+#: everything are both wrong answers, and both are visible as a wrong count.
+LOW_FAN_IN_INCLUDING_UNITS = 2
 
 
 def scaling_evidence(
@@ -215,6 +220,73 @@ def transform_evaluation_evidence(
         "transform_seconds_median": total,
         "executed_transform_seconds": executed,
         "share_of_warm_wall": total / wall if wall > 0 else None,
+    }
+
+
+def _extracted_units(report: Mapping[str, Any], case: str, stage: str) -> int:
+    """How many translation units a stage actually re-extracted.
+
+    The per-translation-unit profile series has one record per extraction, so
+    its length is the size of the rebuilt set -- including zero, which is the
+    answer that used to come back for every dependency change.
+    """
+    analysis = _stage(report, case, stage).get("per_tu_analysis") or {}
+    count = analysis.get("sample_count")
+    if not isinstance(count, int) or isinstance(count, bool):
+        raise SLO.SloContractError(
+            f"{case}/{stage} has no per-translation-unit sample count"
+        )
+    return count
+
+
+def dependency_invalidation_evidence(
+    report: Mapping[str, Any], *, representative_files: int
+) -> dict[str, Any]:
+    """Did a changed dependency rebuild the *correct* affected set?
+
+    Two failure modes, and this separates them. Rebuilding nothing is the one
+    that shipped for a long time: a stale header was deferred and its
+    dependents reported unchanged, so the index quietly kept old facts.
+    Rebuilding everything would be the lazy fix. The controlled fan-in corpus
+    distinguishes them: its low-fan-in header is included by exactly two units
+    and its high-fan-in header by all of them, so the correct answer is two
+    and all, and either failure mode shows up as a wrong number rather than a
+    passing test.
+    """
+    fan_in = f"fan-in:{representative_files}:forward"
+    baseline = f"baseline:{representative_files}:forward"
+    low = _extracted_units(report, fan_in, "low-fan-in-header")
+    high = _extracted_units(report, fan_in, "high-fan-in-header")
+    generated = _extracted_units(report, baseline, "generated-input")
+    warm = _extracted_units(report, baseline, "unchanged-warm")
+
+    failures: list[str] = []
+    if low != LOW_FAN_IN_INCLUDING_UNITS:
+        failures.append(
+            f"a low-fan-in header change rebuilt {low} units, expected "
+            f"{LOW_FAN_IN_INCLUDING_UNITS}"
+        )
+    if high != representative_files:
+        failures.append(
+            f"a high-fan-in header change rebuilt {high} units, expected "
+            f"{representative_files}"
+        )
+    if generated <= 0:
+        failures.append("a generated-input change rebuilt nothing")
+    if warm != 0:
+        failures.append(
+            f"an unchanged run rebuilt {warm} units; the closure invents work"
+        )
+    return {
+        "corpus": {"fan_in": fan_in, "baseline": baseline},
+        "low_fan_in_header_units": low,
+        "low_fan_in_expected": LOW_FAN_IN_INCLUDING_UNITS,
+        "high_fan_in_header_units": high,
+        "high_fan_in_expected": representative_files,
+        "generated_input_units": generated,
+        "unchanged_warm_units": warm,
+        "failures": failures,
+        "ok": not failures,
     }
 
 
@@ -388,6 +460,9 @@ def assemble(
              "integrated": integrated}
         ),
         regression_guard=regression_guard_evidence(),
+        dependency_invalidation=dependency_invalidation_evidence(
+            shipped, representative_files=representative_files
+        ),
     )
     decision["front_end"] = shares
     decision["pre_feature_semantic_delta"] = pre_feature.get("semantic_delta")

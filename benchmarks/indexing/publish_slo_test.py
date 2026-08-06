@@ -282,6 +282,74 @@ class IntegrityEvidenceTest(unittest.TestCase):
                       evidence["failures"])
 
 
+class DependencyInvalidationTest(unittest.TestCase):
+    def _report(self, *, low=2, high=32, generated=32, warm=0) -> dict:
+        def stage(units: int) -> dict:
+            entry = _profile_stage(wall=[0.1, 0.1, 0.1])
+            entry["per_tu_analysis"] = {"sample_count": units}
+            return entry
+
+        return _report(
+            {
+                "fan-in:32:forward": {
+                    "low-fan-in-header": stage(low),
+                    "high-fan-in-header": stage(high),
+                },
+                "baseline:32:forward": {
+                    "generated-input": stage(generated),
+                    "unchanged-warm": stage(warm),
+                },
+            }
+        )
+
+    def test_the_correct_affected_set_passes(self):
+        evidence = publish_slo.dependency_invalidation_evidence(
+            self._report(), representative_files=32
+        )
+        self.assertTrue(evidence["ok"], msg=evidence["failures"])
+        self.assertEqual(evidence["low_fan_in_header_units"], 2)
+        self.assertEqual(evidence["high_fan_in_header_units"], 32)
+
+    def test_rebuilding_nothing_fails(self):
+        # The behaviour that shipped before S-078: a stale header is deferred
+        # and its dependents report unchanged.
+        evidence = publish_slo.dependency_invalidation_evidence(
+            self._report(low=0, high=0, generated=0), representative_files=32
+        )
+        self.assertFalse(evidence["ok"])
+        self.assertEqual(len(evidence["failures"]), 3)
+
+    def test_rebuilding_everything_also_fails(self):
+        # The lazy fix. A low-fan-in header is included by two units, so
+        # rebuilding all of them is the wrong answer too.
+        evidence = publish_slo.dependency_invalidation_evidence(
+            self._report(low=32), representative_files=32
+        )
+        self.assertFalse(evidence["ok"])
+        self.assertTrue(
+            any("low-fan-in" in text for text in evidence["failures"])
+        )
+
+    def test_inventing_work_on_an_unchanged_run_fails(self):
+        evidence = publish_slo.dependency_invalidation_evidence(
+            self._report(warm=3), representative_files=32
+        )
+        self.assertFalse(evidence["ok"])
+        self.assertTrue(
+            any("invents work" in text for text in evidence["failures"])
+        )
+
+    def test_a_missing_sample_count_is_refused_rather_than_assumed(self):
+        report = self._report()
+        del report["aggregates"]["fan-in:32:forward"]["stages"][
+            "high-fan-in-header"
+        ]["per_tu_analysis"]["sample_count"]
+        with self.assertRaises(slo.SloContractError):
+            publish_slo.dependency_invalidation_evidence(
+                report, representative_files=32
+            )
+
+
 class RegressionGuardTest(unittest.TestCase):
     def test_the_real_workflow_satisfies_the_guard(self):
         evidence = publish_slo.regression_guard_evidence()
