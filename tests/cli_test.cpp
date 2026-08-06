@@ -4018,6 +4018,246 @@ TEST_SUITE("clang") {
                     .coverage_complete);
   }
 
+  // -- S-078: publication must not depend on index history -------------------
+  //
+  // A translation unit's diagnostics are TU-owned, so their applicability rows
+  // belong to the main file's route and to no other. Deciding whether to
+  // publish them from the *number* of routes made the association depend on
+  // whether that particular run also happened to mint the TU's owned headers:
+  // a cold run had several routes and dropped the row, a later re-index of the
+  // same unchanged source had one route and added it. The same sources then
+  // produced two different databases depending on how they were reached, which
+  // the integrated qualification matrix compares directly.
+
+  TEST_CASE("diagnostic applicability does not depend on how many routes the "
+            "publication had") {
+    const std::string dir = make_temp_dir();
+    const std::string header = dir + "/diag_owned.hpp";
+    const std::string source = dir + "/diag_main.cpp";
+    write_file(header, "#pragma once\n"
+                       "namespace diag { inline int owned() { return 1; } }\n");
+    write_file(source, "#include \"diag_owned.hpp\"\n"
+                       "#warning s078 route-independence probe\n"
+                       "int diag_main() { return diag::owned(); }\n");
+
+    Storage db(dir + "/index.db");
+    db.add_component("diag", dir);
+    const int64_t file_id = db.add_file_path(
+        source, std::nullopt, std::nullopt,
+        std::vector<std::string>{"-std=c++23"}, std::string("clang++"));
+    const std::optional<cidx::File> stored = db.get_file_by_id(file_id);
+    REQUIRE(stored.has_value());
+    const cidx::File file = stored.value_or(cidx::File{});
+    db.stamp_graph_resolved();
+    db.stamp_index_identity();
+
+    const auto applicability = [&] {
+      std::vector<std::string> rows;
+      auto statement = db.raw_db().prepare(
+          "SELECT fa.fact_id, f.name, fa.config_id FROM fact_applicability fa "
+          "JOIN file f ON f.id = fa.file_id "
+          "WHERE fa.fact_kind = 'diagnostic' ORDER BY 1, 2, 3");
+      while (statement.step()) {
+        rows.push_back(std::to_string(statement.col_int64(0)) + '|' +
+                       std::filesystem::path(statement.col_text(1))
+                           .filename()
+                           .string() +
+                       '|' + std::to_string(statement.col_int64(2)));
+      }
+      return rows;
+    };
+    const auto diagnostics = [&] {
+      auto statement = db.raw_db().prepare("SELECT COUNT(*) FROM diagnostic");
+      REQUIRE(statement.step());
+      return statement.col_int64(0);
+    };
+
+    // Cold: this run mints the owned header, so the publication has more than
+    // one route.
+    const auto cold = cidx::ast::run_index_one(db, file, source, true);
+    REQUIRE(!cold.parse_failed);
+    REQUIRE(cold.headers.indexed == 1);
+    REQUIRE(diagnostics() > 0);
+    const std::vector<std::string> cold_rows = applicability();
+    // Non-vacuous: the diagnostic exists and is reachable through
+    // applicability, on the main file's route.
+    REQUIRE(cold_rows.size() == static_cast<std::size_t>(diagnostics()));
+    CHECK(cold_rows.front().find("diag_main.cpp") != std::string::npos);
+
+    // Warm: the header is already indexed, so this publication has exactly one
+    // route. The applicability set must be identical, not merely non-empty.
+    const auto warm = cidx::ast::run_index_one(db, file, source, true);
+    REQUIRE(!warm.parse_failed);
+    CHECK(warm.headers.indexed == 0);
+    CHECK(applicability() == cold_rows);
+    CHECK(diagnostics() == static_cast<int64_t>(cold_rows.size()));
+  }
+
+  // -- S-078: registered-provider workload and traversal-budget aggregation --
+  //
+  // The integrated qualification has to show that adding extension rules
+  // cannot silently turn into one whole-translation-unit walk per rule. Two
+  // things carry that: the engine sums every registered rule's declared
+  // whole-TU budget into one run-level figure that the profile publishes, and
+  // a rule that walks more than it declared is refused before its facts can
+  // commit. Both are exercised through the shipped provider-registration
+  // harness (`register_frontend_pass_provider`), not a private hook.
+
+  TEST_CASE("multi-rule provider workload aggregates the whole-TU traversal "
+            "budget") {
+    const std::string dir = make_temp_dir();
+    const std::string source = dir + "/traversal_budget_rules.cpp";
+    write_file(source, "int rule_symbol() { return 1; }\n");
+
+    const auto index_once =
+        [&](std::size_t rules) -> cidx::ast::IndexOneOutcome {
+      Storage db(":memory:");
+      db.add_component("traversal-rules", dir);
+      const int64_t file_id = db.add_file_path(
+          source, std::nullopt, std::nullopt,
+          std::vector<std::string>{"-std=c++23"}, std::string("clang++"));
+      const cidx::File file = db.get_file_by_id(file_id).value();
+      db.stamp_graph_resolved();
+      db.stamp_index_identity();
+      cidx::ast::clear_frontend_pass_providers();
+      if (rules > 0) {
+        cidx::ast::register_frontend_pass_provider(
+            [rules](cidx::ast::FrontendSession &,
+                    cidx::ast::ExtractionPassRegistry &registry,
+                    cidx::ast::IndexingPlan &plan) {
+              for (std::size_t rule = 0; rule < rules; ++rule) {
+                const std::string id =
+                    "synthetic.rule." + std::to_string(rule);
+                registry.register_pass(
+                    cidx::ast::ExtractionPassDescriptor{
+                        .id = id,
+                        .version = 1,
+                        .required_capabilities =
+                            {cidx::ast::FrontendCapability::ast},
+                        .consumed_fact_families = {"ast"},
+                        .produced_fact_families = {"extension"},
+                        .catalog_versions = {1},
+                        .dependencies = {"main.associate"},
+                        .scope = cidx::ast::PassScope::translation_unit,
+                        .traversal = cidx::ast::TraversalMode::declaration,
+                        .budget = {.max_visited_constructs = 1,
+                                   .max_emitted_facts = 0,
+                                   .max_diagnostics = 0,
+                                   .max_whole_tu_traversals = 1,
+                                   .declared = true}},
+                    [](cidx::ast::PassExecutionContext &context) {
+                      // One declared walk, accounted exactly once.
+                      context.metrics.note_whole_tu_traversal();
+                      context.metrics.note_visited();
+                    });
+                plan.insert_before("evidence.persist", id);
+              }
+            });
+      }
+      auto outcome = cidx::ast::run_index_one(db, file, source, true);
+      cidx::ast::clear_frontend_pass_providers();
+      return outcome;
+    };
+
+    const cidx::ast::IndexOneOutcome shipped = index_once(0);
+    REQUIRE(!shipped.parse_failed);
+    // The shipped topology after S-098's two-root fusion: the registered
+    // budget is a real number, not an unbounded default, and the run never
+    // walks more than it registered.
+    CHECK(shipped.registered_whole_tu_traversal_budget > 0);
+    CHECK(shipped.observed_whole_tu_traversals <=
+          shipped.registered_whole_tu_traversal_budget);
+
+    constexpr std::size_t kExtraRules = 3;
+    const cidx::ast::IndexOneOutcome extended = index_once(kExtraRules);
+    REQUIRE(!extended.parse_failed);
+    CHECK(extended.registered_whole_tu_traversal_budget ==
+          shipped.registered_whole_tu_traversal_budget + kExtraRules);
+    CHECK(extended.observed_whole_tu_traversals ==
+          shipped.observed_whole_tu_traversals + kExtraRules);
+    CHECK(extended.observed_whole_tu_traversals <=
+          extended.registered_whole_tu_traversal_budget);
+
+    std::size_t rule_metrics = 0;
+    for (const cidx::ast::IndexPassMetrics &metrics : extended.pass_metrics) {
+      if (metrics.id.starts_with("synthetic.rule.")) {
+        ++rule_metrics;
+        CHECK(metrics.registered_whole_tu_traversal_budget == 1);
+        CHECK(metrics.whole_tu_traversals == 1);
+      }
+    }
+    CHECK(rule_metrics == kExtraRules);
+  }
+
+  TEST_CASE("a provider rule cannot walk the whole translation unit past its "
+            "declared budget") {
+    const std::string dir = make_temp_dir();
+    const std::string source = dir + "/traversal_budget_overrun.cpp";
+    write_file(source, "int overrun_symbol() { return 1; }\n");
+
+    const auto run_with_walks = [&](std::size_t declared, std::size_t walks) {
+      Storage db(":memory:");
+      db.add_component("traversal-overrun", dir);
+      const int64_t file_id = db.add_file_path(
+          source, std::nullopt, std::nullopt,
+          std::vector<std::string>{"-std=c++23"}, std::string("clang++"));
+      const cidx::File file = db.get_file_by_id(file_id).value();
+      db.stamp_graph_resolved();
+      db.stamp_index_identity();
+      const auto before = snapshot_tu_publication(db, source);
+      cidx::ast::clear_frontend_pass_providers();
+      cidx::ast::register_frontend_pass_provider(
+          [declared, walks](cidx::ast::FrontendSession &,
+                            cidx::ast::ExtractionPassRegistry &registry,
+                            cidx::ast::IndexingPlan &plan) {
+            registry.register_pass(
+                cidx::ast::ExtractionPassDescriptor{
+                    .id = "synthetic.unbounded-walk",
+                    .version = 1,
+                    .required_capabilities =
+                        {cidx::ast::FrontendCapability::ast},
+                    .consumed_fact_families = {"ast"},
+                    .produced_fact_families = {"extension"},
+                    .catalog_versions = {1},
+                    .dependencies = {"main.associate"},
+                    .scope = cidx::ast::PassScope::translation_unit,
+                    .traversal = cidx::ast::TraversalMode::declaration,
+                    .budget = {.max_visited_constructs = walks,
+                               .max_emitted_facts = 0,
+                               .max_diagnostics = 0,
+                               .max_whole_tu_traversals = declared,
+                               .declared = true}},
+                [walks](cidx::ast::PassExecutionContext &context) {
+                  for (std::size_t walk = 0; walk < walks; ++walk) {
+                    context.metrics.note_whole_tu_traversal();
+                  }
+                });
+            plan.insert_before("evidence.persist", "synthetic.unbounded-walk");
+          });
+      auto outcome = cidx::ast::run_index_one(db, file, source, true);
+      cidx::ast::clear_frontend_pass_providers();
+      const bool unchanged = snapshot_tu_publication(db, source) == before;
+      return std::pair{std::move(outcome), unchanged};
+    };
+
+    // Declared 1, walked 1: accepted, and the run publishes.
+    const auto [within, within_unchanged] = run_with_walks(1, 1);
+    CHECK(!within.parse_failed);
+    CHECK(!within_unchanged);
+
+    // Declared 1, walked 2: refused at the second walk, nothing published.
+    const auto [overrun, overrun_unchanged] = run_with_walks(1, 2);
+    CHECK(overrun.parse_failed);
+    CHECK(overrun.error.find("budget exceeded") != std::string::npos);
+    CHECK(overrun_unchanged);
+
+    // Declared 0, walked 1: a rule cannot opt out of declaring at all.
+    const auto [undeclared, undeclared_unchanged] = run_with_walks(0, 1);
+    CHECK(undeclared.parse_failed);
+    CHECK(undeclared.error.find("budget exceeded") != std::string::npos);
+    CHECK(undeclared_unchanged);
+  }
+
 } // TEST_SUITE("clang")
 
 // -- analyze (Souffle Datalog)

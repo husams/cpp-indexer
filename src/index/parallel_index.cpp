@@ -226,6 +226,12 @@ auto run_parallel_index(cidx::Storage &db, const std::string &index_path,
         applied.error =
             std::string("FactBatch publication failed: ") + error.what();
       }
+      // This scheduler owns its own writer, so it also owns publishing that
+      // writer's telemetry. Without this the default (parallel) configuration
+      // reports no `fact_batch_writer.*` counters or timings at all, and the
+      // production measurement gate -- which requires them -- cannot run
+      // against the mode that actually ships.
+      ast::record_writer_profile(applied.report, profile::active());
       if (applied.ok()) {
         published = true;
       } else {

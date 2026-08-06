@@ -24,17 +24,24 @@
 
 #include <sys/stat.h>
 
+#include <algorithm>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdlib>
 #include <fstream>
+#include <iterator>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
+#include <variant>
 #include <vector>
 
+#include "cli/application_adapter.hpp"
 #include "cli/args.hpp"
 #include "cli/commands.hpp"
 #include "index/parallel_index.hpp"
+#include "profile/index_profile.hpp"
 #include "storage/sqlite.hpp"
 #include "storage/storage.hpp"
 #include "util/logger.hpp"
@@ -380,6 +387,109 @@ TEST_SUITE("clang") {
                             "WHERE dst.spelling = 'value'");
     REQUIRE(calls.step());
     CHECK(calls.col_int64(0) >= static_cast<std::int64_t>(kTranslationUnits));
+  }
+
+  // S-078: the scheduler owns its own controlled writer and its own dispatch
+  // order, so it also owns the telemetry for both. Without that, the mode that
+  // actually ships reports no writer counters and gives every translation unit
+  // the same corpus position -- and the production measurement gate, which is
+  // fitted against that position, cannot run against it at all.
+  TEST_CASE("parallel indexing publishes the same writer telemetry and real "
+            "corpus positions") {
+    const std::string root = make_temp_dir();
+    write_corpus(root + "/src");
+    cidx::Logger log;
+
+    const auto index_with_profile =
+        [&](const std::string &name,
+            const std::vector<std::string> &extra) -> std::string {
+      const std::string cache = root + "/" + name;
+      ::mkdir(cache.c_str(), 0755);
+      REQUIRE(run_cidx({"import", "--db", root + "/src/compile_commands.json",
+                        "--name", "parallel-telemetry"},
+                       cache, log) == 0);
+      const std::string profile_path = cache + "/profile.json";
+      std::vector<std::string> argv{"index"};
+      argv.insert(argv.end(), extra.begin(), extra.end());
+      argv.emplace_back("--profile-json");
+      argv.push_back(profile_path);
+      // `--jobs` and `--profile-json` are both typed options, so this has to
+      // go through the same application entry point `main()` uses; the legacy
+      // `run_command` path parses neither.
+      const cli::ApplicationParseResult parsed =
+          cli::parse_application_request(argv);
+      const auto *request =
+          std::get_if<cidx::application::CommandRequest>(&parsed.value);
+      REQUIRE(request != nullptr);
+      std::ostringstream out;
+      std::ostringstream err;
+      cli::Context ctx;
+      ctx.cache_dir = cache;
+      ctx.index_path = cache + "/index.db";
+      ctx.logger = &log;
+      ctx.out = &out;
+      ctx.err = &err;
+      const int code = cli::run_application_request(*request, ctx);
+      INFO("cidx index failed: " << err.str());
+      REQUIRE(code == 0);
+      std::ifstream input(profile_path);
+      REQUIRE(input.good());
+      return {std::istreambuf_iterator<char>(input),
+              std::istreambuf_iterator<char>()};
+    };
+
+    // Whole-key lookup, so "…rows_inserted" cannot answer for "…rows_ignored".
+    const auto counter = [](const std::string &profile,
+                            const std::string &name) -> std::int64_t {
+      const std::string key = '"' + name + "\": ";
+      const std::size_t at = profile.find(key);
+      REQUIRE(at != std::string::npos);
+      const std::size_t start = at + key.size();
+      return std::stoll(
+          profile.substr(start, profile.find_first_of(",\n", start) - start));
+    };
+    const auto positions = [](const std::string &profile) {
+      std::vector<std::int64_t> found;
+      const std::string key = "\"start_position\": ";
+      std::size_t at = profile.find(key);
+      while (at != std::string::npos) {
+        const std::size_t start = at + key.size();
+        found.push_back(std::stoll(
+            profile.substr(start, profile.find_first_of(",\n", start) - start)));
+        at = profile.find(key, start);
+      }
+      std::ranges::sort(found);
+      return found;
+    };
+
+    const std::string serial = index_with_profile("serial", {"--jobs", "1"});
+    const std::string parallel = index_with_profile(
+        "parallel", {"--jobs", std::to_string(kTranslationUnits)});
+
+    // Non-vacuity: the parallel run really did use more than one worker.
+    CHECK(counter(parallel, "parallel.workers") ==
+          static_cast<std::int64_t>(kTranslationUnits));
+
+    // Every translation unit reports its own place in the corpus, not zero.
+    std::vector<std::int64_t> expected;
+    expected.reserve(kTranslationUnits);
+    for (std::size_t unit = 0; unit < kTranslationUnits; ++unit) {
+      expected.push_back(static_cast<std::int64_t>(unit));
+    }
+    CHECK(positions(serial) == expected);
+    CHECK(positions(parallel) == expected);
+
+    // The writer did the same work in both modes, and said so in both.
+    for (const char *name :
+         {"fact_batch_writer.statements_prepared",
+          "fact_batch_writer.statement_executions",
+          "fact_batch_writer.virtual_machine_steps",
+          "fact_batch_writer.rows_staged", "fact_batch_writer.rows_inserted"}) {
+      CAPTURE(name);
+      const std::int64_t serial_value = counter(serial, name);
+      CHECK(serial_value > 0);
+      CHECK(counter(parallel, name) == serial_value);
+    }
   }
 }
 

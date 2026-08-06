@@ -2099,17 +2099,20 @@ void publish_applicability(SqliteDb &database, FactBatchWriterResult &result,
                             "AND fm.planned=1 "
                             "WHERE d.batch=" +
                             token_text);
-  // Diagnostics are TU-owned. A single-route publication is the complete TU
-  // replacement; a multi-route owned-header publication must not associate
-  // those TU diagnostics with each independently versioned header route.
-  const bool publish_diagnostics = context.route_plan.routes().size() == 1;
-  if (publish_diagnostics) {
-    publish("diagnostic",
-            "d.id,fm.file_id," + config_text + ",fm.generation" +
-                " FROM diagnostic d JOIN temp.cidx_batch_file_map fm "
-                "ON fm.file_id=d.file_id WHERE fm.batch=" +
-                token_text + " AND fm.planned=1");
-  }
+  // Diagnostics are TU-owned, and the join below already says so: it matches
+  // only the planned route whose file *is* the diagnostic's own file, so a
+  // multi-route owned-header publication cannot associate a TU diagnostic
+  // with each independently versioned header route. Gating this on a
+  // single-route publication as well made the association depend on index
+  // history rather than on the sources: a cold run that also minted the TU's
+  // owned headers has several routes and dropped the row, while re-indexing
+  // the same unchanged source later has one route and added it, so the same
+  // corpus produced two different databases (S-078 integrated qualification).
+  publish("diagnostic",
+          "d.id,fm.file_id," + config_text + ",fm.generation" +
+              " FROM diagnostic d JOIN temp.cidx_batch_file_map fm "
+              "ON fm.file_id=d.file_id WHERE fm.batch=" +
+              token_text + " AND fm.planned=1");
 
   const auto derive = [&](std::string_view kind, std::string_view rows) {
     publish(kind, std::string(rows) +
@@ -2226,17 +2229,18 @@ void publish_applicability(SqliteDb &database, FactBatchWriterResult &result,
                       "'diagnostic' AND " +
                           scoped);
   }
-  if (publish_diagnostics) {
-    applicability_affected += execute(
-        database, result.report,
-        "INSERT OR REPLACE INTO fact_applicability(fact_kind,fact_id,file_id,"
-        "config_id,generation) SELECT 'diagnostic',d.id,fm.file_id," +
-            config_text +
-            ",fm.generation FROM diagnostic d JOIN "
-            "temp.cidx_batch_file_map fm ON fm.file_id=d.file_id WHERE "
-            "fm.batch=" +
-            token_text + " AND fm.planned=1");
-  }
+  // Diagnostic applicability is re-established rather than swept: the stale
+  // sweep above deliberately skips `diagnostic`, so the row is refreshed to
+  // the current generation here on every publication, single- or multi-route.
+  applicability_affected += execute(
+      database, result.report,
+      "INSERT OR REPLACE INTO fact_applicability(fact_kind,fact_id,file_id,"
+      "config_id,generation) SELECT 'diagnostic',d.id,fm.file_id," +
+          config_text +
+          ",fm.generation FROM diagnostic d JOIN "
+          "temp.cidx_batch_file_map fm ON fm.file_id=d.file_id WHERE "
+          "fm.batch=" +
+          token_text + " AND fm.planned=1");
   static_cast<void>(execute(
       database, result.report,
       "UPDATE fact_applicability SET generation=1 WHERE config_id=" +

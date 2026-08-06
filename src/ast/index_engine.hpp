@@ -31,6 +31,12 @@ namespace cidx {
 class Storage;
 }
 
+namespace cidx::storage {
+// Only ever passed by reference here, so the writer header stays out of every
+// consumer of this one.
+struct FactBatchWriterReport;
+} // namespace cidx::storage
+
 namespace cidx::ast {
 
 enum class IndexFailurePoint : std::uint8_t;
@@ -243,5 +249,14 @@ IndexOneOutcome run_index_one(cidx::Storage &db, IndexSession &session,
                               const cidx::File &rec, const std::string &path,
                               bool graph_enabled,
                               const ExtractionControl &control);
+
+// Publish one controlled-writer publication's telemetry into the active
+// profiling session. The serial pipeline calls this itself; the bounded
+// parallel scheduler owns its own writer and has to call it too, or the
+// default (parallel) configuration silently reports no writer telemetry at
+// all and the production measurement gate cannot run against it. A no-op
+// when `profiling` is false.
+void record_writer_profile(const cidx::storage::FactBatchWriterReport &report,
+                           bool profiling);
 
 } // namespace cidx::ast
