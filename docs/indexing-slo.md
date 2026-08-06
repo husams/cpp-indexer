@@ -29,7 +29,7 @@ threshold in prose.
 | Compiler | Apple clang 17.0.0 (clang-1700.6.3.2) |
 | Candidate executable | `cidx 0.53.0`, SHA-256 `cbe314f9f552828d…`, built from `e602ce8` with a clean tree. All four runs below used this one binary. |
 | Pre-feature executable | `d9f4754` — the merge immediately before the first PERF-002 change (`5ae38ad`, HSE-114). It advertises none of `--profile-json`, `--jobs`, `--clean`, `--defer-transforms`, so its arm runs without telemetry and that is recorded rather than assumed. |
-| Schema / catalog | version 40, catalog version 1, hash `c4f4262…9e37e9f7` |
+| Schema / catalog | version **41**, catalog version 1, hash `c4f4262…9e37e9f7` |
 | SQLite | 3.53.3, shipped rollback-journal profile (`journal_mode = DELETE`, `synchronous = FULL`) |
 | Trials | three per case per executable; every figure below is a median, with the trial series recorded in the JSON |
 | Corpus scale | absolute figures are from the 1,000-unit production matrix; the paired pre-feature A/B is `baseline:256:forward`. Both sizes are recorded in the reports and are stated wherever a number comes from one of them. |
@@ -242,9 +242,11 @@ every case the database passed `integrity_check`, reported no foreign-key
 violations, and the resumed run exited 0 — the interruption itself is clean.
 The probe nonetheless reports `recovered: false`, because it compares the
 resumed database against the pre-kill original and they differ. That difference
-is **not caused by the interruption**: an *uninterrupted* forced re-index of the
-same database produces the identical difference. See
-[Disclosed, not fixed](#disclosed-not-fixed) for what it is and who owns it.
+was **not caused by the interruption**: an *uninterrupted* forced re-index of
+the same database produced the identical difference, which was the containment
+accumulation described in [Nothing left disclosed](#nothing-left-disclosed).
+With that fixed, a forced re-index converges on the cold database and the probe
+is comparing like with like.
 
 ## Operating bounds
 
@@ -342,7 +344,7 @@ measured at a size it was not.
 
 ## Defects this integration found and fixed
 
-Four, all invisible until every mechanism was in one binary. Each has a
+Five, all invisible until every mechanism was in one binary. Each has a
 regression test that fails without its fix; none is a PERF-002 regression on
 its own.
 
@@ -367,29 +369,41 @@ its own.
    was read as "how many units have been recorded so far", which is the
    dispatch position only when units run one at a time. The per-unit
    cost-versus-position analysis this report is fitted against had no abscissa.
+5. **Containment counts climbed on every re-index**, and applicability rows for
+   `entity_node`/`entity_edge` appeared only on the second and later builds.
+   Both are described above; together they are why a corpus now produces one
+   database no matter how it was reached.
 
-## Disclosed, not fixed
+## Nothing left disclosed
 
-**Re-publishing a file inflates its `contains` edge counts.** The controlled
-writer accumulates `count` for that edge kind across publications, which is
-right when two different files each declare a containment and wrong when the
-*same* file is published twice: re-indexing a header adds its contribution
-again instead of replacing it. Two header edits move one measured count from 1
-to 3.
+The first draft of this report carried one open item: re-publishing a file
+inflated its `contains` edge counts. It is fixed rather than disclosed.
 
-Fixing it needs per-file attribution of the count, which the schema does not
-carry. Recomputing the count from `fact_applicability` looked promising and is
-not sound: it agrees for 3,740 of the 3,840 `contains` edges in the committed
-`index.db` and disagrees for the rest, so the intended semantics are genuinely
-S-073's to define rather than something a qualification story should decide.
+`contains` is the one edge kind several files legitimately contribute to — 82
+distinct files reach the busiest one in this repository's own index — so the
+writer accumulated its count on conflict. That is right across different files
+and wrong across repeated publications of the same file, and the dependency
+closure above is what made it reachable: before that, a header edit rebuilt
+nothing, so nothing was ever republished. The count is now **derived** — the
+number of (file, configuration) routes that declare into the edge, read from
+the applicability rows, which are per route and are swept correctly when a file
+is republished. Indexing the same file twice can no longer raise a count.
 
-Owner: S-073. Two things about its blast radius are worth stating plainly. It
-became reachable through a supported route only because of fix 1 above — before
-that a header edit rebuilt nothing, so nothing was ever re-published — and it
-is strictly better than what it replaced, which was an index quietly serving
-facts the header no longer supported. It affects a derived usage count, not the
-graph structure, and it is the reason the SQLite interruption probe reports
-`recovered: false` for a database that is otherwise sound.
+`entity_node` and `entity_edge` applicability went with it. Those rows were
+derived at translation-unit publication from tables the entity roll-up owns and
+fills in *after* a unit publishes, so a cold run derived nothing and every later
+run derived rows. Nothing read them, and they are gone.
+
+Schema **40 → 41**, with the migration in both storage layers: an existing
+database cannot recover the per-route split of an accumulated total, so the
+count is re-derived from the routes it already records. Verified on this
+repository's own 68 MiB index through `cidx db migrate` — in place, no
+re-index — 3,840 containment edges normalised, 272 write-only applicability
+rows removed, `integrity_check` ok, zero foreign-key violations.
+
+The property all of it exists for is now a test: a corpus indexed cold and the
+same corpus reached through three header edits and a revert produce the same
+database. It fails without any one of the fixes below.
 
 ## Reproducing this report
 
