@@ -993,9 +993,17 @@ def pre_feature_ab(
     baseline_trials: list[dict[str, Any]] = []
     candidate_trials: list[dict[str, Any]] = []
     for trial in range(1, trials + 1):
-        for label, executable, sink, profile in (
-            ("baseline", baseline, baseline_trials, False),
-            ("candidate", candidate, candidate_trials, True),
+        # The pre-feature executable predates the current schema by
+        # construction, so its databases are stamped with the predecessor
+        # version. Refusing them would make the comparison unmeasurable rather
+        # than catch drift; the arm that knows it is running such a binary says
+        # which version it expects, and the observed version is recorded in
+        # every snapshot either way.
+        for label, executable, sink, profile, schema in (
+            ("baseline", baseline, baseline_trials, False,
+             HSE95.PREDECESSOR_SCHEMA_VERSION),
+            ("candidate", candidate, candidate_trials, True,
+             HSE95.EXPECTED_SCHEMA_VERSION),
         ):
             case_root = work_root / label / f"trial-{trial}"
             case_root.mkdir(parents=True)
@@ -1003,6 +1011,7 @@ def pre_feature_ab(
                 PRODUCTION.run_synthetic_case(
                     executable, files, shape, many_header_target, order,
                     case_root, profile=profile, require_writer_metrics=False,
+                    expected_schema_version=schema,
                 )
             )
 
@@ -1048,6 +1057,10 @@ def pre_feature_ab(
     return {
         "case": f"{shape}:{files}:{order}",
         "trials": trials,
+        "schema_versions": {
+            "baseline": HSE95.PREDECESSOR_SCHEMA_VERSION,
+            "candidate": HSE95.EXPECTED_SCHEMA_VERSION,
+        },
         "baseline": baseline_aggregate,
         "candidate": candidate_aggregate,
         "timing": timing,

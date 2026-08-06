@@ -672,13 +672,17 @@ def _load_profile(
 
 
 def _snapshot(
-    database: Path, corpus_root: Path, require_coverage: bool
+    database: Path,
+    corpus_root: Path,
+    require_coverage: bool,
+    expected_schema_version: int = HSE95.EXPECTED_SCHEMA_VERSION,
 ) -> dict[str, Any]:
     return HSE95.database_snapshot(
         database,
         corpus_root,
         require_coverage=require_coverage,
         capture_canonical=True,
+        expected_schema_version=expected_schema_version,
     )
 
 
@@ -696,6 +700,7 @@ def run_stage(
     require_coverage: bool = True,
     require_writer_metrics: bool = True,
     index_jobs: int | None = None,
+    expected_schema_version: int = HSE95.EXPECTED_SCHEMA_VERSION,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     environment = dict(os.environ)
     environment["INDEXER_CACHE"] = str(cache)
@@ -713,7 +718,8 @@ def run_stage(
             command.extend(["--profile-sqlite-config", str(sqlite_path)])
     metrics = HSE95.run_timed(command, environment, case_root, label)
     database = cache / "index.db"
-    current = _snapshot(database, corpus_root, require_coverage)
+    current = _snapshot(database, corpus_root, require_coverage,
+                        expected_schema_version)
     stage_profile = (
         _load_profile(
             profile_path,
@@ -765,6 +771,7 @@ def _import(
     case_root: Path,
     label: str,
     previous: dict[str, Any] | None,
+    expected_schema_version: int = HSE95.EXPECTED_SCHEMA_VERSION,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     return run_stage(
         executable,
@@ -783,6 +790,7 @@ def _import(
         previous=previous,
         profile=False,
         require_coverage=False,
+        expected_schema_version=expected_schema_version,
     )
 
 
@@ -798,6 +806,7 @@ def run_synthetic_case(
     sqlite_experiment: dict[str, Any] | None = None,
     require_writer_metrics: bool = True,
     index_jobs: int | None = None,
+    expected_schema_version: int = HSE95.EXPECTED_SCHEMA_VERSION,
 ) -> dict[str, Any]:
     corpus = generate_corpus(
         case_root / "corpus", count, shape, many_header_target, order
@@ -808,7 +817,8 @@ def run_synthetic_case(
     previous = None
 
     measured, previous = _import(
-        executable, corpus, cache, case_root, "import", previous
+        executable, corpus, cache, case_root, "import", previous,
+        expected_schema_version
     )
     stages.append(measured)
     for label, arguments in (
@@ -828,6 +838,7 @@ def run_synthetic_case(
             sqlite_experiment=sqlite_experiment,
             require_writer_metrics=require_writer_metrics,
             index_jobs=index_jobs,
+            expected_schema_version=expected_schema_version,
         )
         stages.append(measured)
 
@@ -844,6 +855,7 @@ def run_synthetic_case(
         sqlite_experiment=sqlite_experiment,
         require_writer_metrics=require_writer_metrics,
         index_jobs=index_jobs,
+        expected_schema_version=expected_schema_version,
     )
     stages.append(measured)
 
@@ -862,6 +874,7 @@ def run_synthetic_case(
             sqlite_experiment=sqlite_experiment,
             require_writer_metrics=require_writer_metrics,
             index_jobs=index_jobs,
+            expected_schema_version=expected_schema_version,
         )
         stages.append(measured)
 
@@ -878,12 +891,14 @@ def run_synthetic_case(
         sqlite_experiment=sqlite_experiment,
         require_writer_metrics=require_writer_metrics,
         index_jobs=index_jobs,
+        expected_schema_version=expected_schema_version,
     )
     stages.append(measured)
 
     update_compile_database(corpus, define="HSE103_CONFIG_STATE=1")
     measured, previous = _import(
-        executable, corpus, cache, case_root, "configuration-import", previous
+        executable, corpus, cache, case_root, "configuration-import", previous,
+        expected_schema_version
     )
     stages.append(measured)
     measured, previous = run_stage(
@@ -898,6 +913,7 @@ def run_synthetic_case(
         sqlite_experiment=sqlite_experiment,
         require_writer_metrics=require_writer_metrics,
         index_jobs=index_jobs,
+        expected_schema_version=expected_schema_version,
     )
     stages.append(measured)
 
@@ -905,7 +921,8 @@ def run_synthetic_case(
     _write_header(generated, "generated_input", 1)
     update_compile_database(corpus, forced_include=generated)
     measured, previous = _import(
-        executable, corpus, cache, case_root, "generated-import", previous
+        executable, corpus, cache, case_root, "generated-import", previous,
+        expected_schema_version
     )
     stages.append(measured)
     measured, previous = run_stage(
@@ -920,6 +937,7 @@ def run_synthetic_case(
         sqlite_experiment=sqlite_experiment,
         require_writer_metrics=require_writer_metrics,
         index_jobs=index_jobs,
+        expected_schema_version=expected_schema_version,
     )
     stages.append(measured)
     mutate_header(generated, 2)
@@ -935,6 +953,7 @@ def run_synthetic_case(
         sqlite_experiment=sqlite_experiment,
         require_writer_metrics=require_writer_metrics,
         index_jobs=index_jobs,
+        expected_schema_version=expected_schema_version,
     )
     stages.append(measured)
 
@@ -998,6 +1017,7 @@ def run_self_index_case(
             require_coverage=coverage,
             require_writer_metrics=require_writer_metrics,
             index_jobs=index_jobs,
+            expected_schema_version=expected_schema_version,
         )
         stages.append(measured)
     return {

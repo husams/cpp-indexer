@@ -414,14 +414,15 @@ def assemble(
 
     # The rooted-traversal threshold belongs to S-098's pinned 8-unit
     # header-heavy corpus, so the term is judged there and reported at the
-    # larger header-heavy size too. Both come from a serial measurement: the
-    # quantity is a per-unit cost, and measuring it serially keeps worker
-    # contention out of the attribution.
+    # larger header-heavy size too. Both come from a run in the shipped worker
+    # topology, which is what the threshold was set against and what the SLO
+    # describes; the serial report is carried for identity and integrity but is
+    # not the source of this term.
     residuals = SLO.residual_terms(
         root_traversals=root_traversal_evidence(
             fusion,
             case=f"header-heavy:{fusion_representative_files}:forward",
-            at_scale=root_traversal_evidence(serial, case=header_case),
+            at_scale=root_traversal_evidence(shipped, case=header_case),
         ),
         scaling=scaling_evidence(
             shipped, small_case=small_case, large_case=scale_case,
