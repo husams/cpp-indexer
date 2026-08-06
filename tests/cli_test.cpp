@@ -28,6 +28,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <variant>
 #include <vector>
 
 #include "ast/index_engine.hpp"
@@ -4016,6 +4017,179 @@ TEST_SUITE("clang") {
     CHECK_FALSE(db.symbols_for_config(header->id, {configs[0], -1},
                                       cidx::FactCoverage::one)
                     .coverage_complete);
+  }
+
+  // Runs a command through the same entry point `main()` uses. `run_cli`
+  // above drives the compatibility parser, which `main()` only reaches for
+  // requests the application layer does not model -- and it does model
+  // `index`, so target selection there is what actually ships.
+  const auto run_shipped = [](const std::vector<std::string> &argv,
+                              const std::string &cache) {
+    const cli::ApplicationParseResult parsed =
+        cli::parse_application_request(argv);
+    const auto *request =
+        std::get_if<cidx::application::CommandRequest>(&parsed.value);
+    REQUIRE(request != nullptr);
+    std::ostringstream out;
+    std::ostringstream err;
+    cli::Context ctx;
+    ctx.cache_dir = cache;
+    ctx.index_path = cache + "/index.db";
+    ctx.logger = &cidx::Logger::root();
+    ctx.out = &out;
+    ctx.err = &err;
+    const int code = cli::run_application_request(*request, ctx);
+    INFO("cidx " << argv.front() << " failed: " << err.str());
+    return code;
+  };
+
+  // -- S-078: a changed dependency has to rebuild what depends on it ---------
+  //
+  // A header is never a target in its own right, so target selection used to
+  // report a stale header "deferred" and every unit that includes it
+  // "already": editing a header re-extracted nothing at all and the index
+  // silently kept the old facts. The reverse `include_edge` closure turns the
+  // change into the set of units that have to be re-extracted. These cases
+  // pin both directions -- the dependents rebuild, and nothing else does.
+
+  TEST_CASE("editing a header rebuilds the units that include it, and only "
+            "those") {
+    const std::string dir = make_temp_dir();
+    const std::string header = dir + "/fan_in.hpp";
+    const std::string included_a = dir + "/includes_a.cpp";
+    const std::string included_b = dir + "/includes_b.cpp";
+    const std::string independent = dir + "/independent.cpp";
+    write_file(header, "#pragma once\n"
+                       "namespace fan { inline int value() { return 1; } }\n");
+    write_file(included_a, "#include \"fan_in.hpp\"\n"
+                           "int use_a() { return fan::value(); }\n");
+    write_file(included_b, "#include \"fan_in.hpp\"\n"
+                           "int use_b() { return fan::value(); }\n");
+    write_file(independent, "int untouched() { return 7; }\n");
+
+    const std::string cache = dir + "/cache";
+    ::mkdir(cache.c_str(), 0755);
+    {
+      Storage db(cache + "/index.db");
+      db.add_component("fan-in", dir);
+      for (const std::string &source : {included_a, included_b, independent}) {
+        db.add_file_path(source, std::nullopt, std::nullopt,
+                         std::vector<std::string>{"-std=c++23", "-I", dir},
+                         std::string("clang++"));
+      }
+    }
+    REQUIRE(run_shipped({"index"}, cache) == 0);
+
+    const auto indexed_at = [&](const std::string &path) {
+      Storage db(cache + "/index.db");
+      const std::optional<cidx::File> row = db.get_file(path);
+      REQUIRE(row.has_value());
+      return row.value_or(cidx::File{}).indexed_at.value_or("");
+    };
+    const auto symbol_count = [&](const std::string &spelling) {
+      Storage db(cache + "/index.db");
+      return db.find_symbols(spelling, {}, 10).size();
+    };
+
+    REQUIRE(symbol_count("value") > 0);
+    CHECK(symbol_count("probe_after_edit") == 0);
+    const std::string independent_before = indexed_at(independent);
+    REQUIRE(!independent_before.empty());
+
+    // The header gains a symbol. Nothing else on disk changes.
+    write_file(header,
+               "#pragma once\n"
+               "namespace fan { inline int value() { return 1; } }\n"
+               "namespace fan { inline int probe_after_edit() { return 2; } }\n");
+    REQUIRE(run_shipped({"index"}, cache) == 0);
+
+    // The dependents were re-extracted: the header's new symbol is in the
+    // index. Without the closure this stays zero.
+    CHECK(symbol_count("probe_after_edit") > 0);
+    // And the unit that does not include the header was left alone.
+    CHECK(indexed_at(independent) == independent_before);
+
+    // Nothing is stale any more, so a following run does no work at all.
+    const std::string a_after = indexed_at(included_a);
+    REQUIRE(run_shipped({"index"}, cache) == 0);
+    CHECK(indexed_at(included_a) == a_after);
+    CHECK(indexed_at(independent) == independent_before);
+  }
+
+  TEST_CASE("a header change reaches units through another header") {
+    const std::string dir = make_temp_dir();
+    const std::string base = dir + "/chain_base.hpp";
+    const std::string middle = dir + "/chain_middle.hpp";
+    const std::string source = dir + "/chain_main.cpp";
+    write_file(base, "#pragma once\n"
+                     "namespace chain { inline int base_value() { return 1; } }\n");
+    write_file(middle, "#pragma once\n"
+                       "#include \"chain_base.hpp\"\n"
+                       "namespace chain { inline int middle_value() "
+                       "{ return base_value(); } }\n");
+    write_file(source, "#include \"chain_middle.hpp\"\n"
+                       "int chain_main() { return chain::middle_value(); }\n");
+
+    const std::string cache = dir + "/cache";
+    ::mkdir(cache.c_str(), 0755);
+    {
+      Storage db(cache + "/index.db");
+      db.add_component("chain", dir);
+      db.add_file_path(source, std::nullopt, std::nullopt,
+                       std::vector<std::string>{"-std=c++23", "-I", dir},
+                       std::string("clang++"));
+    }
+    REQUIRE(run_shipped({"index"}, cache) == 0);
+
+    const auto symbol_count = [&](const std::string &spelling) {
+      Storage db(cache + "/index.db");
+      return db.find_symbols(spelling, {}, 10).size();
+    };
+    REQUIRE(symbol_count("middle_value") > 0);
+    CHECK(symbol_count("deep_probe") == 0);
+
+    // Edit the header at the *bottom* of the chain. The only unit that
+    // includes it does so through another header.
+    write_file(base, "#pragma once\n"
+                     "namespace chain { inline int base_value() { return 1; } }\n"
+                     "namespace chain { inline int deep_probe() { return 3; } }\n");
+    REQUIRE(run_shipped({"index"}, cache) == 0);
+    CHECK(symbol_count("deep_probe") > 0);
+  }
+
+  TEST_CASE("a forced include is a dependency like any other") {
+    const std::string dir = make_temp_dir();
+    const std::string generated = dir + "/generated_input.hpp";
+    const std::string source = dir + "/forced_main.cpp";
+    write_file(generated, "#pragma once\n"
+                          "namespace gen { inline int seed() { return 1; } }\n");
+    write_file(source, "int forced_main() { return gen::seed(); }\n");
+
+    const std::string cache = dir + "/cache";
+    ::mkdir(cache.c_str(), 0755);
+    {
+      Storage db(cache + "/index.db");
+      db.add_component("forced", dir);
+      db.add_file_path(source, std::nullopt, std::nullopt,
+                       std::vector<std::string>{"-std=c++23", "-I", dir,
+                                                "-include", generated},
+                       std::string("clang++"));
+    }
+    REQUIRE(run_shipped({"index"}, cache) == 0);
+
+    const auto symbol_count = [&](const std::string &spelling) {
+      Storage db(cache + "/index.db");
+      return db.find_symbols(spelling, {}, 10).size();
+    };
+    REQUIRE(symbol_count("seed") > 0);
+    CHECK(symbol_count("generated_probe") == 0);
+
+    write_file(generated,
+               "#pragma once\n"
+               "namespace gen { inline int seed() { return 1; } }\n"
+               "namespace gen { inline int generated_probe() { return 4; } }\n");
+    REQUIRE(run_shipped({"index"}, cache) == 0);
+    CHECK(symbol_count("generated_probe") > 0);
   }
 
   // -- S-078: publication must not depend on index history -------------------
