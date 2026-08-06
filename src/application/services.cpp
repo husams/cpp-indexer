@@ -164,20 +164,24 @@ void log_parse_failure(Logger *logger, const std::string &path,
 // deliberately not content-hashed (see docs/tu-fact-cache.md); the normalized
 // toolchain and configuration identities cover their *set*, and the
 // translation-unit fact cache refuses a hit for a unit that records one.
-std::vector<std::pair<File, std::string>>
+//
+// Returns the paths of the units to re-extract. Paths rather than records on
+// purpose: dispatch order is the legacy apply key that `list_files()` already
+// returns, and both cross-translation-unit identity resolution and the bounded
+// parallel scheduler's publication order depend on it, so the caller builds
+// the target list in that order rather than appending to it.
+std::set<std::string>
 dependents_of_changed_inputs(Storage &db,
                              const std::vector<std::pair<File, std::string>> &registered,
                              const std::set<std::string> &changed,
                              const std::set<std::string> &already_targeted) {
-  std::vector<std::pair<File, std::string>> extra;
+  std::set<std::string> dependents;
   if (changed.empty()) {
-    return extra;
+    return dependents;
   }
   std::map<std::int64_t, std::string> path_of_file;
-  std::map<std::string, const std::pair<File, std::string> *> record_of_path;
   for (const auto &entry : registered) {
     path_of_file.emplace(entry.first.id, entry.second);
-    record_of_path.emplace(entry.second, &entry);
   }
 
   std::set<std::string> visited = changed;
@@ -252,12 +256,9 @@ dependents_of_changed_inputs(Storage &db,
         files::is_header(path)) {
       continue;
     }
-    const auto found = record_of_path.find(path);
-    if (found != record_of_path.end()) {
-      extra.push_back(*found->second);
-    }
+    dependents.insert(path);
   }
-  return extra;
+  return dependents;
 }
 
 // The one index lifecycle. Both the in-place path and the clean-rebuild path
@@ -325,18 +326,23 @@ protocol::ResultEnvelope run_index_pass(
     }
 
     std::set<std::string> targeted;
-    for (const auto &[file, path] : registered) {
+    for (const auto &[_, path] : registered) {
       if (changed.contains(path) && !files::is_header(path)) {
-        targets.emplace_back(file, path);
         targeted.insert(path);
       }
     }
     // A changed header is not a target in its own right; the units that
     // include it are what has to be re-extracted.
-    for (auto &entry :
-         dependents_of_changed_inputs(db, registered, changed, targeted)) {
-      targeted.insert(entry.second);
-      targets.push_back(std::move(entry));
+    const std::set<std::string> dependents =
+        dependents_of_changed_inputs(db, registered, changed, targeted);
+    targeted.insert(dependents.begin(), dependents.end());
+    // One ordered pass, so dispatch order stays the legacy apply key
+    // regardless of whether a unit was selected by its own change or by a
+    // dependency's.
+    for (const auto &[file, path] : registered) {
+      if (targeted.contains(path)) {
+        targets.emplace_back(file, path);
+      }
     }
 
     // Accounting, in `list_files` order so the record set stays deterministic.
