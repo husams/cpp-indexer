@@ -3,6 +3,13 @@ allowed_commands:
   - ctest
 allowed_working_directories:
   - .
+# Executable items resolve their command against PATH = os.defpath
+# (/usr/bin:/bin), which does not contain this project's toolchain. Without
+# PATH passthrough every ctest item fails command_unavailable before anything
+# runs, so no acceptance criterion can execute. Only PATH is passed; the
+# command allow-list above is unchanged.
+allowed_environment_variables:
+  - PATH
 max_timeout_seconds: 900
 max_output_bytes: 1048576
 max_batch_seconds: 1800
