@@ -4,7 +4,9 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <csignal>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 
@@ -33,8 +35,19 @@ auto sync_file(const std::string &path) -> bool { return sync_path(path); }
 
 auto sync_directory(const std::string &path) -> bool { return sync_path(path); }
 
+void terminate_by_interrupt() {
+  // Restore the default disposition first: the point is to die here, not to be
+  // observed by whatever a caller may have installed.
+  std::signal(SIGINT, SIG_DFL);
+  std::raise(SIGINT);
+  // Unreachable under the default disposition; present so the contract holds
+  // even if SIGINT is blocked by an inherited mask.
+  std::_Exit(EXIT_FAILURE);
+}
+
 auto publish_file_atomically(const std::string &source,
-                             const std::string &destination) -> std::string {
+                             const std::string &destination,
+                             const PublishHooks &hooks) -> std::string {
   // Durability before visibility: the bytes must survive a crash before any
   // reader can reach them under the published name.
   if (!sync_file(source)) {
@@ -45,9 +58,15 @@ auto publish_file_atomically(const std::string &source,
   // durability hardening step, not a correctness precondition for the rename.
   (void)sync_directory(directory);
 
+  if (hooks.before_rename) {
+    hooks.before_rename();
+  }
   if (std::rename(source.c_str(), destination.c_str()) != 0) {
     return "cannot publish " + source + " over " + destination + ": " +
            std::strerror(errno);
+  }
+  if (hooks.after_rename) {
+    hooks.after_rename();
   }
   (void)sync_directory(directory);
   return {};

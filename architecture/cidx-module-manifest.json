@@ -290,7 +290,10 @@
         "foundation.util",
         "model.contracts"
       ],
-      "description": "Binds the parallelism primitives to production indexing: isolated per-worker extraction contexts, and publication through the single controlled writer in legacy apply order."
+      "allowedExternal": [
+        "filesystem"
+      ],
+      "description": "Binds the parallelism primitives to production indexing: isolated per-worker extraction contexts, and publication through the single controlled writer in legacy apply order. Owns the lifetime of the per-run extraction snapshot file, which is why it declares filesystem."
     },
     {
       "id": "product.application",

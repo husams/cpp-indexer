@@ -15,6 +15,7 @@
 
 #include "application/clean_rebuild.hpp"
 #include "storage/database_verification.hpp"
+#include "storage/sqlite.hpp"
 #include "storage/storage.hpp"
 #include "util/hashing.hpp"
 
@@ -26,6 +27,7 @@ using cidx::application::clean_rebuild_candidate_path;
 using cidx::application::clean_rebuild_failure_point_from_name;
 using cidx::application::clean_rebuild_failure_point_name;
 using cidx::application::clean_rebuild_file_digest;
+using cidx::application::clean_rebuild_source_refusal;
 using cidx::application::CleanRebuildFailurePoint;
 using cidx::application::CleanRebuildInputs;
 using cidx::application::CleanRebuildVerification;
@@ -108,9 +110,13 @@ TEST_CASE("failure point names round-trip and reject unknown spellings") {
         CleanRebuildFailurePoint::after_inputs_captured,
         CleanRebuildFailurePoint::after_candidate_created,
         CleanRebuildFailurePoint::after_inputs_replayed,
+        CleanRebuildFailurePoint::during_extraction,
+        CleanRebuildFailurePoint::during_writer_commit,
         CleanRebuildFailurePoint::after_candidate_indexed,
         CleanRebuildFailurePoint::after_verification,
-        CleanRebuildFailurePoint::before_publication}) {
+        CleanRebuildFailurePoint::before_publication,
+        CleanRebuildFailurePoint::during_publication,
+        CleanRebuildFailurePoint::after_rename}) {
     const std::string name(clean_rebuild_failure_point_name(point));
     const auto parsed = clean_rebuild_failure_point_from_name(name);
     REQUIRE(parsed.has_value());
@@ -118,6 +124,31 @@ TEST_CASE("failure point names round-trip and reject unknown spellings") {
   }
   CHECK_FALSE(clean_rebuild_failure_point_from_name("publish").has_value());
   CHECK_FALSE(clean_rebuild_failure_point_from_name("").has_value());
+}
+
+// The four in-phase points are the ones AC2 names. They must be spellable and
+// must be distinct from the boundary points they are often confused with: a
+// fault BETWEEN phases proves nothing about a fault INSIDE one.
+TEST_CASE("the in-phase failure points are distinct from the boundaries") {
+  const auto point = [](const char *name) {
+    const auto parsed = clean_rebuild_failure_point_from_name(name);
+    REQUIRE(parsed.has_value());
+    return *parsed;
+  };
+  CHECK(point("during-extraction") ==
+        CleanRebuildFailurePoint::during_extraction);
+  CHECK(point("during-writer-commit") ==
+        CleanRebuildFailurePoint::during_writer_commit);
+  CHECK(point("during-publication") ==
+        CleanRebuildFailurePoint::during_publication);
+  CHECK(point("after-rename") == CleanRebuildFailurePoint::after_rename);
+
+  CHECK(point("during-extraction") !=
+        point("after-candidate-indexed")); // extraction: inside vs after
+  CHECK(point("during-writer-commit") !=
+        point("after-candidate-indexed")); // commit: inside vs after
+  CHECK(point("during-publication") !=
+        point("before-publication")); // rename window: inside vs before
 }
 
 TEST_CASE("the candidate is a sibling of the target so publication renames") {
@@ -180,6 +211,148 @@ TEST_CASE("capture of a missing database yields empty inputs") {
   CHECK(inputs.files.empty());
   CHECK(inputs.components.empty());
   CHECK(inputs.source_digest.empty());
+}
+
+// AC4, migration compatibility -- the version reported must be the version ON
+// DISK, and the captured catalog must travel with the inputs rather than being
+// re-read from the serving file afterwards.
+TEST_CASE("capture reports the schema version the serving database carries") {
+  const Fixture fixture("capture-schema");
+  const CleanRebuildInputs inputs =
+      capture_clean_rebuild_inputs(fixture.index_path.string());
+  CHECK(inputs.schema_version == cidx::kSchemaVersion);
+  CHECK_FALSE(inputs.migrated_for_capture);
+  CHECK(inputs.catalog == cidx::storage::read_database_catalog_identity(
+                              fixture.index_path.string()));
+}
+
+TEST_CASE(
+    "a current, self-contained serving database is an acceptable source") {
+  const Fixture fixture("source-ok");
+  CHECK(clean_rebuild_source_refusal(fixture.index_path.string()).empty());
+}
+
+TEST_CASE("no database in service is an acceptable source") {
+  const auto root = test_root("source-absent");
+  CHECK(clean_rebuild_source_refusal((root / "absent.db").string()).empty());
+}
+
+// AC4, migration compatibility -- the property the criterion actually asks for.
+// An older serving database is NOT refused: it is brought forward on a PRIVATE
+// COPY, the inputs are captured from that copy, and the file in service is left
+// byte-for-byte unchanged. Preservation, not refusal.
+TEST_CASE("an out-of-date serving database is migrated on a private copy") {
+  const Fixture fixture("capture-migrate");
+  const auto expected = cidx::storage::read_database_catalog_identity(
+      fixture.index_path.string());
+  {
+    cidx::SqliteDb raw(fixture.index_path.string());
+    raw.exec("UPDATE meta SET value = '39' WHERE key = 'schema_version'");
+  }
+  const std::string before = digest_of(fixture.index_path);
+  REQUIRE(clean_rebuild_source_refusal(fixture.index_path.string()).empty());
+
+  const CleanRebuildInputs inputs =
+      capture_clean_rebuild_inputs(fixture.index_path.string());
+  CHECK(inputs.migrated_for_capture);
+  CHECK(inputs.schema_version == 39);
+  // The catalog survived the migration intact: this is the "preserves" half.
+  CHECK(inputs.catalog == expected);
+  CHECK(inputs.files.size() == 3);
+  CHECK(inputs.components.size() == 2);
+
+  // And the database in service was never written to.
+  CHECK(digest_of(fixture.index_path) == before);
+  CHECK(cidx::storage::inspect_database_integrity(fixture.index_path.string())
+            .schema_version == 39);
+  // The working copy is a working file, not a result.
+  CHECK_FALSE(std::filesystem::exists(
+      cidx::application::clean_rebuild_migration_copy_path(
+          fixture.index_path.string())));
+}
+
+// The other direction is refused: this binary cannot bring a future schema
+// backwards, and must say so rather than misread it.
+TEST_CASE("a newer-than-binary serving database is refused") {
+  const Fixture fixture("source-newer");
+  {
+    cidx::SqliteDb raw(fixture.index_path.string());
+    raw.exec("UPDATE meta SET value = '9999' WHERE key = 'schema_version'");
+  }
+  const std::string refusal =
+      clean_rebuild_source_refusal(fixture.index_path.string());
+  REQUIRE_FALSE(refusal.empty());
+  CHECK(refusal.contains("schema v9999"));
+  CHECK(refusal.contains("cannot downgrade"));
+}
+
+// AC4, backup/recovery. Publication replaces the main database file with one
+// rename. In WAL mode the committed content is not all in that file, so the
+// rename would publish a main file against a sidecar describing a different
+// database. Refused before anything is built, and named as WAL rather than as
+// a generic read failure — a WAL database cannot be opened by the read-only
+// qualification path at all, so the header is what has to answer.
+TEST_CASE("a WAL-mode serving database is refused") {
+  const Fixture fixture("source-wal");
+  CHECK_FALSE(cidx::storage::database_uses_write_ahead_log(
+      fixture.index_path.string()));
+  {
+    cidx::SqliteDb raw(fixture.index_path.string());
+    raw.exec("PRAGMA journal_mode = WAL");
+  }
+  // Sidecars are removed so the header check, not the sidecar check, is what
+  // refuses: WAL mode is persisted in the database file header.
+  for (const std::string &sidecar :
+       cidx::storage::database_sidecar_paths(fixture.index_path.string())) {
+    std::error_code ignored;
+    std::filesystem::remove(sidecar, ignored);
+  }
+  CHECK(cidx::storage::database_uses_write_ahead_log(
+      fixture.index_path.string()));
+
+  const std::string refusal =
+      clean_rebuild_source_refusal(fixture.index_path.string());
+  REQUIRE_FALSE(refusal.empty());
+  CHECK(refusal.contains("WAL journal mode"));
+}
+
+// The other rollback modes are NOT refused, and that is deliberate: TRUNCATE
+// and PERSIST leave the committed database wholly inside the main file exactly
+// as DELETE does, so a rename does replace the database. What they can leave
+// behind is a -journal sidecar, which the sidecar check above covers.
+TEST_CASE("the other rollback journal modes are accepted") {
+  for (const char *mode : {"TRUNCATE", "PERSIST", "MEMORY", "OFF"}) {
+    CAPTURE(mode);
+    const Fixture fixture("source-rollback");
+    {
+      cidx::SqliteDb raw(fixture.index_path.string());
+      raw.exec(std::string("PRAGMA journal_mode = ") + mode);
+    }
+    for (const std::string &sidecar :
+         cidx::storage::database_sidecar_paths(fixture.index_path.string())) {
+      std::error_code ignored;
+      std::filesystem::remove(sidecar, ignored);
+    }
+    CHECK_FALSE(cidx::storage::database_uses_write_ahead_log(
+        fixture.index_path.string()));
+    CHECK(clean_rebuild_source_refusal(fixture.index_path.string()).empty());
+  }
+}
+
+// AC4, backup/recovery. Even in DELETE mode a leftover sidecar means the main
+// file is not the whole database; publishing over it would strand state.
+TEST_CASE("a serving database with a stranded sidecar is refused") {
+  for (const char *suffix : {"-wal", "-shm", "-journal"}) {
+    CAPTURE(suffix);
+    const Fixture fixture("source-sidecar");
+    const std::string sidecar = fixture.index_path.string() + suffix;
+    write_file(sidecar, "leftover");
+
+    const std::string refusal =
+        clean_rebuild_source_refusal(fixture.index_path.string());
+    REQUIRE_FALSE(refusal.empty());
+    CHECK(refusal.contains("sidecar"));
+  }
 }
 
 TEST_CASE("verification accepts a faithful candidate") {
@@ -283,6 +456,37 @@ TEST_CASE("publication replaces the target atomically") {
   CHECK(refusal.empty());
   CHECK(digest_of(fixture.index_path) == candidate_digest);
   CHECK_FALSE(std::filesystem::exists(candidate_path));
+}
+
+// AC4, backup/recovery. The precondition is re-established at the rename
+// itself, not only at capture: a sidecar that appeared beside EITHER file while
+// the rebuild ran means a bare rename no longer replaces a whole database.
+TEST_CASE("publication is refused when a sidecar sits beside either file") {
+  for (const bool beside_target : {true, false}) {
+    CAPTURE(beside_target);
+    const Fixture fixture("publish-sidecar");
+    const std::string source_digest = digest_of(fixture.index_path);
+    const auto candidate_path = fixture.root / "candidate.db";
+    {
+      Storage candidate(candidate_path.string());
+      candidate.add_component("published", (fixture.root / "p").string(),
+                              "repo");
+    }
+    write_file((beside_target ? fixture.index_path.string()
+                              : candidate_path.string()) +
+                   "-wal",
+               "leftover");
+
+    const std::string refusal = publish_clean_rebuild_candidate(
+        candidate_path.string(), fixture.index_path.string(), source_digest,
+        CleanRebuildFailurePoint::none);
+    REQUIRE_FALSE(refusal.empty());
+    CHECK(refusal.contains("-wal"));
+    // Refused means refused: the serving database is still the one captured and
+    // the candidate is still on disk for the caller to clean up.
+    CHECK(digest_of(fixture.index_path) == source_digest);
+    CHECK(std::filesystem::exists(candidate_path));
+  }
 }
 
 TEST_CASE("publication is refused when the serving database changed") {

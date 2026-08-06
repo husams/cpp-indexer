@@ -43,7 +43,9 @@ public:
         journal_(path_ + "-journal") {
     std::error_code discard;
     std::filesystem::remove(path_, discard);
-    db.raw_db().backup_to(path_);
+    // Through the persistence service's named backup API, not the raw
+    // connection: raw SQLite access belongs to the persistence module.
+    db.backup_to(path_);
   }
 
   ExtractionSnapshot(const ExtractionSnapshot &) = delete;

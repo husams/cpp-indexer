@@ -63,6 +63,33 @@ struct DatabaseCatalogIdentity {
 [[nodiscard]] auto read_database_pending_file_count(const std::string &path)
     -> std::int64_t;
 
+// Whether `path` is a write-ahead-log database.
+//
+// Read from the SQLite file header (the format read/write version bytes at
+// offsets 18 and 19: 1 = rollback journal, 2 = WAL) rather than through a
+// connection, because a WAL database cannot be opened by the read-only
+// qualification path at all — SQLite must create the `-shm` file to read it,
+// which a read-only open refuses. The header is therefore the only source that
+// answers for every database this code must qualify.
+//
+// This matters to atomic publication: a rollback-journal database is wholly
+// contained in its main file, so replacing that file replaces the database. A
+// WAL database's committed content also lives in the `-wal` sidecar, so the
+// same rename would publish a main file against a sidecar that describes a
+// different database. The other rollback modes (TRUNCATE, PERSIST) are legacy
+// modes and are contained in the main file exactly like DELETE; what they can
+// leave behind is a `-journal` sidecar, which database_sidecar_paths covers.
+//
+// False for a file that does not exist or is not a SQLite database.
+[[nodiscard]] auto database_uses_write_ahead_log(const std::string &path)
+    -> bool;
+
+// The sidecar files SQLite may keep beside `path` ("-wal", "-shm", "-journal").
+// Publication is a rename of the main file only, so a caller that must replace
+// a database atomically has to prove no sidecar carries state.
+[[nodiscard]] auto database_sidecar_paths(const std::string &path)
+    -> std::vector<std::string>;
+
 // The fact families covered by read_database_semantic_digest, in digest order.
 // Exposed so the qualification suites can assert the coverage list rather than
 // re-deriving it.

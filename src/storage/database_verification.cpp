@@ -2,6 +2,8 @@
 
 #include <array>
 #include <exception>
+#include <fstream>
+#include <ios>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -181,6 +183,36 @@ auto scalar_count(SqliteDb &db, std::string_view sql) -> std::int64_t {
 
 auto semantic_digest_fact_families() -> std::vector<std::string_view> {
   return {"file", "symbol", "edge", "definition", "diagnostic", "include_edge"};
+}
+
+auto database_uses_write_ahead_log(const std::string &path) -> bool {
+  // The 100-byte SQLite header: the magic string, then the format write and
+  // read version bytes at offsets 18 and 19. 2 means WAL in either position.
+  static constexpr std::string_view kMagic = "SQLite format 3";
+  static constexpr std::streamsize kHeaderBytes = 20;
+  static constexpr std::size_t kWriteVersionOffset = 18;
+  static constexpr std::size_t kReadVersionOffset = 19;
+  static constexpr char kWalVersion = 2;
+
+  std::ifstream file(path, std::ios::binary);
+  if (!file) {
+    return false;
+  }
+  std::array<char, kHeaderBytes> header{};
+  file.read(header.data(), kHeaderBytes);
+  if (file.gcount() != kHeaderBytes) {
+    return false;
+  }
+  if (std::string_view(header.data(), kMagic.size()) != kMagic) {
+    return false;
+  }
+  return header.at(kWriteVersionOffset) == kWalVersion ||
+         header.at(kReadVersionOffset) == kWalVersion;
+}
+
+auto database_sidecar_paths(const std::string &path)
+    -> std::vector<std::string> {
+  return {path + "-wal", path + "-shm", path + "-journal"};
 }
 
 auto inspect_database_integrity(const std::string &path)

@@ -173,6 +173,26 @@ class Harness:
                 "--actor",
                 "developer",
             )
+        # Every acceptance criterion is subject to the
+        # acceptance_criteria_verified gate, whether or not it declares an
+        # executable check, and criteria are proven by an independent
+        # reviewer's verdict rather than by a tick. Running the validations
+        # above is the evidence; recording the verdict is what the gate reads.
+        evidence = (
+            "validation run-all passed" if commands else "reviewed by hand: no "
+            "executable check declared"
+        )
+        for item_id in item_ids:
+            self.run(
+                "criteria",
+                "verify",
+                str(item_id),
+                "--met",
+                "--evidence",
+                evidence,
+                "--actor",
+                "reviewer",
+            )
         self.run(
             "pr",
             "set",
