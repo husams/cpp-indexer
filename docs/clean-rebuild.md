@@ -93,18 +93,54 @@ scopes rather than publishing an incomplete database:
 - file arguments are rejected;
 - `--clean` outside `index rebuild` is a usage error (exit 2).
 
-The serving database must already be at the current schema version; migrate it
-first (`cidx migrate`) if it is older. The input capture reads it through the
-ordinary read-only storage handle, which does not migrate.
+## Source preconditions
+
+Two properties of the database in service are checked read-only, before anything
+is built, and a failure is an early refusal naming the remedy:
+
+- **schema identity** — the serving database must already be at the current
+  schema version. Input capture reads it through the ordinary read-only storage
+  handle, which by design does not migrate, and that handle refuses an
+  out-of-date database outright rather than misreading its catalog. Run
+  `cidx migrate` first.
+- **whole-file containment** — the database must be wholly contained in its main
+  file, because publication replaces that file and nothing else. A **WAL**
+  database is refused: its committed content also lives in the `-wal` sidecar,
+  so the rename would publish a main file against a sidecar describing a
+  different database. Any existing `-wal`, `-shm` or `-journal` sidecar is
+  refused for the same reason, including one left behind by a crashed writer.
+  The other rollback modes (`DELETE`, `TRUNCATE`, `PERSIST`) are accepted:
+  their committed database *is* the main file.
+
+The containment check is re-established at the rename itself, not only at
+capture, so a sidecar that appears while the rebuild runs also refuses.
 
 ## Failure injection
 
-`CIDX_CLEAN_REBUILD_FAIL_AT` aborts the rebuild at a named phase boundary. It
-exists for qualification and is not part of the supported CLI surface. Valid
-values, in execution order:
+`CIDX_CLEAN_REBUILD_FAIL_AT` aborts the rebuild at a named point. It exists for
+qualification and is not part of the supported CLI surface.
 
-`after-inputs-captured`, `after-candidate-created`, `after-inputs-replayed`,
-`after-candidate-indexed`, `after-verification`, `before-publication`.
+Two kinds of point exist and they are not interchangeable. **Boundary** points
+abort *between* phases; **in-phase** points abort *inside* one, which is the
+only way to exercise a partially applied translation unit, a half-written unit
+of work, or an interrupted rename. In execution order:
+
+| Value | Kind | Aborts |
+|---|---|---|
+| `after-inputs-captured` | boundary | after the input catalog is captured |
+| `after-candidate-created` | boundary | after the candidate database exists |
+| `after-inputs-replayed` | boundary | after the catalog is replayed into it |
+| `during-extraction` | **in-phase** | inside the translation-unit pipeline, while that unit's facts are being handed to the storage adapter |
+| `during-writer-commit` | **in-phase** | inside the controlled writer, as the unit of work commits with its facts staged |
+| `after-candidate-indexed` | boundary | after the index pass completes |
+| `after-verification` | boundary | after the candidate passes every check |
+| `before-publication` | boundary | after the pre-rename gate, before publication |
+| `during-publication` | **in-phase** | delivers SIGINT *inside* the publication window — after the candidate and directory are on stable storage, before `rename(2)` |
+| `after-rename` | **in-phase** | delivers SIGINT immediately after `rename(2)` returns |
+
+The two in-phase extraction points are delivered by the serial translation-unit
+pipeline's injector, which the bounded parallel scheduler does not carry;
+combining them with `--jobs > 1` is refused rather than silently ignored.
 
 An unset or unrecognised value means "no injection", so a stray environment
 variable can never silently skip publication.

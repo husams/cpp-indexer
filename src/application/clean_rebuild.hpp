@@ -39,17 +39,39 @@ class Storage;
 
 namespace cidx::application {
 
-// Phase boundaries of the clean-rebuild sequence, in execution order. A test
-// injects a failure at a boundary to prove the serving database survives a
+// Fault points of the clean-rebuild sequence, in execution order. A test
+// injects a failure at one of them to prove the serving database survives a
 // failure at every step. The ordering is the contract; the values are internal.
+//
+// Two kinds appear here and they are NOT interchangeable:
+//   * boundary points (`after_*`, `before_publication`) abort BETWEEN phases;
+//   * in-phase points (`during_*`) abort INSIDE a phase, mid-flight, which is
+//     the only way to exercise a partially applied translation unit, a
+//     half-written unit of work, or an interrupted rename.
 enum class CleanRebuildFailurePoint : std::uint8_t {
   none,
   after_inputs_captured,
   after_candidate_created,
   after_inputs_replayed,
+  // In-phase: throws inside the translation-unit pipeline while facts are being
+  // handed to the storage adapter, i.e. with the extraction of that unit
+  // already under way. Routed to ast::IndexFailurePoint::adapter.
+  during_extraction,
+  // In-phase: throws inside the controlled writer as the unit of work commits,
+  // after its facts were staged. Routed to ast::IndexFailurePoint::commit.
+  during_writer_commit,
   after_candidate_indexed,
   after_verification,
   before_publication,
+  // In-phase: delivers SIGINT with the default disposition INSIDE the
+  // publication window — after the candidate and the directory are on stable
+  // storage, before rename(2). The process dies with the serving database still
+  // in place.
+  during_publication,
+  // In-phase: delivers the same SIGINT immediately after rename(2) returns. The
+  // serving path now holds the candidate; the assertion is that what a reader
+  // finds there is a whole, healthy database rather than a torn file.
+  after_rename,
 };
 
 // Stable spelling used by diagnostics and by the CIDX_CLEAN_REBUILD_FAIL_AT
@@ -153,8 +175,33 @@ verify_clean_rebuild_candidate(const std::string &candidate_path,
                                bool require_complete)
     -> CleanRebuildVerification;
 
+// Whether a serving database may be the source of a clean rebuild at all.
+// Returns an empty string when it may, or the refusal reason.
+//
+// Two properties are checked, both read-only, both BEFORE anything is built:
+//
+//   * schema identity — capture reads the serving database through the ordinary
+//     read-only handle, which by design does not migrate. Reading an older (or
+//     newer) schema through today's queries would silently mis-capture the
+//     catalog, so an out-of-date database is refused with an actionable message
+//     rather than rebuilt from a misread input set;
+//   * whole-file containment — publication replaces the main database file with
+//     one rename. That is only equivalent to replacing the database when the
+//     database IS the main file. A WAL-mode database keeps committed content in
+//     its `-wal` sidecar, and a leftover sidecar of any kind would survive the
+//     rename and be interpreted against the newly published file. Refused.
+//
+// A path with no database in service is accepted: there is nothing to misread
+// and nothing to strand.
+[[nodiscard]] auto clean_rebuild_source_refusal(const std::string &index_path)
+    -> std::string;
+
 // Capture the rebuild inputs from a serving database WITHOUT writing to it.
 // Throws CidxError when the database cannot be opened read-only.
+//
+// `schema_version` reports the version the SERVING database actually carries,
+// not the version this binary was built for; the two are compared by
+// clean_rebuild_source_refusal.
 [[nodiscard]] auto capture_clean_rebuild_inputs(const std::string &index_path)
     -> CleanRebuildInputs;
 

@@ -141,10 +141,14 @@ void log_parse_failure(Logger *logger, const std::string &path,
 // `index_path` is the on-disk location of `db`. Bounded parallel extraction
 // needs it because each worker opens its own read-only handle to the same
 // database; every other path ignores it.
-protocol::ResultEnvelope run_index_pass(Storage &db,
-                                        const std::string &index_path,
-                                        const IndexRequest &request,
-                                        ApplicationContext &context) {
+// `extraction_failure` is the in-phase fault the clean-rebuild qualification
+// injects into the translation-unit pipeline itself. It is
+// IndexFailurePoint::none on every production path and on the in-place path;
+// only the CIDX_CLEAN_REBUILD_FAIL_AT hook can set it.
+protocol::ResultEnvelope run_index_pass(
+    Storage &db, const std::string &index_path, const IndexRequest &request,
+    ApplicationContext &context,
+    ast::IndexFailurePoint extraction_failure = ast::IndexFailurePoint::none) {
   std::optional<std::string> source_root;
   if (request.source) {
     const std::optional<Component> component =
@@ -364,9 +368,9 @@ protocol::ResultEnvelope run_index_pass(Storage &db,
       if (context.cancellation().cancelled()) {
         break;
       }
-      const ast::IndexOneOutcome outcome = indexer.index_one(
-          file, path, request.graph, ast::IndexFailurePoint::none,
-          request.no_front_end_reuse);
+      const ast::IndexOneOutcome outcome =
+          indexer.index_one(file, path, request.graph, extraction_failure,
+                            request.no_front_end_reuse);
       record_outcome(file, path, outcome);
     }
   }
@@ -540,11 +544,41 @@ protocol::ResultEnvelope run_clean_rebuild(const std::string &index_path,
                          "accept --source");
   }
 
+  // Whether the database in service can be the source of a rebuild at all:
+  // schema identity and whole-file containment, both checked read-only before
+  // anything is built. Refusing here costs nothing; discovering it after a full
+  // rebuild would either misread the catalog or strand a sidecar.
+  if (const std::string refusal = clean_rebuild_source_refusal(index_path);
+      !refusal.empty()) {
+    return service_error("index", context, "invalid_input",
+                         "clean rebuild refused: " + refusal);
+  }
+
   const CleanRebuildFailurePoint failure =
       clean_rebuild_failure_point_from_environment();
   const auto injected = [&](CleanRebuildFailurePoint point) {
     return failure == point;
   };
+  // The in-phase faults are delivered by the serial translation-unit pipeline's
+  // injector, which the bounded parallel scheduler does not carry. Rather than
+  // accept the flag and silently not inject it, the combination is refused.
+  const ast::IndexFailurePoint extraction_failure = [&] {
+    switch (failure) {
+    case CleanRebuildFailurePoint::during_extraction:
+      return ast::IndexFailurePoint::adapter;
+    case CleanRebuildFailurePoint::during_writer_commit:
+      return ast::IndexFailurePoint::commit;
+    default:
+      return ast::IndexFailurePoint::none;
+    }
+  }();
+  if (extraction_failure != ast::IndexFailurePoint::none && request.jobs > 1) {
+    return service_error(
+        "index", context, "invalid_input",
+        "clean rebuild in-phase failure injection (" +
+            std::string(clean_rebuild_failure_point_name(failure)) +
+            ") is delivered by the serial extraction path; use --jobs 1");
+  }
   const auto injection_error = [&](CleanRebuildFailurePoint point) {
     return service_error(
         "index", context, "backend_error",
@@ -603,7 +637,8 @@ protocol::ResultEnvelope run_clean_rebuild(const std::string &index_path,
     // Every replayed file starts pending, so the ordinary "index everything
     // pending" lifecycle is exactly what a clean rebuild needs.
     pass_request.action = IndexAction::update;
-    pass = run_index_pass(candidate, candidate_path, pass_request, context);
+    pass = run_index_pass(candidate, candidate_path, pass_request, context,
+                          extraction_failure);
   } catch (const std::exception &error) {
     return service_error("index", context, "backend_error",
                          std::string("clean rebuild failed: ") + error.what());

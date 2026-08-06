@@ -228,6 +228,124 @@ TEST_SUITE("clang") {
               corpus.index_path.string()) == 0);
   }
 
+  // AC2, in-phase faults. The boundary points above abort BETWEEN phases and so
+  // never observe a partially applied translation unit. These two abort INSIDE
+  // the pipeline: `during-extraction` throws while that unit's facts are being
+  // handed to the storage adapter, and `during-writer-commit` throws inside the
+  // controlled writer as the unit of work commits, with its facts staged.
+  TEST_CASE("an in-phase extraction or commit fault leaves the serving "
+            "database unchanged") {
+    Corpus corpus("in-phase");
+    REQUIRE(corpus.ready);
+    const std::string before = digest_of(corpus.index_path);
+    const std::string before_semantic =
+        cidx::storage::read_database_semantic_digest(
+            corpus.index_path.string());
+
+    for (const char *point : {"during-extraction", "during-writer-commit"}) {
+      CAPTURE(point);
+      const RunOutcome outcome = run_cidx({"index", "rebuild", "--clean"},
+                                          corpus.cache.string(), point);
+      // The candidate could not be completed, so nothing is publishable.
+      CHECK(outcome.exit_code != 0);
+      CHECK(digest_of(corpus.index_path) == before);
+      CHECK(corpus.leftover_candidates().empty());
+    }
+
+    const cidx::storage::DatabaseIntegrityReport report =
+        cidx::storage::inspect_database_integrity(corpus.index_path.string());
+    CHECK(report.opened);
+    CHECK(report.integrity_ok);
+    CHECK(report.foreign_keys_ok);
+    CHECK(cidx::storage::read_database_pending_file_count(
+              corpus.index_path.string()) == 0);
+    // Unchanged bytes already imply this; asserted separately so a failure says
+    // which property broke.
+    CHECK(cidx::storage::read_database_semantic_digest(
+              corpus.index_path.string()) == before_semantic);
+  }
+
+  // AC2, SIGINT inside the publication window. The signal is delivered from the
+  // publication sequence itself — after the candidate and the directory are on
+  // stable storage, immediately before rename(2) — so the instant under test is
+  // chosen, not raced from a wall clock.
+  TEST_CASE("SIGINT between the fsync and the rename leaves the serving "
+            "database intact") {
+    Corpus corpus("sigint-publish");
+    REQUIRE(corpus.ready);
+    const std::string before = digest_of(corpus.index_path);
+
+    const RunOutcome outcome =
+        run_cidx({"index", "rebuild", "--clean"}, corpus.cache.string(),
+                 "during-publication");
+    CHECK(outcome.signal_number == SIGINT);
+
+    CHECK(digest_of(corpus.index_path) == before);
+    const cidx::storage::DatabaseIntegrityReport report =
+        cidx::storage::inspect_database_integrity(corpus.index_path.string());
+    CHECK(report.opened);
+    CHECK(report.integrity_ok);
+    CHECK(report.foreign_keys_ok);
+    CHECK(cidx::storage::read_database_pending_file_count(
+              corpus.index_path.string()) == 0);
+  }
+
+  // The other half of the window. Dying immediately after rename(2) returns is
+  // the case the atomicity claim exists for: the serving path now holds the
+  // candidate, and what a reader finds there must be a whole, healthy database
+  // rather than a torn file. The process died before any cleanup could run.
+  TEST_CASE("SIGINT immediately after the rename leaves a whole published "
+            "database") {
+    Corpus corpus("sigint-after-rename");
+    REQUIRE(corpus.ready);
+    const std::string before = digest_of(corpus.index_path);
+    const std::string before_semantic =
+        cidx::storage::read_database_semantic_digest(
+            corpus.index_path.string());
+
+    const RunOutcome outcome = run_cidx({"index", "rebuild", "--clean"},
+                                        corpus.cache.string(), "after-rename");
+    CHECK(outcome.signal_number == SIGINT);
+
+    // The rename completed, so the serving path holds the candidate now.
+    CHECK(digest_of(corpus.index_path) != before);
+    const cidx::storage::DatabaseIntegrityReport report =
+        cidx::storage::inspect_database_integrity(corpus.index_path.string());
+    CHECK(report.opened);
+    CHECK(report.integrity_ok);
+    CHECK(report.foreign_keys_ok);
+    CHECK(report.schema_version == cidx::kSchemaVersion);
+    CHECK(cidx::storage::read_database_pending_file_count(
+              corpus.index_path.string()) == 0);
+    // Whole, not merely openable: it holds the same semantics as the index it
+    // replaced.
+    CHECK(cidx::storage::read_database_semantic_digest(
+              corpus.index_path.string()) == before_semantic);
+    CHECK(corpus.leftover_candidates().empty());
+  }
+
+  // AC4, backup/recovery. A sidecar beside the serving database means the main
+  // file is not the whole database, so the rebuild is refused before it starts
+  // rather than publishing over it.
+  TEST_CASE("a clean rebuild refuses a serving database with a sidecar") {
+    Corpus corpus("sidecar");
+    REQUIRE(corpus.ready);
+    const std::string before = digest_of(corpus.index_path);
+
+    const std::filesystem::path sidecar =
+        corpus.index_path.string() + std::string("-wal");
+    write_file(sidecar, "leftover");
+
+    const RunOutcome outcome =
+        run_cidx({"index", "rebuild", "--clean"}, corpus.cache.string());
+    CHECK(outcome.exit_code != 0);
+    CHECK(digest_of(corpus.index_path) == before);
+    CHECK(corpus.leftover_candidates().empty());
+
+    std::error_code ignored;
+    std::filesystem::remove(sidecar, ignored);
+  }
+
   TEST_CASE(
       "SIGINT during a clean rebuild leaves the serving database intact") {
     Corpus corpus("sigint");
