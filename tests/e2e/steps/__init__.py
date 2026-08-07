@@ -8,6 +8,7 @@ namespace, where pytest collects them.
 Step modules
     pipeline_steps    GIVEN the fixture workspace / WHEN the cidx CLI runs
     queryplan_steps   public Python QueryPlan execution and result assertions
+    parallel_steps    multi-unit workspaces and `cidx index` worker flags
     index_steps       index-level facts (database, resolve, file/symbol totals)
     symbol_steps      symbol rows: membership, exhaustiveness, spans
     signature_steps   the signature/type tier: types, parameters, templates
@@ -37,6 +38,7 @@ from . import (
     edge_steps,
     hierarchy_steps,
     index_steps,
+    parallel_steps,
     pipeline_steps,
     provenance_steps,
     queryplan_steps,
@@ -48,6 +50,7 @@ from .workspace import Workspace
 
 _STEP_MODULES: tuple[ModuleType, ...] = (
     pipeline_steps,
+    parallel_steps,
     queryplan_steps,
     index_steps,
     symbol_steps,

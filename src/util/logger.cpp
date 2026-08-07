@@ -1,5 +1,6 @@
 #include "util/logger.hpp"
 
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
@@ -31,12 +32,13 @@ std::string timestamp_now() {
       duration_cast<milliseconds>(now.time_since_epoch()).count() % 1000;
   std::tm tmv{};
   localtime_r(&secs, &tmv);
-  char buf[40];
-  const size_t n = std::strftime(buf, sizeof buf, "%Y-%m-%d %H:%M:%S", &tmv);
-  char out[48];
-  std::snprintf(out, sizeof out, "%.*s,%03d", static_cast<int>(n), buf,
-                static_cast<int>(ms));
-  return out;
+  std::array<char, 40> buf{};
+  const size_t n =
+      std::strftime(buf.data(), buf.size(), "%Y-%m-%d %H:%M:%S", &tmv);
+  std::array<char, 48> out{};
+  std::snprintf(out.data(), out.size(), "%.*s,%03d", static_cast<int>(n),
+                buf.data(), static_cast<int>(ms));
+  return out.data();
 }
 
 } // namespace
@@ -86,6 +88,5 @@ void Logger::log(LogLevel level, const std::string &name,
     std::fputs(record.c_str(), stderr);
   }
 }
-
 
 } // namespace cidx

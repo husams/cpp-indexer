@@ -9,9 +9,10 @@
 #include <exception>
 #include <map>
 #include <mutex>
-#include <thread>
 #include <utility>
 #include <vector>
+
+#include "index/worker_thread.hpp"
 
 namespace cidx::index {
 
@@ -111,19 +112,18 @@ auto run_parallel_extraction(
     metrics.total_worker_idle_seconds += idle;
   };
 
-  std::vector<std::thread> pool;
+  // Workers are created with an explicitly requested stack (WorkerThread)
+  // rather than the platform pthread default, which is 512 KiB on macOS -- far
+  // less than the Clang front end recurses through in production (B-006).
+  std::vector<WorkerThread> pool;
   pool.reserve(workers);
-  for (std::size_t i = 0; i < workers; ++i) {
-    pool.emplace_back(worker_body, i);
-  }
-  metrics.workers_started = workers;
 
-  // Stops and joins the pool on EVERY exit from the publisher scope below,
-  // including an exception thrown by the caller-supplied publish callback.
-  // Without it that unwind would cross joinable std::threads, which is
-  // std::terminate rather than a propagated exception.
+  // Stops and joins the pool on EVERY exit from the scope below, including a
+  // failed worker creation and an exception thrown by the caller-supplied
+  // publish callback. Without it that unwind would cross joinable threads,
+  // which is std::terminate rather than a propagated exception.
   struct PoolGuard {
-    std::vector<std::thread> &pool;
+    std::vector<WorkerThread> &pool;
     std::mutex &mutex;
     std::condition_variable &admit;
     std::condition_variable &arrived;
@@ -138,7 +138,7 @@ auto run_parallel_extraction(
       }
       admit.notify_all();
       arrived.notify_all();
-      for (std::thread &worker : pool) {
+      for (WorkerThread &worker : pool) {
         if (worker.joinable()) {
           worker.join();
         }
@@ -147,7 +147,20 @@ auto run_parallel_extraction(
   };
 
   {
+    // Constructed BEFORE the creation loop, not after it: a throw from the Nth
+    // creation would otherwise unwind a pool already holding N-1 joinable
+    // workers with no guard in scope, and destroying a joinable thread is
+    // std::terminate -- exactly the failure WorkerThread exists to report. The
+    // guard is an aggregate of references over a reserved vector, so it
+    // observes the pool as it grows.
     const PoolGuard pool_guard{pool, mutex, admit, arrived, stopping};
+
+    for (std::size_t i = 0; i < workers; ++i) {
+      pool.emplace_back(worker_body, i);
+      // Counted per successful spawn rather than assigned `workers` after the
+      // loop, so a plan of 4 that got 1 reports 1.
+      ++metrics.workers_started;
+    }
 
     // The calling thread is the publisher: exactly one writer, always in rank
     // order, never on a worker.
