@@ -9,12 +9,13 @@
 // Logger names are plain strings passed per record: "cidx", "cidx.clang".
 #pragma once
 
+#include <cstdint>
 #include <cstdio>
 #include <string>
 
 namespace cidx {
 
-enum class LogLevel : int {
+enum class LogLevel : std::uint8_t {
   kInfo = 20, // Python logging.INFO
   kWarning = 30,
   kError = 40,
@@ -56,6 +57,5 @@ private:
   bool open_failed_ = false;
   int warning_count_ = 0;
 };
-
 
 } // namespace cidx
