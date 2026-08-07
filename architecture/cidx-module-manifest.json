@@ -54,7 +54,8 @@
         "src/index/parallel_policy.hpp",
         "src/index/parallel_policy.cpp",
         "src/index/parallel_runner.hpp",
-        "src/index/parallel_runner_impl.hpp"
+        "src/index/parallel_runner_impl.hpp",
+        "src/index/worker_thread.hpp"
       ],
       "allowedDependencies": [
         "foundation.scheduling",
