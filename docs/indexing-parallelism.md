@@ -120,6 +120,36 @@ With `--profile-json PATH` the run publishes:
 `header_claim_gate_wait` means one slow low-ranked unit is holding the ordered
 gate.
 
+### What the topology changes about the rest of the telemetry
+
+The scheduler owns its own controlled writer and its own dispatch order, so it
+publishes both of their measurements itself:
+
+* `fact_batch_writer.*` — statements prepared/reused/executed, virtual-machine
+  steps, row outcomes, and the prepare/virtual-machine/commit timings. These
+  are **identical** to the serial run's for the same corpus, because the same
+  writer applies the same batches in the same order;
+* each translation unit's `start_position` is its **dispatch rank** in legacy
+  apply order. Serially that is also "how many units have been recorded so
+  far", but under concurrency every worker starts before any has recorded, so
+  the recorded-count reading would give every unit position 0 and the per-unit
+  cost-versus-corpus-position analysis would have no abscissa at all.
+
+Two counter families are **not** published by a multi-worker run, because the
+mechanisms behind them do not run in it:
+
+| Family | Why |
+| --- | --- |
+| `tu_fact_cache.*` | The cache decision lives in the serial `TuFactCacheIndexer` wrapper, which the scheduler bypasses. See [tu-fact-cache.md](tu-fact-cache.md). |
+| `tu_dependency.*` | Same wrapper: the dependency-invalidation walk runs inside it. |
+
+Their absence is a property of the mode, not a telemetry defect, and it is not
+the same thing as the cache reporting zero. `benchmarks/indexing/production.py`
+records the measured topology in `index_topology` and, for a parallel run,
+lists the withheld counters with that reason in `unavailable_counters`. Pass
+`--index-jobs 1` to that harness when the cache and dependency taxonomies are
+what you need to measure.
+
 ## What a worker may read
 
 A worker must not read the authoritative database. Not because the reads are

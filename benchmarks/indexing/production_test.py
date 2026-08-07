@@ -158,6 +158,31 @@ def _main_shaped_report(*, trials: int = 3, disabled: bool = False) -> dict:
         trials=trials, disabled=disabled
     )
     report["attribution_experiments"] = production.ATTRIBUTION_EXPERIMENTS
+    # The frozen S-071 evidence was measured at the production scale, before
+    # the affordable profile existed.
+    report["scale"] = {
+        "profile": "full",
+        "representative_files": 8,
+        "scale_files": 9,
+        "trials": trials,
+    }
+    # The frozen S-071 evidence predates bounded parallel extraction, so the
+    # topology it was measured under is the serial one.
+    report["index_topology"] = {
+        "index_jobs": 1,
+        "mode": "serial",
+        "serial_only_counters_required": True,
+        "serial_only_counter_prefixes": list(
+            production.SERIAL_ONLY_COUNTER_PREFIXES
+        ),
+        "serial_only_counter_reason": None,
+    }
+    # `main()` re-checks quiescence at the end of the run and records both
+    # observations; a shaped candidate carries the same envelope.
+    report["host_quiescence_final"] = {
+        "quiescent": True,
+        "competing_cidx_indexers": [],
+    }
     report["sqlite_matrix"] = {}
     report["disabled_profiling_overhead"] = None
     report["commit_ab"] = {"cases": {}, "parity_failures": []}
@@ -1086,6 +1111,174 @@ class BoundaryTest(unittest.TestCase):
     def test_suite_leaves_the_repository_backlog_tree_untouched(self) -> None:
         """C-1221 - checked here and again unconditionally in tearDownModule."""
         self.assertEqual(_snapshot_repository_backlog(), _REPOSITORY_SNAPSHOT)
+
+
+class RunQuiescenceTest(unittest.TestCase):
+    """S-078 -- a competitor that starts mid-run is as contaminating as one
+    that was already there, and the start-of-run check cannot see it. `main()`
+    re-checks at the end and only calls the run authoritative when both
+    observations agree, so a report measured alongside another indexer cannot
+    be published as though it were clean.
+    """
+
+    def _main_source(self) -> str:
+        return Path(production.__file__).read_text(encoding="utf-8")
+
+    def test_main_checks_quiescence_more_than_once(self) -> None:
+        self.assertEqual(self._main_source().count("_host_quiescence()"), 3)
+
+    def test_authoritative_timing_requires_both_observations(self) -> None:
+        source = self._main_source()
+        self.assertIn(
+            'quiescence["quiescent"] and final_quiescence["quiescent"]', source
+        )
+
+    def test_a_mid_run_competitor_is_a_parity_failure(self) -> None:
+        source = self._main_source()
+        self.assertIn("host stopped being quiescent during the run", source)
+        # Recorded as a parity failure, which is what the process exit code
+        # tracks -- not merely noted in a field a reader has to look for.
+        marker = source.index("host stopped being quiescent during the run")
+        self.assertIn(
+            'report["parity_failures"].append', source[max(0, marker - 400):marker]
+        )
+
+
+class TelemetryScopeTest(unittest.TestCase):
+    """S-078 - which telemetry a measured worker topology is required to carry.
+
+    Bounded parallel extraction bypasses the serial translation-unit fact
+    cache wrapper, so its decision taxonomy and the dependency-invalidation
+    counters are simply not produced in that mode. Requiring them of every run
+    made the gate unrunnable against the topology that actually ships; not
+    recording their absence would let a parallel report read as if the cache
+    had been measured and reported nothing.
+    """
+
+    def _profile(self, path: Path, *, counters: dict) -> Path:
+        # A non-empty translation-unit series matters: `_load_profile` waives
+        # the writer families for a run that indexed nothing, so an empty list
+        # would make the writer assertions below vacuous.
+        path.write_text(
+            json.dumps(
+                {
+                    "summary": {
+                        "timings": {
+                            name: 0.001
+                            for name in production.REQUIRED_PROFILE_TIMINGS
+                        },
+                        "counters": counters,
+                    },
+                    "translation_units": [
+                        {
+                            name: 0
+                            for name in production.REQUIRED_TRANSLATION_UNIT_FIELDS
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def _all_counters(self) -> dict:
+        return {name: 0 for name in production.REQUIRED_PROFILE_COUNTERS}
+
+    def _without_serial_only(self) -> dict:
+        return {
+            name: 0
+            for name in production.REQUIRED_PROFILE_COUNTERS
+            if not name.startswith(production.SERIAL_ONLY_COUNTER_PREFIXES)
+        }
+
+    def test_a_complete_profile_loads_under_either_requirement(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            path = self._profile(
+                Path(root) / "p.json", counters=self._all_counters()
+            )
+            for required in (True, False):
+                with self.subTest(require_serial_only_metrics=required):
+                    loaded = production._load_profile(
+                        path, require_serial_only_metrics=required
+                    )
+                    self.assertIn("summary", loaded)
+
+    def test_a_serial_run_still_demands_the_cache_taxonomy(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            path = self._profile(
+                Path(root) / "p.json", counters=self._without_serial_only()
+            )
+            with self.assertRaises(RuntimeError) as raised:
+                production._load_profile(path, require_serial_only_metrics=True)
+            self.assertIn("tu_fact_cache.hit", str(raised.exception))
+
+    def test_a_parallel_run_records_what_was_unavailable_and_why(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            path = self._profile(
+                Path(root) / "p.json", counters=self._without_serial_only()
+            )
+            loaded = production._load_profile(
+                path, require_serial_only_metrics=False
+            )
+            unavailable = loaded["unavailable_counters"]
+            self.assertIn("tu_fact_cache.hit", unavailable["names"])
+            self.assertIn("tu_dependency.visited_nodes", unavailable["names"])
+            self.assertEqual(
+                unavailable["reason"], production.SERIAL_ONLY_COUNTER_REASON
+            )
+
+    def test_writer_counters_are_never_waived_by_the_topology_relaxation(self) -> None:
+        # The scheduler owns its own writer and publishes the same counters, so
+        # a missing `fact_batch_writer.*` family is a defect in either mode.
+        counters = self._without_serial_only()
+        del counters["fact_batch_writer.statements_prepared"]
+        with tempfile.TemporaryDirectory() as root:
+            path = self._profile(Path(root) / "p.json", counters=counters)
+            with self.assertRaises(RuntimeError) as raised:
+                production._load_profile(
+                    path,
+                    require_serial_only_metrics=False,
+                    require_writer_metrics=True,
+                )
+            self.assertIn("fact_batch_writer.statements_prepared",
+                          str(raised.exception))
+
+    def test_a_stage_that_extracted_nothing_is_not_required_to_report_either(
+        self,
+    ) -> None:
+        # `resolve`, and an index pass that found everything current, never
+        # reach the per-translation-unit wrapper that owns these counters --
+        # the same reason the writer families are already waived there.
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "p.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "summary": {
+                            "timings": {
+                                name: 0.001
+                                for name in production.REQUIRED_PROFILE_TIMINGS
+                            },
+                            "counters": self._without_serial_only(),
+                        },
+                        "translation_units": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            loaded = production._load_profile(
+                path, require_serial_only_metrics=True
+            )
+            self.assertEqual(
+                loaded["unavailable_counters"]["reason"],
+                "this stage extracted no translation unit",
+            )
+
+    def test_only_the_two_named_prefixes_are_topology_dependent(self) -> None:
+        self.assertEqual(
+            production.SERIAL_ONLY_COUNTER_PREFIXES,
+            ("tu_fact_cache.", "tu_dependency."),
+        )
 
 
 if __name__ == "__main__":

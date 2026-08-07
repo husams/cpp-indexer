@@ -19,7 +19,13 @@ import time
 from typing import Any
 
 
-EXPECTED_SCHEMA_VERSION = 40
+EXPECTED_SCHEMA_VERSION = 41
+#: The schema an executable built before the current one produces. A
+#: pre-feature A/B necessarily runs a binary that predates the current schema,
+#: and refusing its database would make the comparison unmeasurable rather than
+#: catching drift. Only the arm that knows it is running such a binary may
+#: accept it, and the observed version is recorded either way.
+PREDECESSOR_SCHEMA_VERSION = EXPECTED_SCHEMA_VERSION - 1
 EXPECTED_CATALOG_VERSION = 1
 EXPECTED_CATALOG_HASH = "c4f426232c34739c83a3d15c3bd91b4d4f8934ec8853f8efaa7a27939e37e9f7"
 DUMP_LAYER0 = Path(__file__).resolve().parents[2] / "scripts/dump_layer0.sh"
@@ -750,6 +756,7 @@ def database_snapshot(
     corpus_root: Path,
     require_coverage: bool,
     capture_canonical: bool = True,
+    expected_schema_version: int = EXPECTED_SCHEMA_VERSION,
 ) -> dict[str, Any]:
     import sqlite3
 
@@ -804,7 +811,7 @@ def database_snapshot(
                 tables[table] = None
     if integrity != "ok" or foreign_key_violations:
         raise RuntimeError(f"SQLite integrity check failed: {integrity}")
-    if int(metadata.get("schema_version", -1)) != EXPECTED_SCHEMA_VERSION:
+    if int(metadata.get("schema_version", -1)) != expected_schema_version:
         raise RuntimeError(
             f"unexpected schema version: {metadata.get('schema_version')}"
         )

@@ -1127,6 +1127,43 @@ void SqliteStorageService::migrate() {
     if (has_table("type_node")) {
       add_col("type_node", "extent", "TEXT");
     }
+    // v40 -> v41: make a containment edge's count history-independent.
+    //
+    // `contains` is the one edge kind several files contribute to -- a
+    // namespace or class gathers members declared across many headers -- and
+    // the writer used to accumulate its count on every publication. That is
+    // correct across different files and wrong across repeated publications of
+    // the same file: re-indexing a header added its contribution again, so the
+    // count climbed with the number of index runs rather than describing the
+    // sources. The count is now the number of (file, configuration) routes
+    // that declare into the edge, derived from the applicability rows, which
+    // are swept correctly when a file is republished.
+    //
+    // Existing databases cannot recover the per-route split of an accumulated
+    // total, so the count is re-derived from the routes they already record.
+    // A database built by a single cold pass changes only where one file
+    // declared into the same containment more than once.
+    if (has_table("edge") && has_table("fact_applicability")) {
+      db_.exec("UPDATE edge SET count = (SELECT COUNT(*) FROM "
+               "fact_applicability fa WHERE fa.fact_kind = 'edge' AND "
+               "fa.fact_id = edge.id) WHERE edge.kind = 3 AND EXISTS("
+               "SELECT 1 FROM fact_applicability fa WHERE "
+               "fa.fact_kind = 'edge' AND fa.fact_id = edge.id)");
+    }
+    // The same publication used to derive applicability for `entity_node` and
+    // `entity_edge`, which the entity roll-up owns and populates only after a
+    // translation unit publishes -- so a cold run derived nothing and every
+    // later run derived rows. Nothing ever read them; they are dropped rather
+    // than left as a history-dependent residue.
+    //
+    // Guarded on the referenced parents as well: deleting from a table whose
+    // foreign-key parent an earlier migration step has not yet recreated fails
+    // outright with foreign keys on.
+    if (has_table("fact_applicability") && has_table("file") &&
+        has_table("translation_unit_config")) {
+      db_.exec("DELETE FROM fact_applicability WHERE fact_kind IN "
+               "('entity_node', 'entity_edge')");
+    }
     changed = true;
   }
   if (changed) {

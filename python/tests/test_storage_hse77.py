@@ -52,7 +52,7 @@ def test_hse77_v34_migration_backfills_source_and_preserves_reads(tmp_path):
     assert tuple(db._conn.execute(
         "SELECT src_kind, type_usr, decl_usr, callee_usr FROM call_arg_read"
     ).fetchone()) == ("local", "legacy:missing-type", "legacy:missing-decl", "legacy:callee")
-    assert db._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "40"
+    assert db._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "41"
     db.close()
 
 
@@ -139,7 +139,7 @@ def test_parent_id_backfills_when_parent_arrives_after_child():
 
 
 def test_migrated_enum_columns_keep_domain_checks(tmp_path):
-    path = str(tmp_path / "v39.db")
+    path = str(tmp_path / "predecessor.db")
     db = Storage(path)
     component = db.add_component("c", "/repo/c")
     directory = db.add_directory(component, "")
@@ -148,7 +148,8 @@ def test_migrated_enum_columns_keep_domain_checks(tmp_path):
     callee_id = db.add_symbol(Symbol("domain:callee", "callee", "function"))
     edge_id = db.add_edge(caller_id, callee_id, 1)
     db._conn.execute(
-        "UPDATE meta SET value='39' WHERE key='schema_version'"
+        "UPDATE meta SET value=? WHERE key='schema_version'",
+        (str(PREVIOUS_SCHEMA_VERSION),),
     )
     db._conn.execute(
         "UPDATE meta SET value=? WHERE key='catalog_hash'",
@@ -172,8 +173,11 @@ def test_migrated_enum_columns_keep_domain_checks(tmp_path):
     db.close()
 
 
-@pytest.mark.parametrize("wrong_schema_version", [PREVIOUS_SCHEMA_VERSION - 1, 40])
-def test_predecessor_catalog_hash_requires_v39_migration(
+@pytest.mark.parametrize(
+    "wrong_schema_version",
+    [PREVIOUS_SCHEMA_VERSION - 1, SCHEMA_VERSION],
+)
+def test_predecessor_catalog_hash_requires_the_predecessor_version(
     tmp_path, wrong_schema_version
 ):
     path = str(tmp_path / f"wrong-v{wrong_schema_version}.db")
@@ -193,16 +197,52 @@ def test_predecessor_catalog_hash_requires_v39_migration(
         Storage(path)
 
 
-def test_current_main_v39_database_upgrades_to_candidate_v40(tmp_path):
-    path = str(tmp_path / "main-v39.db")
+def test_current_main_predecessor_database_upgrades_to_the_candidate_schema(
+    tmp_path,
+):
+    """v40 -> v41 normalises a containment count that used to accumulate.
+
+    The count is now the number of (file, configuration) routes that declare
+    into the edge, derived from the applicability rows, so re-indexing a file
+    can no longer raise it. An existing database cannot recover the per-route
+    split of an accumulated total, so the migration re-derives it from the
+    routes the database already records.
+    """
+    path = str(tmp_path / "main-predecessor.db")
     db = Storage(path)
-    before_id = db.add_symbol(Symbol("main-v39:before", "before", "function"))
-    db._conn.commit()
-    for column in ("callable_kind", "template_origin", "template_form"):
-        db._conn.execute(f"ALTER TABLE symbol DROP COLUMN {column}")
-    db._conn.execute("ALTER TABLE type_node DROP COLUMN extent")
-    db._conn.execute("DELETE FROM type_kind WHERE id=14")
-    db._conn.execute("UPDATE meta SET value='39' WHERE key='schema_version'")
+    component = db.add_component("c", "/repo/c")
+    directory = db.add_directory(component, "")
+    file_ids = [db.add_file(directory, name) for name in ("a.cpp", "b.cpp")]
+    config_id = db._conn.execute(
+        "SELECT id FROM translation_unit_config LIMIT 1"
+    ).fetchone()
+    before_id = db.add_symbol(Symbol("main-predecessor:before", "before", "function"))
+    scope_id = db.add_symbol(Symbol("main-predecessor:scope", "scope", "namespace"))
+    member_id = db.add_symbol(Symbol("main-predecessor:member", "member", "function"))
+    edge_id = db.add_edge(scope_id, member_id, 3)
+    db._conn.execute("UPDATE edge SET count=5 WHERE id=?", (edge_id,))
+    # Foreign keys are off for the fixture only: the migration under test is a
+    # data normalisation, and building a fully valid configuration row here
+    # would test the schema rather than the migration.
+    db._conn.commit()  # PRAGMA foreign_keys is a no-op inside a transaction
+    db._conn.execute("PRAGMA foreign_keys = OFF")
+    config = config_id[0] if config_id is not None else 1
+    for file_id in file_ids:
+        db._conn.execute(
+            "INSERT INTO fact_applicability(fact_kind, fact_id, file_id, "
+            "config_id, generation) VALUES('edge', ?, ?, ?, 1)",
+            (edge_id, file_id, config),
+        )
+    for kind in ("entity_node", "entity_edge"):
+        db._conn.execute(
+            "INSERT INTO fact_applicability(fact_kind, fact_id, file_id, "
+            "config_id, generation) VALUES(?, ?, ?, ?, 1)",
+            (kind, edge_id, file_ids[0], config),
+        )
+    db._conn.execute(
+        "UPDATE meta SET value=? WHERE key='schema_version'",
+        (str(PREVIOUS_SCHEMA_VERSION),),
+    )
     db._conn.execute(
         "UPDATE meta SET value=? WHERE key='catalog_hash'",
         (PREVIOUS_CATALOG_HASH,),
@@ -216,18 +256,21 @@ def test_current_main_v39_database_upgrades_to_candidate_v40(tmp_path):
     ).fetchone()[0] == str(SCHEMA_VERSION)
     assert db._conn.execute(
         "SELECT usr FROM symbol WHERE id=?", (before_id,)
-    ).fetchone()[0] == "main-v39:before"
-    columns = {
-        row[1] for row in db._conn.execute("PRAGMA table_info(symbol)")
-    }
-    assert {"callable_kind", "template_origin", "template_form"} <= columns
-    type_columns = {
-        row[1] for row in db._conn.execute("PRAGMA table_info(type_node)")
-    }
-    assert "extent" in type_columns
+    ).fetchone()[0] == "main-predecessor:before"
+    # Re-derived from the two routes that actually declare into it.
     assert db._conn.execute(
-        "SELECT name FROM type_kind WHERE id=14"
-    ).fetchone()[0] == "pack-expansion"
+        "SELECT count FROM edge WHERE id=?", (edge_id,)
+    ).fetchone()[0] == 2
+    # The write-only derived rows are gone; the edge's own routes are not.
+    assert db._conn.execute(
+        "SELECT COUNT(*) FROM fact_applicability WHERE fact_kind IN "
+        "('entity_node', 'entity_edge')"
+    ).fetchone()[0] == 0
+    assert db._conn.execute(
+        "SELECT COUNT(*) FROM fact_applicability WHERE fact_kind='edge' "
+        "AND fact_id=?",
+        (edge_id,),
+    ).fetchone()[0] == 2
     db.close()
 
 

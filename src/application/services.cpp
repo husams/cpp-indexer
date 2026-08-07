@@ -135,6 +135,132 @@ void log_parse_failure(Logger *logger, const std::string &path,
   }
 }
 
+// S-078: turn a changed dependency into the translation units that have to be
+// re-extracted because of it.
+//
+// Every other question target selection asks is "did *this* file's own bytes
+// change?", which is the right question for a source and the wrong one for a
+// header. A header is never a target in its own right -- it is indexed as part
+// of a translation unit -- so a stale header is deferred, and the units that
+// include it answer "unchanged" and are skipped. Without this closure a header
+// edit re-extracts nothing at all and the index silently keeps the old facts.
+//
+// The closure walks `include_edge` backwards from every changed input. That
+// table is Layer-0: it is written by every index run regardless of worker
+// topology or of whether the optional translation-unit fact cache is enabled,
+// it records the destination path even when the destination has no `file` row
+// (an unowned or generated intermediate), and it is transitive, so a change to
+// a header included by another header reaches the units at the end of the
+// chain.
+//
+// Two properties this deliberately keeps:
+//   * it costs nothing when nothing changed. An unchanged run has an empty
+//     seed set and issues no query at all;
+//   * it cannot invent work on a cold run. Every source is already a target
+//     there, so the closure adds nothing.
+//
+// What it cannot see is a change to an input cidx never recorded a digest for
+// -- a system or toolchain header, or an unresolved directive. Those are
+// deliberately not content-hashed (see docs/tu-fact-cache.md); the normalized
+// toolchain and configuration identities cover their *set*, and the
+// translation-unit fact cache refuses a hit for a unit that records one.
+//
+// Returns the paths of the units to re-extract. Paths rather than records on
+// purpose: dispatch order is the legacy apply key that `list_files()` already
+// returns, and both cross-translation-unit identity resolution and the bounded
+// parallel scheduler's publication order depend on it, so the caller builds
+// the target list in that order rather than appending to it.
+std::set<std::string>
+dependents_of_changed_inputs(Storage &db,
+                             const std::vector<std::pair<File, std::string>> &registered,
+                             const std::set<std::string> &changed,
+                             const std::set<std::string> &already_targeted) {
+  std::set<std::string> dependents;
+  if (changed.empty()) {
+    return dependents;
+  }
+  std::map<std::int64_t, std::string> path_of_file;
+  for (const auto &entry : registered) {
+    path_of_file.emplace(entry.first.id, entry.second);
+  }
+
+  std::set<std::string> visited = changed;
+  std::vector<std::string> pending(changed.begin(), changed.end());
+  for (std::size_t index = 0; index < pending.size(); ++index) {
+    // Copied, not referenced: `pending` grows inside this loop.
+    const std::string node = pending[index];
+    for (const IncludeEdge &edge : db.include_edges_to_path(node)) {
+      const auto found = path_of_file.find(edge.src_file_id);
+      if (found == path_of_file.end()) {
+        continue;
+      }
+      if (visited.insert(found->second).second) {
+        pending.push_back(found->second);
+      }
+    }
+  }
+
+  // A forced include (`-include x.hpp`) is a dependency the preprocessor never
+  // sees as a directive, so it produces no `include_edge` row. The
+  // configuration records it as a generated input, which is where the reverse
+  // lookup has to come from.
+  //
+  // Reaching for it costs a configuration read per registered unit, so it is
+  // gated on there being a changed input that is not already a target in its
+  // own right. An ordinary one-source edit changes exactly one file, that file
+  // is its own target, and this pays nothing.
+  const bool forced_include_possible =
+      std::ranges::any_of(changed, [&](const std::string &path) {
+        return !already_targeted.contains(path);
+      });
+  for (const auto &entry : registered) {
+    if (!forced_include_possible || visited.contains(entry.second) ||
+        files::is_header(entry.second)) {
+      continue;
+    }
+    // Resolved through `file_config`, not through `translation_unit`: the
+    // index path registers the former and leaves the latter to the workspace
+    // lifecycle, so a `translation_unit`-keyed lookup finds nothing here.
+    for (const FileConfigApplicability &applicability :
+         db.file_configs_for(entry.first.id)) {
+      if (applicability.role != "translation_unit") {
+        continue;
+      }
+      const std::optional<TranslationUnitConfig> stored =
+          db.translation_unit_config_by_id(applicability.config_id);
+      if (!stored) {
+        continue;
+      }
+      const TranslationUnitConfig &config = *stored;
+      const bool depends = std::ranges::any_of(
+          config.generated_inputs, [&](const std::string &input) {
+            // Same resolution the configuration service validates with: a
+            // recorded generated input is usually already absolute, and a
+            // relative one is relative to the recorded working directory.
+            std::string resolved = pathutil::resolve_fs_path(input);
+            if (!pathutil::isabs(resolved)) {
+              resolved = pathutil::abspath(pathutil::join(
+                  config.working_dir.value_or(pathutil::getcwd()), resolved));
+            }
+            return changed.contains(resolved);
+          });
+      if (depends) {
+        visited.insert(entry.second);
+        break;
+      }
+    }
+  }
+
+  for (const std::string &path : visited) {
+    if (changed.contains(path) || already_targeted.contains(path) ||
+        files::is_header(path)) {
+      continue;
+    }
+    dependents.insert(path);
+  }
+  return dependents;
+}
+
 // The one index lifecycle. Both the in-place path and the clean-rebuild path
 // call this with the database they are writing to, so default, --no-graph and
 // --defer-transforms behave identically no matter which entry point ran.
@@ -187,23 +313,55 @@ protocol::ResultEnvelope run_index_pass(
       }
     }
   } else if (request.files.empty()) {
+    std::vector<std::pair<File, std::string>> registered;
+    std::set<std::string> changed;
     for (const auto &[file, path] : db.list_files()) {
       if (source_root && !belongs_to_root(path, *source_root)) {
         continue;
       }
-      if (files::index_status(file, path) == files::IndexStatus::kOk) {
-        ++already;
-        file_records.push_back(json_out::Value::obj(
-            {{"path", json_out::Value::of(path)},
-             {"status", json_out::Value::of(std::string("already"))}}));
-      } else if (!files::is_header(path)) {
-        targets.emplace_back(file, path);
-      } else {
-        ++deferred;
-        file_records.push_back(json_out::Value::obj(
-            {{"path", json_out::Value::of(path)},
-             {"status", json_out::Value::of(std::string("deferred"))}}));
+      registered.emplace_back(file, path);
+      if (files::index_status(file, path) != files::IndexStatus::kOk) {
+        changed.insert(path);
       }
+    }
+
+    std::set<std::string> targeted;
+    for (const auto &[_, path] : registered) {
+      if (changed.contains(path) && !files::is_header(path)) {
+        targeted.insert(path);
+      }
+    }
+    // A changed header is not a target in its own right; the units that
+    // include it are what has to be re-extracted.
+    const std::set<std::string> dependents =
+        dependents_of_changed_inputs(db, registered, changed, targeted);
+    targeted.insert(dependents.begin(), dependents.end());
+    // One ordered pass, so dispatch order stays the legacy apply key
+    // regardless of whether a unit was selected by its own change or by a
+    // dependency's.
+    for (const auto &[file, path] : registered) {
+      if (targeted.contains(path)) {
+        targets.emplace_back(file, path);
+      }
+    }
+
+    // Accounting, in `list_files` order so the record set stays deterministic.
+    // A unit the closure pulled in is a target, not "already": it is being
+    // re-extracted even though its own bytes did not change.
+    for (const auto &[file, path] : registered) {
+      if (targeted.contains(path)) {
+        continue;
+      }
+      const bool is_changed = changed.contains(path);
+      if (is_changed) {
+        ++deferred;
+      } else {
+        ++already;
+      }
+      file_records.push_back(json_out::Value::obj(
+          {{"path", json_out::Value::of(path)},
+           {"status", json_out::Value::of(std::string(
+                          is_changed ? "deferred" : "already"))}}));
     }
   }
 

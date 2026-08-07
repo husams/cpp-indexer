@@ -42,7 +42,7 @@ from indexer.generated_catalog import (
     SYMBOL_KIND_IDS as _GENERATED_SYMBOL_KIND_IDS,
 )
 
-SCHEMA_VERSION = 40
+SCHEMA_VERSION = 41
 PREVIOUS_SCHEMA_VERSION = SCHEMA_VERSION - 1
 
 # HSE-79 is the only supported predecessor for the HSE-82 storage migration.
@@ -3082,6 +3082,36 @@ class Storage:
         if "type_node" in tables:
             add_column("type_node", "extent", "TEXT")
         if "symbol" in tables or "type_node" in tables:
+            changed = True
+        if stored_version < SCHEMA_VERSION and "edge" in tables and (
+            "fact_applicability" in tables
+        ):
+            # v40 -> v41: make a containment edge's count history-independent.
+            # It is now the number of (file, configuration) routes that declare
+            # into the edge, derived from the applicability rows, rather than a
+            # total the writer accumulated on every publication -- which
+            # re-added a file's contribution each time it was re-indexed. An
+            # existing database cannot recover the per-route split of an
+            # accumulated total, so the count is re-derived from the routes it
+            # already records. Mirrors the C++ migration exactly; the two
+            # storage layers must agree on what a stored count means.
+            self._conn.execute(
+                "UPDATE edge SET count = (SELECT COUNT(*) FROM "
+                "fact_applicability fa WHERE fa.fact_kind = 'edge' AND "
+                "fa.fact_id = edge.id) WHERE edge.kind = 3 AND EXISTS("
+                "SELECT 1 FROM fact_applicability fa WHERE "
+                "fa.fact_kind = 'edge' AND fa.fact_id = edge.id)"
+            )
+            if "file" in tables and "translation_unit_config" in tables:
+                # The publication also used to derive applicability for
+                # `entity_node` and `entity_edge`, which the entity roll-up
+                # owns and fills in only after a translation unit publishes, so
+                # a cold run derived nothing and every later run derived rows.
+                # Nothing read them.
+                self._conn.execute(
+                    "DELETE FROM fact_applicability WHERE fact_kind IN "
+                    "('entity_node', 'entity_edge')"
+                )
             changed = True
         if "artifact" not in tables:
             # v37 -> v38: add the manifest-governed artifact tables. The schema

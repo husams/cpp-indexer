@@ -2312,8 +2312,22 @@ IndexOneOutcome run_index_one(cidx::Storage &db, IndexSession &session,
   const auto wall_started =
       profiling ? ProfileClock::now() : ProfileClock::time_point{};
   const std::clock_t cpu_started = profiling ? std::clock() : 0;
-  const std::uint64_t start_position =
-      profiling ? profile::next_translation_unit_position() : 0;
+  // The translation unit's position in the run, which the per-TU
+  // cost-versus-corpus-position analysis is fitted against. Serially, "how
+  // many units have been recorded so far" is that position. Under the bounded
+  // parallel scheduler it is not: every worker starts before any has recorded,
+  // so all of them would report position 0 and the analysis would have no
+  // abscissa at all. The scheduler already knows the answer -- the dispatch
+  // rank in legacy apply order -- and supplies it alongside the header claims.
+  const std::uint64_t start_position = [&]() -> std::uint64_t {
+    if (!profiling) {
+      return 0;
+    }
+    if (control.claims != nullptr) {
+      return static_cast<std::uint64_t>(control.rank);
+    }
+    return profile::next_translation_unit_position();
+  }();
   const double child_wall_before =
       profiling ? profile::driver_subprocess_wall_seconds() : 0.0;
   const auto source_started =

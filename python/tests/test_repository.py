@@ -28,7 +28,7 @@ def test_fresh_schema_has_repository_clone_and_column():
         ver = db._conn.execute(
             "SELECT value FROM meta WHERE key = 'schema_version'"
         ).fetchone()[0]
-        assert ver == str(SCHEMA_VERSION) == "40"
+        assert ver == str(SCHEMA_VERSION) == "41"
         tables = {
             r[0]
             for r in db._conn.execute(

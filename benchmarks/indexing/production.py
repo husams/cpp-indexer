@@ -28,6 +28,24 @@ except ModuleNotFoundError:  # direct script execution from benchmarks/indexing
 MINIMUM_TRIALS = 3
 BASELINE_DISTINCT_OWNED_HEADERS = 2
 DEFAULT_MANY_HEADER_TARGET = 128
+#: The experiment that is not an experiment: the profile the product ships.
+#: Every other row in the matrix is judged against it, so a run in which it
+#: could not complete measured nothing at all.
+SQLITE_CONTROL_EXPERIMENT = "shipped-control"
+#: Affordable corpus sizes. The scale a run was measured at is recorded in
+#: the report's `scale` section and in every case key, so a decision can never
+#: read as though it were measured at a size it was not.
+#:
+#: `quick` is what an ordinary change should run: it keeps every corpus shape,
+#: every change state and every trial, and only shrinks the corpus. `full` is
+#: the production-scale matrix the published SLO is derived from -- the 1,000
+#: translation-unit figure is named by an acceptance criterion, so it is not a
+#: number a quick run may stand in for.
+SCALE_PROFILES: dict[str, dict[str, int]] = {
+    "quick": {"representative_files": 8, "scale_files": 64},
+    "full": {"representative_files": 32, "scale_files": 1000},
+}
+
 SQLITE_EXPERIMENTS: dict[str, dict[str, Any]] = {
     "shipped-control": {},
     "cache-64m": {"cache_size": -65_536},
@@ -208,6 +226,18 @@ REQUIRED_PROFILE_COUNTERS = frozenset(
         "tu_dependency.fallbacks",
     }
 )
+#: Counter families the bounded parallel scheduler cannot produce, because the
+#: mechanisms behind them live in the serial `TuFactCacheIndexer` wrapper that
+#: the scheduler bypasses. They are required of a serial measurement and
+#: recorded as unavailable -- with this reason -- for a parallel one, so a
+#: reader can tell "the cache reported nothing" from "the cache never ran".
+SERIAL_ONLY_COUNTER_PREFIXES = ("tu_fact_cache.", "tu_dependency.")
+SERIAL_ONLY_COUNTER_REASON = (
+    "bounded parallel extraction bypasses the serial translation-unit fact "
+    "cache wrapper, so its decision taxonomy and dependency-invalidation "
+    "counters are not published in this mode"
+)
+
 REQUIRED_TRANSLATION_UNIT_FIELDS = frozenset(
     {
         "path",
@@ -576,7 +606,10 @@ def _profile_path(case_root: Path, label: str) -> Path:
 
 
 def _load_profile(
-    path: Path, *, require_writer_metrics: bool = True
+    path: Path,
+    *,
+    require_writer_metrics: bool = True,
+    require_serial_only_metrics: bool = True,
 ) -> dict[str, Any]:
     if not path.exists():
         raise RuntimeError(f"profiling output was not created: {path}")
@@ -589,6 +622,30 @@ def _load_profile(
     missing_timings = sorted(REQUIRED_PROFILE_TIMINGS.difference(timings))
     missing_counters = sorted(REQUIRED_PROFILE_COUNTERS.difference(counters))
     translation_units = profile.get("translation_units", [])
+    # The cache and dependency taxonomies come from the serial per-translation
+    # unit wrapper, so they are required only of a serial stage that actually
+    # extracted something. A `resolve` pass, or an index pass that found
+    # everything current, never reaches that wrapper -- exactly as it never
+    # reaches the controlled writer below.
+    if not require_serial_only_metrics or not translation_units:
+        withheld = [
+            name
+            for name in missing_counters
+            if name.startswith(SERIAL_ONLY_COUNTER_PREFIXES)
+        ]
+        missing_counters = [
+            name
+            for name in missing_counters
+            if not name.startswith(SERIAL_ONLY_COUNTER_PREFIXES)
+        ]
+        profile["unavailable_counters"] = {
+            "names": withheld,
+            "reason": (
+                SERIAL_ONLY_COUNTER_REASON
+                if not require_serial_only_metrics
+                else "this stage extracted no translation unit"
+            ),
+        }
     if not require_writer_metrics or not translation_units:
         missing_timings = [
             name
@@ -615,13 +672,17 @@ def _load_profile(
 
 
 def _snapshot(
-    database: Path, corpus_root: Path, require_coverage: bool
+    database: Path,
+    corpus_root: Path,
+    require_coverage: bool,
+    expected_schema_version: int = HSE95.EXPECTED_SCHEMA_VERSION,
 ) -> dict[str, Any]:
     return HSE95.database_snapshot(
         database,
         corpus_root,
         require_coverage=require_coverage,
         capture_canonical=True,
+        expected_schema_version=expected_schema_version,
     )
 
 
@@ -638,11 +699,15 @@ def run_stage(
     sqlite_experiment: dict[str, Any] | None = None,
     require_coverage: bool = True,
     require_writer_metrics: bool = True,
+    index_jobs: int | None = None,
+    expected_schema_version: int = HSE95.EXPECTED_SCHEMA_VERSION,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     environment = dict(os.environ)
     environment["INDEXER_CACHE"] = str(cache)
     command = [str(executable), *args]
     profile_path = _profile_path(case_root, label)
+    if index_jobs is not None and args and args[0] == "index":
+        command.extend(["--jobs", str(index_jobs)])
     if profile and args and args[0] in {"index", "resolve"}:
         command.extend(["--profile-json", str(profile_path)])
         if sqlite_experiment is not None:
@@ -653,13 +718,19 @@ def run_stage(
             command.extend(["--profile-sqlite-config", str(sqlite_path)])
     metrics = HSE95.run_timed(command, environment, case_root, label)
     database = cache / "index.db"
-    current = _snapshot(database, corpus_root, require_coverage)
+    current = _snapshot(database, corpus_root, require_coverage,
+                        expected_schema_version)
     stage_profile = (
         _load_profile(
             profile_path,
             require_writer_metrics=(
                 require_writer_metrics and args[0] == "index"
             ),
+            # Only a pinned single-worker index stage is required to
+            # publish the cache/dependency taxonomy; the automatic policy and
+            # any explicit multi-worker setting bypass the wrapper that owns
+            # it, and `resolve` never enters it at all.
+            require_serial_only_metrics=(index_jobs == 1 and args[0] == "index"),
         )
         if profile and args[0] in {"index", "resolve"}
         else None
@@ -700,6 +771,7 @@ def _import(
     case_root: Path,
     label: str,
     previous: dict[str, Any] | None,
+    expected_schema_version: int = HSE95.EXPECTED_SCHEMA_VERSION,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     return run_stage(
         executable,
@@ -718,6 +790,7 @@ def _import(
         previous=previous,
         profile=False,
         require_coverage=False,
+        expected_schema_version=expected_schema_version,
     )
 
 
@@ -732,6 +805,8 @@ def run_synthetic_case(
     profile: bool = True,
     sqlite_experiment: dict[str, Any] | None = None,
     require_writer_metrics: bool = True,
+    index_jobs: int | None = None,
+    expected_schema_version: int = HSE95.EXPECTED_SCHEMA_VERSION,
 ) -> dict[str, Any]:
     corpus = generate_corpus(
         case_root / "corpus", count, shape, many_header_target, order
@@ -742,7 +817,8 @@ def run_synthetic_case(
     previous = None
 
     measured, previous = _import(
-        executable, corpus, cache, case_root, "import", previous
+        executable, corpus, cache, case_root, "import", previous,
+        expected_schema_version
     )
     stages.append(measured)
     for label, arguments in (
@@ -761,6 +837,8 @@ def run_synthetic_case(
             profile=profile,
             sqlite_experiment=sqlite_experiment,
             require_writer_metrics=require_writer_metrics,
+            index_jobs=index_jobs,
+            expected_schema_version=expected_schema_version,
         )
         stages.append(measured)
 
@@ -776,6 +854,8 @@ def run_synthetic_case(
         profile=profile,
         sqlite_experiment=sqlite_experiment,
         require_writer_metrics=require_writer_metrics,
+        index_jobs=index_jobs,
+        expected_schema_version=expected_schema_version,
     )
     stages.append(measured)
 
@@ -793,6 +873,8 @@ def run_synthetic_case(
             profile=profile,
             sqlite_experiment=sqlite_experiment,
             require_writer_metrics=require_writer_metrics,
+            index_jobs=index_jobs,
+            expected_schema_version=expected_schema_version,
         )
         stages.append(measured)
 
@@ -808,12 +890,15 @@ def run_synthetic_case(
         profile=profile,
         sqlite_experiment=sqlite_experiment,
         require_writer_metrics=require_writer_metrics,
+        index_jobs=index_jobs,
+        expected_schema_version=expected_schema_version,
     )
     stages.append(measured)
 
     update_compile_database(corpus, define="HSE103_CONFIG_STATE=1")
     measured, previous = _import(
-        executable, corpus, cache, case_root, "configuration-import", previous
+        executable, corpus, cache, case_root, "configuration-import", previous,
+        expected_schema_version
     )
     stages.append(measured)
     measured, previous = run_stage(
@@ -827,6 +912,8 @@ def run_synthetic_case(
         profile=profile,
         sqlite_experiment=sqlite_experiment,
         require_writer_metrics=require_writer_metrics,
+        index_jobs=index_jobs,
+        expected_schema_version=expected_schema_version,
     )
     stages.append(measured)
 
@@ -834,7 +921,8 @@ def run_synthetic_case(
     _write_header(generated, "generated_input", 1)
     update_compile_database(corpus, forced_include=generated)
     measured, previous = _import(
-        executable, corpus, cache, case_root, "generated-import", previous
+        executable, corpus, cache, case_root, "generated-import", previous,
+        expected_schema_version
     )
     stages.append(measured)
     measured, previous = run_stage(
@@ -848,6 +936,8 @@ def run_synthetic_case(
         profile=profile,
         sqlite_experiment=sqlite_experiment,
         require_writer_metrics=require_writer_metrics,
+        index_jobs=index_jobs,
+        expected_schema_version=expected_schema_version,
     )
     stages.append(measured)
     mutate_header(generated, 2)
@@ -862,6 +952,8 @@ def run_synthetic_case(
         profile=profile,
         sqlite_experiment=sqlite_experiment,
         require_writer_metrics=require_writer_metrics,
+        index_jobs=index_jobs,
+        expected_schema_version=expected_schema_version,
     )
     stages.append(measured)
 
@@ -887,6 +979,7 @@ def run_self_index_case(
     case_root: Path,
     *,
     require_writer_metrics: bool = True,
+    index_jobs: int | None = None,
 ) -> dict[str, Any]:
     cache = case_root / "cache"
     cache.mkdir()
@@ -923,6 +1016,8 @@ def run_self_index_case(
             profile=profile,
             require_coverage=coverage,
             require_writer_metrics=require_writer_metrics,
+            index_jobs=index_jobs,
+            expected_schema_version=expected_schema_version,
         )
         stages.append(measured)
     return {
@@ -940,6 +1035,8 @@ def run_cold_only_case(
     executable: Path,
     count: int,
     case_root: Path,
+    *,
+    index_jobs: int | None = None,
 ) -> dict[str, Any]:
     corpus = generate_corpus(
         case_root / "corpus",
@@ -960,6 +1057,7 @@ def run_cold_only_case(
         ["index"],
         previous=previous,
         profile=False,
+        index_jobs=index_jobs,
     )
     commands = json.loads(corpus.compile_commands.read_text(encoding="utf-8"))
     order = [Path(command["file"]).name for command in commands]
@@ -976,15 +1074,19 @@ def compare_disabled_overhead(
     count: int,
     trials: int,
     root: Path,
+    *,
+    index_jobs: int | None = None,
 ) -> dict[str, Any]:
     paired = []
     parity_failures = []
     for trial in range(1, trials + 1):
         baseline = run_cold_only_case(
-            uninstrumented, count, root / f"trial-{trial}" / "uninstrumented"
+            uninstrumented, count, root / f"trial-{trial}" / "uninstrumented",
+            index_jobs=index_jobs,
         )
         candidate = run_cold_only_case(
-            instrumented, count, root / f"trial-{trial}" / "instrumented"
+            instrumented, count, root / f"trial-{trial}" / "instrumented",
+            index_jobs=index_jobs,
         )
         baseline_digest = baseline["sqlite"]["snapshot"]["canonical_sha256"]
         candidate_digest = candidate["sqlite"]["snapshot"]["canonical_sha256"]
@@ -2208,12 +2310,32 @@ def main() -> int:
     )
     parser.add_argument("--checkout", type=Path, default=Path.cwd())
     parser.add_argument("--self-compile-db", type=Path)
-    parser.add_argument("--representative-files", type=int, default=32)
-    parser.add_argument("--scale-files", type=int, default=1000)
+    parser.add_argument(
+        "--profile",
+        choices=tuple(SCALE_PROFILES),
+        default="quick",
+        help=(
+            "corpus sizes: 'quick' for an ordinary change, 'full' for the "
+            "production-scale matrix the published SLO is derived from. An "
+            "explicit --representative-files/--scale-files overrides it."
+        ),
+    )
+    parser.add_argument("--representative-files", type=int)
+    parser.add_argument("--scale-files", type=int)
     parser.add_argument(
         "--many-header-target", type=int, default=DEFAULT_MANY_HEADER_TARGET
     )
     parser.add_argument("--trials", type=int, default=MINIMUM_TRIALS)
+    parser.add_argument(
+        "--index-jobs",
+        type=int,
+        help=(
+            "worker topology for every measured index stage. Omitted selects "
+            "the shipped automatic policy, which is what a production SLO is "
+            "measured against; pass 1 for the serial run that additionally "
+            "publishes the translation-unit cache and dependency counters"
+        ),
+    )
     parser.add_argument("--work-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--skip-self-index", action="store_true")
@@ -2235,6 +2357,11 @@ def main() -> int:
         help="record non-authoritative smoke data even when cidx competitors exist",
     )
     args = parser.parse_args()
+    profile = SCALE_PROFILES[args.profile]
+    if args.representative_files is None:
+        args.representative_files = profile["representative_files"]
+    if args.scale_files is None:
+        args.scale_files = profile["scale_files"]
 
     checkout = args.checkout.resolve()
     executable = args.cidx.resolve()
@@ -2253,6 +2380,8 @@ def main() -> int:
     )
     if args.trials < MINIMUM_TRIALS:
         raise SystemExit(f"--trials must be at least {MINIMUM_TRIALS}")
+    if args.index_jobs is not None and args.index_jobs < 1:
+        raise SystemExit("--index-jobs must be a positive integer")
     if args.representative_files < 1 or args.scale_files < 1:
         raise SystemExit("corpus sizes must be positive")
     if platform.system() == "Darwin" and not args.work_root.name.endswith(".noindex"):
@@ -2283,6 +2412,20 @@ def main() -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     report: dict[str, Any] = {
         "method": "HSE-103",
+        # Which worker topology every measured index stage ran under. An SLO
+        # is only meaningful next to the mode it was measured in, and the
+        # available telemetry depends on it.
+        "index_topology": {
+            "index_jobs": args.index_jobs,
+            "mode": "serial" if args.index_jobs == 1
+            else ("automatic" if args.index_jobs is None
+                  else f"parallel:{args.index_jobs}"),
+            "serial_only_counters_required": args.index_jobs == 1,
+            "serial_only_counter_prefixes": list(SERIAL_ONLY_COUNTER_PREFIXES),
+            "serial_only_counter_reason": (
+                None if args.index_jobs == 1 else SERIAL_ONLY_COUNTER_REASON
+            ),
+        },
         "authoritative_timing": quiescence["quiescent"],
         "host_quiescence": quiescence,
         "identity": environment_identity(
@@ -2290,6 +2433,12 @@ def main() -> int:
             checkout,
             [] if args.skip_self_index else [self_compile_db],
         ),
+        "scale": {
+            "profile": args.profile,
+            "representative_files": args.representative_files,
+            "scale_files": args.scale_files,
+            "trials": args.trials,
+        },
         "corpus_contract": {
             "baseline_distinct_owned_headers": BASELINE_DISTINCT_OWNED_HEADERS,
             "many_header_target": args.many_header_target,
@@ -2362,6 +2511,7 @@ def main() -> int:
                 args.many_header_target,
                 order,
                 case_root,
+                index_jobs=args.index_jobs,
             )
             report["individual_trials"][f"{case_key}:trial-{trial}"] = result
             trials.append(result)
@@ -2390,6 +2540,7 @@ def main() -> int:
                         order,
                         baseline_root,
                         require_writer_metrics=False,
+                        index_jobs=args.index_jobs,
                     )
                 )
             comparison = compare_commit_trials(baseline_trials, trials)
@@ -2409,7 +2560,8 @@ def main() -> int:
             case_root = args.work_root / "self-index" / f"trial-{trial}"
             case_root.mkdir(parents=True)
             result = run_self_index_case(
-                executable, checkout, self_compile_db, case_root
+                executable, checkout, self_compile_db, case_root,
+                index_jobs=args.index_jobs,
             )
             report["individual_trials"][f"self-index:trial-{trial}"] = result
             self_trials.append(result)
@@ -2436,6 +2588,7 @@ def main() -> int:
                         self_compile_db,
                         baseline_root,
                         require_writer_metrics=False,
+                        index_jobs=args.index_jobs,
                     )
                 )
             comparison = compare_commit_trials(baseline_self_trials, self_trials)
@@ -2452,19 +2605,49 @@ def main() -> int:
     if not args.skip_sqlite_matrix:
         for name, configuration in SQLITE_EXPERIMENTS.items():
             trials = []
+            refusal: str | None = None
             for trial in range(1, args.trials + 1):
                 case_root = args.work_root / "sqlite-matrix" / name / f"trial-{trial}"
                 case_root.mkdir(parents=True)
-                result = run_synthetic_case(
-                    executable,
-                    args.representative_files,
-                    "baseline",
-                    args.many_header_target,
-                    "forward",
-                    case_root,
-                    sqlite_experiment=configuration,
-                )
+                try:
+                    result = run_synthetic_case(
+                        executable,
+                        args.representative_files,
+                        "baseline",
+                        args.many_header_target,
+                        "forward",
+                        case_root,
+                        sqlite_experiment=configuration,
+                        index_jobs=args.index_jobs,
+                    )
+                except RuntimeError as error:
+                    # An alternative runtime setting that the shipped indexer
+                    # cannot run under is a *result*, not a crash: it is an
+                    # evidence-backed refusal of that setting. Aborting the
+                    # whole matrix here would also throw away every experiment
+                    # that did run. The shipped control is different -- if that
+                    # cannot run, the run measured nothing.
+                    refusal = str(error)[-4000:]
+                    break
                 trials.append(result)
+            if refusal is not None:
+                report["sqlite_matrix"][name] = {
+                    "configuration": configuration,
+                    "status": "refused",
+                    "trials_completed": len(trials),
+                    "error": refusal,
+                    "production_change_recommended": False,
+                    "recommendation_gate": (
+                        "The shipped indexer could not complete a run under "
+                        "this setting, so it is refused rather than measured."
+                    ),
+                }
+                if name == SQLITE_CONTROL_EXPERIMENT:
+                    report["parity_failures"].append(
+                        f"sqlite:{name}: the shipped control profile could not "
+                        "complete a run"
+                    )
+                continue
             aggregate = aggregate_trials(trials)
             control_database = (
                 args.work_root
@@ -2500,10 +2683,29 @@ def main() -> int:
             args.scale_files,
             args.trials,
             args.work_root / "disabled-overhead",
+            index_jobs=args.index_jobs,
         )
         report["disabled_profiling_overhead"] = comparison
         report["parity_failures"].extend(comparison["parity_failures"])
     report["parity_failures"].extend(report["commit_ab"]["parity_failures"])
+
+    # Quiescence is re-checked at the end, not only before the first trial. A
+    # competitor that starts *during* a run is exactly as contaminating as one
+    # that was already there, and the start-of-run check cannot see it: a run
+    # whose figures were measured alongside another indexer would otherwise be
+    # published as authoritative. Both observations are recorded so a reader
+    # can tell which end of the run the contention was found at.
+    final_quiescence = _host_quiescence()
+    report["host_quiescence_final"] = final_quiescence
+    report["authoritative_timing"] = (
+        quiescence["quiescent"] and final_quiescence["quiescent"]
+    )
+    if not final_quiescence["quiescent"]:
+        report["parity_failures"].append(
+            "host stopped being quiescent during the run; competing cidx "
+            "indexers: "
+            + "; ".join(final_quiescence["competing_cidx_indexers"])
+        )
 
     report["attribution_results"] = attribution_summary(
         report["aggregates"], args.representative_files, args.scale_files

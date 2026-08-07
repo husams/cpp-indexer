@@ -1,0 +1,17 @@
+{
+  "unchanged-warm": {
+    "benefit": "Cold indexing improved 4.68x against the pre-feature executable on the paired 256-unit corpus (11.925 s -> 2.547 s three-trial medians), and 1,000-unit cold indexing completes in 11.089 s. The warm median stays at 14% of the 5 s absolute warm contract.",
+    "cause": "The S-077 derived-publication pipeline evaluates transform readiness on every `cidx index`, with work proportional to the corpus rather than to what changed: measured at 1,000 units, the whole `transforms` cost of an unchanged run is incurred with no individual transform executing, alongside millions of SQLite virtual-machine steps for a run that extracts nothing.",
+    "owner": "S-077 (derived publication and incremental transforms). Carried in the published residual list with a 1.0 s unchanged-warm regression threshold and guarded by the scheduled production-scale job."
+  },
+  "one-source-incremental": {
+    "benefit": "Same cold improvement; the one-source median stays at 35% of the 2 s absolute one-translation-unit contract, and the run re-extracts exactly the one unit that changed.",
+    "cause": "The same per-invocation transform readiness evaluation, plus the run-wide session and workspace snapshot, both of which scale with the registered file count rather than with the change.",
+    "owner": "S-077 (readiness evaluation) and S-069 (run-wide indexing session). Same residual term and threshold as unchanged-warm."
+  },
+  "high-fan-in-header": {
+    "benefit": "The two executables are no longer doing the same work, and that is the point: the candidate re-extracts every unit the changed header reaches (256 of 256 on the paired corpus, 1,000 of 1,000 at production scale, and provably only 2 of 32 when the changed header is included by two units), while the pre-feature executable re-extracts none and leaves the index holding facts the header no longer supports.",
+    "cause": "S-078 wired the reverse include closure into target selection. Before it, a stale header was reported `deferred` and its dependents `already`, so the stage completed in 54 ms by doing nothing at all. The candidate's 3.361 s is the cost of the rebuild that correctness requires; measured against a cold build of the same corpus it is proportional to the affected set, not to the whole index.",
+    "owner": "S-078. This is a capability change rather than a performance regression, and it is reported here rather than removed from the comparison so the number stays visible."
+  }
+}

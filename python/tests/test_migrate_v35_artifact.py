@@ -52,10 +52,10 @@ def test_v34_database_gets_artifact_tables_and_version_bump(tmp_path):
     db.close()
 
     migrated = Storage(str(path))
-    assert SCHEMA_VERSION == 40
+    assert SCHEMA_VERSION == 41
     assert migrated._conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
-    ).fetchone()[0] == "40"
+    ).fetchone()[0] == "41"
     tables = {
         row[0]
         for row in migrated._conn.execute(
@@ -136,7 +136,7 @@ def test_v37_database_gets_artifact_tables_and_version_bump(tmp_path):
     migrated = Storage(str(path))
     assert migrated._conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
-    ).fetchone()[0] == "40"
+    ).fetchone()[0] == "41"
     tables = {
         row[0]
         for row in migrated._conn.execute(
