@@ -979,6 +979,14 @@ TEST_CASE("FactBatchWriter rolls back and replays a failed whole window") {
 }
 
 TEST_CASE("FactBatchWriter cancellation rolls back then replays the window") {
+  Fixture baseline;
+  storage::FactBatchWriter baseline_writer(baseline.storage);
+  const ast::FactBatch baseline_first = baseline.batch();
+  const ast::FactBatch baseline_second = baseline.batch(true);
+  REQUIRE(baseline_writer.apply(baseline_first, baseline.context()).ok());
+  REQUIRE(baseline_writer.apply(baseline_second, baseline.context()).ok());
+  const auto expected = queryable_fact_projection(baseline);
+
   Fixture fixture;
   storage::FactBatchWriter writer(fixture.storage);
   const ast::FactBatch first = fixture.batch();
@@ -996,11 +1004,19 @@ TEST_CASE("FactBatchWriter cancellation rolls back then replays the window") {
   CHECK(result.replayed);
   CHECK(result.report.windows_rolled_back == 1);
   CHECK(result.report.translation_units_replayed == items.size());
-  CHECK(fixture.storage.lookup_symbols_by_usr("usr-header-added").size() == 1);
+  CHECK(queryable_fact_projection(fixture) == expected);
 }
 
 TEST_CASE(
     "FactBatchWriter source mutation rolls back then replays the window") {
+  Fixture baseline;
+  storage::FactBatchWriter baseline_writer(baseline.storage);
+  const ast::FactBatch baseline_first = baseline.batch();
+  const ast::FactBatch baseline_second = baseline.batch(true);
+  REQUIRE(baseline_writer.apply(baseline_first, baseline.context()).ok());
+  REQUIRE(baseline_writer.apply(baseline_second, baseline.context()).ok());
+  const auto expected = queryable_fact_projection(baseline);
+
   Fixture fixture;
   storage::FactBatchWriter writer(fixture.storage);
   const ast::FactBatch first = fixture.batch();
@@ -1023,7 +1039,7 @@ TEST_CASE(
   CHECK(result.replayed);
   CHECK(result.report.windows_rolled_back == 1);
   CHECK(result.report.translation_units_replayed == items.size());
-  CHECK(fixture.storage.lookup_symbols_by_usr("usr-header-added").size() == 1);
+  CHECK(queryable_fact_projection(fixture) == expected);
 }
 
 // Re-expresses the deleted tests/owned_header_plan_test.cpp "stale plans are
