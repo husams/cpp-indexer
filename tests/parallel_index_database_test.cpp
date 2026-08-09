@@ -534,15 +534,27 @@ TEST_SUITE("clang") {
     CHECK(positions(serial) == expected);
     CHECK(positions(parallel) == expected);
 
-    // Both modes use the same prepared statement set. Parallel header claims
-    // identify shared include facts before publication, so staged,
-    // execution/VM, and insert work may only decrease relative to serial
-    // publication.
+    // The bounded window keeps the same deterministic writer semantics while
+    // paying for one transaction and one temporary-schema check across all five
+    // consecutive ranks.
+    CHECK(counter(parallel, "parallel.publication_windows") == 1);
+    CHECK(counter(parallel, "parallel.peak_publish_window_items") ==
+          static_cast<std::int64_t>(kTranslationUnits));
+    CHECK(counter(parallel, "fact_batch_writer.windows_started") == 1);
+    CHECK(counter(parallel, "fact_batch_writer.windows_committed") == 1);
+    CHECK(counter(parallel, "fact_batch_writer.window_items") ==
+          static_cast<std::int64_t>(kTranslationUnits));
+    CHECK(counter(parallel, "fact_batch_writer.transactions_started") == 1);
+    CHECK(counter(parallel, "fact_batch_writer.temporary_tables_checked") ==
+          15);
     const std::int64_t serial_prepared =
         counter(serial, "fact_batch_writer.statements_prepared");
     CHECK(serial_prepared > 0);
-    CHECK(counter(parallel, "fact_batch_writer.statements_prepared") ==
+    CHECK(counter(parallel, "fact_batch_writer.statements_prepared") <
           serial_prepared);
+    // Parallel header claims identify shared include facts before publication,
+    // so staged, execution/VM, and insert work may only decrease relative to
+    // serial publication.
     for (const char *name :
          {"fact_batch_writer.statement_executions",
           "fact_batch_writer.virtual_machine_steps",

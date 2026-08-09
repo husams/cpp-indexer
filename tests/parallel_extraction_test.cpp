@@ -13,6 +13,7 @@
 #include "index/parallel_policy.hpp"
 #include "index/parallel_runner.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -63,7 +64,8 @@ TEST_CASE("publication follows dispatch order under randomised completion") {
       [&](std::size_t, std::size_t rank) {
         std::this_thread::sleep_for(
             std::chrono::microseconds(delay_microseconds[rank]));
-        return ParallelResult<std::size_t>{.payload = rank, .bytes = 16};
+        return ParallelResult<std::size_t>{
+            .payload = rank, .bytes = 16, .error = std::nullopt};
       },
       [&](std::size_t rank, ParallelResult<std::size_t> &result) {
         CHECK(result.payload == rank);
@@ -181,7 +183,8 @@ TEST_CASE("an extraction that throws is reported, not swallowed") {
         if (rank == 7) {
           throw std::runtime_error("worker crashed on rank 7");
         }
-        return ParallelResult<std::size_t>{.payload = rank, .bytes = 8};
+        return ParallelResult<std::size_t>{
+            .payload = rank, .bytes = 8, .error = std::nullopt};
       },
       [&](std::size_t, ParallelResult<std::size_t> &result) {
         if (result.error) {
@@ -218,6 +221,77 @@ TEST_CASE("cancellation stops dispatch and publication") {
   CHECK(status == ParallelRunStatus::cancelled);
   CHECK(published.size() <= 22);
   CHECK(metrics.items_published < 500);
+}
+
+TEST_CASE("windowed publication groups consecutive ranks within both bounds") {
+  ParallelPlan plan = default_plan(4, 8, 48);
+  std::vector<std::size_t> published;
+  std::vector<std::size_t> window_sizes;
+  ParallelRunMetrics metrics;
+  const ParallelRunStatus status =
+      run_parallel_extraction_windowed<std::size_t>(
+          plan, 10, 8,
+          [](std::size_t, std::size_t rank) {
+            if (rank == 0) {
+              std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            return ParallelResult<std::size_t>{
+                .payload = rank, .bytes = 16, .error = std::nullopt};
+          },
+          [&](std::span<RankedParallelResult<std::size_t>> window) {
+            window_sizes.push_back(window.size());
+            for (const auto &[rank, result] : window) {
+              CHECK(result.payload == rank);
+              published.push_back(rank);
+            }
+            return ParallelWindowPublication{.items_published = window.size()};
+          },
+          always_running(), ignore_abandon(), metrics);
+
+  CHECK(status == ParallelRunStatus::none);
+  REQUIRE(!window_sizes.empty());
+  CHECK(window_sizes.front() == 3);
+  CHECK(std::ranges::all_of(window_sizes,
+                            [](std::size_t size) { return size <= 3; }));
+  CHECK(std::accumulate(window_sizes.begin(), window_sizes.end(),
+                        std::size_t{0}) == 10);
+  CHECK(published == std::vector<std::size_t>{0, 1, 2, 3, 4, 5, 6, 7, 8, 9});
+  CHECK(metrics.publication_windows == window_sizes.size());
+  CHECK(metrics.peak_publish_window_items == 3);
+  CHECK(metrics.peak_publish_window_bytes == 48);
+  CHECK(metrics.items_published == published.size());
+}
+
+TEST_CASE(
+    "windowed publication reports extraction failure without reordering") {
+  std::vector<std::size_t> observed;
+  std::vector<std::size_t> failures;
+  ParallelRunMetrics metrics;
+  const ParallelRunStatus status =
+      run_parallel_extraction_windowed<std::size_t>(
+          default_plan(4), 8, 4,
+          [](std::size_t, std::size_t rank) -> ParallelResult<std::size_t> {
+            if (rank == 3) {
+              throw std::runtime_error("injected extraction failure");
+            }
+            return ParallelResult<std::size_t>{
+                .payload = rank, .bytes = 8, .error = std::nullopt};
+          },
+          [&](std::span<RankedParallelResult<std::size_t>> window) {
+            for (const auto &[rank, result] : window) {
+              observed.push_back(rank);
+              if (result.error) {
+                failures.push_back(rank);
+              }
+            }
+            return ParallelWindowPublication{.items_published = window.size()};
+          },
+          always_running(), ignore_abandon(), metrics);
+
+  CHECK(status == ParallelRunStatus::none);
+  CHECK(observed == std::vector<std::size_t>{0, 1, 2, 3, 4, 5, 6, 7});
+  CHECK(failures == std::vector<std::size_t>{3});
+  CHECK(metrics.publication_windows > 0);
 }
 
 // -- header claim oracle -----------------------------------------------------

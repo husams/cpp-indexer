@@ -22,7 +22,9 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <span>
 #include <string>
+#include <vector>
 
 #include "index/parallel_policy.hpp"
 
@@ -54,6 +56,9 @@ struct ParallelRunMetrics {
   double wall_seconds = 0.0;
   // Bytes reserved per in-flight extraction times peak in-flight extractions.
   std::uint64_t peak_reserved_bytes = 0;
+  std::size_t publication_windows = 0;
+  std::size_t peak_publish_window_items = 0;
+  std::uint64_t peak_publish_window_bytes = 0;
 };
 
 // One unit of work as seen by the runner. `bytes` is filled by the extraction
@@ -65,6 +70,30 @@ template <typename Payload> struct ParallelResult {
   // is reported through the publish callback's failure branch.
   std::optional<std::string> error;
 };
+
+template <typename Payload> struct RankedParallelResult {
+  std::size_t rank = 0;
+  ParallelResult<Payload> result;
+};
+
+struct ParallelWindowPublication {
+  std::size_t items_published = 0;
+  ParallelRunStatus stop_status = ParallelRunStatus::none;
+};
+
+// Windowed form used by the production indexer. The runner collects consecutive
+// ranks up to both `max_window_items` and the plan's queue-byte bound, then
+// submits that bounded span to one publication callback.
+template <typename Payload>
+[[nodiscard]] auto run_parallel_extraction_windowed(
+    const ParallelPlan &plan, std::size_t count, std::size_t max_window_items,
+    const std::function<ParallelResult<Payload>(std::size_t worker_index,
+                                                std::size_t rank)> &extract,
+    const std::function<ParallelWindowPublication(
+        std::span<RankedParallelResult<Payload>> window)> &publish,
+    const std::function<bool()> &cancelled,
+    const std::function<void(std::size_t rank)> &on_abandon,
+    ParallelRunMetrics &metrics) -> ParallelRunStatus;
 
 // Runs `count` items through `extract` on up to `plan.workers` threads and
 // hands each result to `publish` on the calling thread in index order.

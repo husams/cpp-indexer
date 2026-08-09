@@ -185,86 +185,136 @@ auto run_parallel_index(cidx::Storage &db, const std::string &index_path,
         .payload = std::move(outcome), .bytes = bytes, .error = std::nullopt};
   };
 
-  const auto publish = [&](std::size_t rank,
-                           ParallelResult<ast::IndexOneOutcome> &result) {
-    const ParallelIndexTarget &target = targets[rank];
-    ast::IndexOneOutcome &outcome = result.payload;
-    if (result.error) {
-      // The worker threw. Report it exactly like a failed parse so the run's
-      // failure accounting and diagnostics are the same on both paths.
-      outcome.parse_failed = true;
-      if (outcome.error.empty()) {
-        outcome.error = target.path + ": extraction failed: " + *result.error;
-      }
-    }
-    bool published = false;
-    if (!outcome.parse_failed && !outcome.source_changed &&
-        outcome.publication) {
-      cidx::storage::FactBatchWriter writer(db);
-      const cidx::storage::FactBatchPublicationContext context{
-          .route_plan = outcome.publication->route_plan,
-          .translation_unit = outcome.publication->translation_unit,
-          .expected_generation = outcome.publication->expected_generation,
-          .source_is_current =
-              [](const std::string &candidate,
-                 const ast::PlannedSourceSnapshot &snapshot) {
-                return ast::SourceSnapshot{.mtime = snapshot.mtime,
-                                           .md5 = snapshot.md5}
-                    .matches(candidate);
-              },
-          .configuration_id = outcome.publication->configuration_id,
-          .configuration = outcome.publication->configuration,
-          .failure = cidx::storage::FactBatchWriterFailurePoint::none};
-      cidx::storage::FactBatchWriterResult applied;
-      try {
-        applied = writer.apply(outcome.publication->batch, context);
-      } catch (const std::exception &error) {
-        // The writer throws rather than reporting on lock acquisition failure
-        // and on schema errors. A publication failure must fail this
-        // translation unit, never abort the run: the writer's transaction has
-        // already rolled back, so the file simply stays pending.
-        applied.error =
-            std::string("FactBatch publication failed: ") + error.what();
-      }
-      // This scheduler owns its own writer, so it also owns publishing that
-      // writer's telemetry. Without this the default (parallel) configuration
-      // reports no `fact_batch_writer.*` counters or timings at all, and the
-      // production measurement gate -- which requires them -- cannot run
-      // against the mode that actually ships.
-      ast::record_writer_profile(applied.report, profile::active());
-      if (applied.ok()) {
-        published = true;
-      } else {
-        // A writer or commit failure must not leave a partially committed
-        // translation unit: the writer's own transaction rolled back, and the
-        // outcome is reported as a failure so the file stays pending.
-        //
-        // The owned-header grants must be dropped with it. Nothing was written
-        // for those headers, so leaving the grants standing would deny them to
-        // a later translation unit that would then report them "already" while
-        // no row exists -- serially the next unit finds no committed row and
-        // indexes them.
-        oracle.revoke_grants(rank);
-        outcome.parse_failed = true;
-        outcome.error = applied.error.value_or("FactBatch publication failed");
-        outcome.dependency_facts = {};
-      }
-    } else if (!outcome.parse_failed && !outcome.source_changed) {
-      outcome.parse_failed = true;
-      if (outcome.error.empty()) {
-        outcome.error = "FactBatch extraction produced no publication batch";
-      }
-    }
-    if (published) {
-      ++report.published;
-    } else {
-      ++report.failed;
-    }
-    return observer(target, outcome, published);
+  const auto publication_context = [](const ast::IndexOneOutcome &outcome) {
+    return cidx::storage::FactBatchPublicationContext{
+        .route_plan = outcome.publication->route_plan,
+        .translation_unit = outcome.publication->translation_unit,
+        .expected_generation = outcome.publication->expected_generation,
+        .source_is_current =
+            [](const std::string &candidate,
+               const ast::PlannedSourceSnapshot &snapshot) {
+              return ast::SourceSnapshot{.mtime = snapshot.mtime,
+                                         .md5 = snapshot.md5}
+                  .matches(candidate);
+            },
+        .configuration_id = outcome.publication->configuration_id,
+        .configuration = outcome.publication->configuration,
+        .failure = cidx::storage::FactBatchWriterFailurePoint::none};
   };
 
-  report.status = run_parallel_extraction<ast::IndexOneOutcome>(
-      report.plan, targets.size(), extract, publish, cancelled,
+  const auto publish =
+      [&](std::span<RankedParallelResult<ast::IndexOneOutcome>> window)
+      -> ParallelWindowPublication {
+    std::vector<cidx::storage::FactBatchWriterWindowItem> writer_items;
+    std::vector<std::size_t> writer_positions;
+    writer_items.reserve(window.size());
+    writer_positions.reserve(window.size());
+    for (std::size_t position = 0; position < window.size(); ++position) {
+      auto &[rank, result] = window[position];
+      ast::IndexOneOutcome &outcome = result.payload;
+      if (result.error) {
+        outcome.parse_failed = true;
+        if (outcome.error.empty()) {
+          outcome.error =
+              targets[rank].path + ": extraction failed: " + *result.error;
+        }
+      }
+      if (!outcome.parse_failed && !outcome.source_changed &&
+          outcome.publication) {
+        writer_positions.push_back(position);
+        writer_items.push_back({.batch = &outcome.publication->batch,
+                                .context = publication_context(outcome),
+                                .approximate_bytes = result.bytes});
+      } else if (!outcome.parse_failed && !outcome.source_changed) {
+        outcome.parse_failed = true;
+        if (outcome.error.empty()) {
+          outcome.error = "FactBatch extraction produced no publication batch";
+        }
+      }
+    }
+
+    cidx::storage::FactBatchWriterWindowResult applied;
+    if (!writer_items.empty()) {
+      cidx::storage::FactBatchWriter writer(db);
+      try {
+        const auto mode =
+            writer_items.size() == window.size()
+                ? cidx::storage::FactBatchWriterWindowMode::speculative
+                : cidx::storage::FactBatchWriterWindowMode::replay_only;
+        applied = writer.apply_window(writer_items, cancelled, mode);
+      } catch (const std::exception &error) {
+        applied.results.resize(writer_items.size());
+        for (auto &result : applied.results) {
+          result.error =
+              std::string("FactBatch publication failed: ") + error.what();
+        }
+      }
+      ast::record_writer_profile(applied.report, profile::active());
+      if (profile::active()) {
+        profile::add_counter("fact_batch_writer.windows_started",
+                             applied.report.windows_started);
+        profile::add_counter("fact_batch_writer.windows_committed",
+                             applied.report.windows_committed);
+        profile::add_counter("fact_batch_writer.windows_rolled_back",
+                             applied.report.windows_rolled_back);
+        profile::add_counter("fact_batch_writer.window_items",
+                             applied.report.window_items);
+        profile::add_counter("fact_batch_writer.window_bytes",
+                             applied.report.window_bytes);
+        profile::add_counter("fact_batch_writer.translation_units_replayed",
+                             applied.report.translation_units_replayed);
+      }
+    }
+
+    std::vector<const cidx::storage::FactBatchWriterResult *> by_position(
+        window.size(), nullptr);
+    for (std::size_t index = 0;
+         index < writer_positions.size() && index < applied.results.size();
+         ++index) {
+      by_position[writer_positions[index]] = &applied.results[index];
+    }
+
+    bool keep_going = true;
+    std::size_t items_published = 0;
+    for (std::size_t position = 0; position < window.size(); ++position) {
+      const std::size_t rank = window[position].rank;
+      const ParallelIndexTarget &target = targets[rank];
+      ast::IndexOneOutcome &outcome = window[position].result.payload;
+      bool published = false;
+      if (const auto *result = by_position[position]; result != nullptr) {
+        if (result->ok()) {
+          published = true;
+        } else {
+          oracle.revoke_grants(rank);
+          outcome.parse_failed = true;
+          outcome.error =
+              result->error.value_or("FactBatch publication failed");
+          outcome.dependency_facts = {};
+        }
+      }
+      if (published) {
+        ++report.published;
+      } else {
+        ++report.failed;
+      }
+      const bool item_continues = observer(target, outcome, published);
+      if (keep_going && item_continues) {
+        ++items_published;
+      } else {
+        keep_going = false;
+      }
+    }
+    ParallelRunStatus stop_status = ParallelRunStatus::none;
+    if (!keep_going) {
+      stop_status = cancelled() ? ParallelRunStatus::cancelled
+                                : ParallelRunStatus::publication_stopped;
+    }
+    return {.items_published = items_published, .stop_status = stop_status};
+  };
+
+  report.status = run_parallel_extraction_windowed<ast::IndexOneOutcome>(
+      report.plan, targets.size(), report.plan.max_queue_items, extract,
+      publish, cancelled,
       [&oracle](std::size_t rank) { oracle.release_unclaimed(rank); },
       report.run);
   oracle.cancel();
@@ -294,6 +344,12 @@ void record_parallel_index_profile(const ParallelIndexReport &report) {
                        report.run.peak_reorder_bytes);
   profile::add_counter("parallel.peak_reserved_bytes",
                        report.run.peak_reserved_bytes);
+  profile::add_counter("parallel.publication_windows",
+                       report.run.publication_windows);
+  profile::add_counter("parallel.peak_publish_window_items",
+                       report.run.peak_publish_window_items);
+  profile::add_counter("parallel.peak_publish_window_bytes",
+                       report.run.peak_publish_window_bytes);
   profile::add_counter("parallel.header_claim_candidates",
                        report.claims.candidates);
   profile::add_counter("parallel.header_claim_granted", report.claims.granted);
