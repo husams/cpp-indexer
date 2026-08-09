@@ -40,6 +40,7 @@ from . import (
     index_steps,
     parallel_steps,
     pipeline_steps,
+    publication_steps,
     provenance_steps,
     queryplan_steps,
     signature_steps,
@@ -51,6 +52,7 @@ from .workspace import Workspace
 _STEP_MODULES: tuple[ModuleType, ...] = (
     pipeline_steps,
     parallel_steps,
+    publication_steps,
     queryplan_steps,
     index_steps,
     symbol_steps,
