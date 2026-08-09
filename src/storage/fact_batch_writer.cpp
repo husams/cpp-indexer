@@ -1950,7 +1950,8 @@ void publish_includes(SqliteDb &database, FactBatchWriterResult &result,
       "TEXT) FROM temp.cidx_batch_file_map src JOIN include_edge e ON "
       "e.src_file_id=src.file_id AND e.dst_path=a.t0 AND e.config_id=" +
           include_config_text +
-          " WHERE src.batch=a.batch AND src.handle=a.file_handle LIMIT 1) "
+          " WHERE src.batch=a.batch AND src.handle=a.file_handle AND "
+          "src.planned=1 LIMIT 1) "
           "WHERE a.family=" +
           include_family + " AND a.batch=" + batch_token_text +
           " AND a.i9 IS NULL AND EXISTS(SELECT 1 FROM "
@@ -1958,14 +1959,14 @@ void publish_includes(SqliteDb &database, FactBatchWriterResult &result,
           "e.src_file_id=src.file_id AND e.dst_path=a.t0 AND e.config_id=" +
           include_config_text +
           " WHERE src.batch=a.batch AND src.handle=a.file_handle AND "
-          "e.dst_file_id IS NOT NULL)"));
-  // Deliberately whole-batch, not planned-gated. include_config_id is keyed on
-  // this TU's tu_file_id, so every row touched here is include state this TU
-  // owns; the replaced routine (base storage_include.cpp:513) retired the
-  // config's rows wholesale for the same reason. Symbol/definition
-  // applicability is planned-gated because those facts are shared across TUs;
-  // include state is not. Re-deriving an unplanned header's include edges from
-  // this TU's own preprocessing is the correct, complete replacement.
+          "src.planned=1 AND e.dst_file_id IS NOT NULL)"));
+  // Include edges, sites, and macro uses belong to the planned source file,
+  // not to every TU whose preprocessing happened to observe that source. The
+  // ordered header-claim gate gives one TU ownership per normalized
+  // configuration; later TUs still publish their own include_config,
+  // translation_unit, and file_config associations, but skip the shared rows.
+  // Querying by normalized configuration remains complete because
+  // include_edges_from_config joins through the first owner's include_config.
   auto &include_rows = result.report.families[ast::FactFamily::includes];
   auto &macro_rows = result.report.families[ast::FactFamily::macros];
   const auto count = [](std::int64_t changes) -> std::uint64_t {
@@ -1976,13 +1977,13 @@ void publish_includes(SqliteDb &database, FactBatchWriterResult &result,
       "DELETE FROM include_edge WHERE config_id=" + include_config_text +
           " AND src_file_id IN (SELECT file_id FROM temp.cidx_batch_file_map "
           "WHERE batch=" +
-          batch_token_text + ")"));
+          batch_token_text + " AND planned=1)"));
   macro_rows.deleted += count(execute(
       database, result.report,
       "DELETE FROM include_macro_use WHERE config_id=" + include_config_text +
           " AND src_file_id IN (SELECT file_id FROM temp.cidx_batch_file_map "
           "WHERE batch=" +
-          batch_token_text + ")"));
+          batch_token_text + " AND planned=1)"));
   // The grouped include_edge rows are a second attempted population for this
   // family (the staged auxiliary records are the per-site observations), so
   // they are added to both staged and inserted -- every count below is a
@@ -2006,7 +2007,7 @@ void publish_includes(SqliteDb &database, FactBatchWriterResult &result,
           ",MAX(a.i7),0,COUNT(*) FROM temp.cidx_batch_aux a INDEXED BY "
           "cidx_batch_aux_family_batch "
           "JOIN temp.cidx_batch_file_map src ON src.batch=a.batch "
-          "AND src.handle=a.file_handle "
+          "AND src.handle=a.file_handle AND src.planned=1 "
           "LEFT JOIN temp.cidx_batch_file_map dst ON dst.batch=a.batch "
           "AND dst.handle=a.i9 LEFT JOIN component_root dc ON dc.path=a.t3 "
           "LEFT JOIN "
@@ -2025,7 +2026,8 @@ void publish_includes(SqliteDb &database, FactBatchWriterResult &result,
       "is_angled,directive,cond_fingerprint,resolved,guarded) "
       "SELECT e.id,a.i0,a.i1,a.i2,a.i3,a.t1,a.i5,a.i4,a.t2,a.i6,a.i8 "
       "FROM temp.cidx_batch_aux a JOIN temp.cidx_batch_file_map src "
-      "ON src.batch=a.batch AND src.handle=a.file_handle JOIN include_edge e "
+      "ON src.batch=a.batch AND src.handle=a.file_handle AND src.planned=1 "
+      "JOIN include_edge e "
       "ON e.src_file_id=src.file_id AND e.dst_path=a.t0 AND e.config_id=" +
           include_config_text + " WHERE a.family=" + include_family +
           " AND a.batch=" + batch_token_text));
@@ -2042,7 +2044,8 @@ void publish_includes(SqliteDb &database, FactBatchWriterResult &result,
                   include_config_text +
                   ",SUM(a.i0) FROM temp.cidx_batch_aux a "
                   "JOIN temp.cidx_batch_file_map src ON src.batch=a.batch "
-                  "AND src.handle=a.file_handle WHERE a.family=" +
+                  "AND src.handle=a.file_handle AND src.planned=1 WHERE "
+                  "a.family=" +
                   macro_family + " AND a.batch=" + batch_token_text +
                   " GROUP BY src.file_id,a.t0,a.t1"));
   // The macro INSERT groups repeated uses per (file, def_path, name), so the

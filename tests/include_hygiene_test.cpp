@@ -16,7 +16,6 @@
 #include <unistd.h>
 
 #include <algorithm>
-#include <set>
 #include <cstdlib>
 #include <fstream>
 #include <optional>
@@ -786,13 +785,12 @@ TEST_CASE("conditional: an #ifdef on a macro from a header is never unused") {
   CHECK(has_macro);
 }
 
-TEST_CASE("include facts: a header included by two TUs keeps facts under both "
-          "configurations") {
+TEST_CASE("include facts: two TUs share one claimed header fact set") {
   // shared.hpp is itself a source of includes (it pulls leaf.hpp) and is parsed
-  // once per TU, under a different build configuration each time. The old
-  // wholesale delete-by-src-file wiped the first TU's row when the second was
-  // recorded, collapsing the graph to last-TU-wins. The refresh is per
-  // configuration now, so both survive.
+  // once per TU under the same normalized build configuration. The ordered
+  // claim gives the shared edge to the first TU; the second TU keeps its own
+  // include_config association and queries the first claimant's durable row
+  // through that normalized configuration.
   Project p;
   p.add("leaf.hpp", "#pragma once\nstruct Leaf {};\n");
   p.add("shared.hpp", "#pragma once\n#include \"leaf.hpp\"\nstruct Shared {};\n");
@@ -802,17 +800,29 @@ TEST_CASE("include facts: a header included by two TUs keeps facts under both "
 
   cidx::Storage db(p.cache + "/index.db");
   const std::optional<cidx::File> shared = db.get_file(p.path("shared.hpp"));
+  const std::optional<cidx::File> a = db.get_file(p.path("a.cpp"));
+  const std::optional<cidx::File> b = db.get_file(p.path("b.cpp"));
   REQUIRE(shared.has_value());
-  int leaf_edges = 0;
-  std::set<int64_t> configs;
-  for (const cidx::IncludeEdge &e : db.include_edges_from(shared->id, true)) {
-    if (e.dst_path == p.path("leaf.hpp")) {
-      ++leaf_edges;
-      configs.insert(e.config_id);
-    }
-  }
-  CHECK(leaf_edges == 2);   // one per TU configuration
-  CHECK(configs.size() == 2);
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  const std::int64_t shared_id = shared ? shared->id : -1;
+  const std::int64_t a_id = a ? a->id : -1;
+  const std::int64_t b_id = b ? b->id : -1;
+  const auto a_configs = db.include_configs_for_tu(a_id);
+  const auto b_configs = db.include_configs_for_tu(b_id);
+  REQUIRE(a_configs.size() == 1);
+  REQUIRE(b_configs.size() == 1);
+  REQUIRE(a_configs.front().translation_unit_config_id.has_value());
+  REQUIRE(b_configs.front().translation_unit_config_id.has_value());
+  CHECK(a_configs.front().id != b_configs.front().id);
+  CHECK(a_configs.front().translation_unit_config_id ==
+        b_configs.front().translation_unit_config_id);
+
+  const auto leaf_edges = db.include_edges_from_config(
+      shared_id, a_configs.front().translation_unit_config_id.value_or(-1),
+      true);
+  REQUIRE(leaf_edges.size() == 1);
+  CHECK(leaf_edges.front().dst_path == p.path("leaf.hpp"));
 }
 
 TEST_CASE("scope: a path the include tier never indexed is reported uncovered") {

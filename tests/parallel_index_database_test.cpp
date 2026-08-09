@@ -53,7 +53,7 @@ namespace cli = cidx::cli;
 
 namespace {
 
-constexpr std::size_t kTranslationUnits = 4;
+constexpr std::size_t kTranslationUnits = 5;
 
 std::string make_temp_dir() {
   char tmpl[] = "/tmp/cidx_parallel_db_XXXXXX";
@@ -84,10 +84,13 @@ std::string replace_all(std::string text, const std::string &from,
 // Writes the corpus and its compilation database, and returns the source root.
 std::string write_corpus(const std::string &root) {
   ::mkdir(root.c_str(), 0755);
+  write_file(root + "/leaf.hpp", "#pragma once\n"
+                                 "inline constexpr int leaf_value = 7;\n");
   write_file(root + "/shared.hpp",
              "#pragma once\n"
+             "#include \"leaf.hpp\"\n"
              "namespace shared {\n"
-             "inline int value() { return 7; }\n"
+             "inline int value() { return leaf_value; }\n"
              "struct Carrier { int held; int get() const { return held; } };\n"
              "} // namespace shared\n");
   std::string commands = "[\n";
@@ -197,7 +200,57 @@ std::string project(const std::string &index_path, const std::string &root) {
               "LEFT JOIN file f ON f.id = d.file_id "
               "ORDER BY s.usr, f.name, d.line, d.col",
               4);
+  out += dump(db, "include",
+              "SELECT DISTINCT src.name,e.dst_path,s.line,s.col,s.spelling "
+              "FROM include_edge e JOIN file src ON src.id=e.src_file_id "
+              "JOIN include_site s ON s.edge_id=e.id "
+              "ORDER BY src.name,e.dst_path,s.line,s.col,s.spelling",
+              5);
   return replace_all(out, root, "{ROOT}");
+}
+
+void check_per_tu_includes(const std::string &index_path,
+                           const std::string &root) {
+  Storage store(index_path);
+  const auto shared = store.get_file(root + "/src/shared.hpp");
+  REQUIRE(shared.has_value());
+  const std::int64_t shared_id = shared ? shared->id : -1;
+  std::optional<std::int64_t> normalized_config;
+  for (std::size_t unit = 0; unit < kTranslationUnits; ++unit) {
+    const auto source =
+        store.get_file(root + "/src/unit_" + std::to_string(unit) + ".cpp");
+    REQUIRE(source.has_value());
+    const std::int64_t source_id = source ? source->id : -1;
+    const auto configs = store.include_configs_for_tu(source_id);
+    REQUIRE(configs.size() == 1);
+    REQUIRE(configs.front().translation_unit_config_id.has_value());
+    if (!normalized_config) {
+      normalized_config = configs.front().translation_unit_config_id;
+    }
+    CHECK(configs.front().translation_unit_config_id == normalized_config);
+    const std::int64_t config_id = normalized_config.value_or(-1);
+
+    const auto main_edges =
+        store.include_edges_from_config(source_id, config_id, true);
+    REQUIRE(main_edges.size() == 1);
+    CHECK(main_edges.front().dst_path == root + "/src/shared.hpp");
+    const auto shared_edges =
+        store.include_edges_from_config(shared_id, config_id, true);
+    REQUIRE(shared_edges.size() == 1);
+    CHECK(shared_edges.front().dst_path == root + "/src/leaf.hpp");
+  }
+
+  SqliteDb &db = store.raw_db();
+  auto shared_rows =
+      db.prepare("SELECT COUNT(*) FROM include_edge WHERE src_file_id=?");
+  shared_rows.bind(1, shared_id);
+  REQUIRE(shared_rows.step());
+  CHECK(shared_rows.col_int64(0) == 1);
+  shared_rows.step_done();
+  auto configs = db.prepare("SELECT COUNT(*) FROM include_config");
+  REQUIRE(configs.step());
+  CHECK(configs.col_int64(0) == static_cast<std::int64_t>(kTranslationUnits));
+  configs.step_done();
 }
 
 // Forces worker completion into the exact reverse of the dispatch order: rank
@@ -301,6 +354,8 @@ TEST_SUITE("clang") {
 
     CHECK(project(serial_cache + "/index.db", root) ==
           project(parallel_index, root));
+    check_per_tu_includes(serial_cache + "/index.db", root);
+    check_per_tu_includes(parallel_index, root);
   }
 
   TEST_CASE("delete/re-emit and repeated declarations stay deterministic under "
@@ -454,8 +509,8 @@ TEST_SUITE("clang") {
       std::size_t at = profile.find(key);
       while (at != std::string::npos) {
         const std::size_t start = at + key.size();
-        found.push_back(std::stoll(
-            profile.substr(start, profile.find_first_of(",\n", start) - start)));
+        found.push_back(std::stoll(profile.substr(
+            start, profile.find_first_of(",\n", start) - start)));
         at = profile.find(key, start);
       }
       std::ranges::sort(found);
@@ -479,16 +534,25 @@ TEST_SUITE("clang") {
     CHECK(positions(serial) == expected);
     CHECK(positions(parallel) == expected);
 
-    // The writer did the same work in both modes, and said so in both.
+    // Both modes use the same prepared statement set. Parallel header claims
+    // identify shared include facts before publication, so staged,
+    // execution/VM, and insert work may only decrease relative to serial
+    // publication.
+    const std::int64_t serial_prepared =
+        counter(serial, "fact_batch_writer.statements_prepared");
+    CHECK(serial_prepared > 0);
+    CHECK(counter(parallel, "fact_batch_writer.statements_prepared") ==
+          serial_prepared);
     for (const char *name :
-         {"fact_batch_writer.statements_prepared",
-          "fact_batch_writer.statement_executions",
+         {"fact_batch_writer.statement_executions",
           "fact_batch_writer.virtual_machine_steps",
           "fact_batch_writer.rows_staged", "fact_batch_writer.rows_inserted"}) {
       CAPTURE(name);
       const std::int64_t serial_value = counter(serial, name);
+      const std::int64_t parallel_value = counter(parallel, name);
       CHECK(serial_value > 0);
-      CHECK(counter(parallel, name) == serial_value);
+      CHECK(parallel_value > 0);
+      CHECK(parallel_value <= serial_value);
     }
   }
 }

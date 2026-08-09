@@ -649,18 +649,17 @@ private:
           std::uint64_t recorded = 0;
           for (const IncludeFact &fact : state_.includes.includes) {
             const auto source = routed_file_ids_.find(fact.src_path);
-            const FactPartitionKey owner = fact_partition(fact.src_path);
-            if (source != routed_file_ids_.end()) {
-              recorder_.set_current_file_id(source->second);
-            } else {
-              if (!db_.get_file(fact.src_path)) {
-                continue;
-              }
-              // Include facts are configuration-specific even when the owned
-              // header's semantic partition is already current. Register its
-              // natural partition so this TU still publishes the nested edge.
-              recorder_.set_partition(owner);
+            // The ordered claim gate places only this TU's main file and the
+            // headers it owns in routed_file_ids_. A later TU still observes
+            // shared-header preprocessing callbacks, but the first claimant's
+            // facts are already the durable configuration-scoped copy. Skip
+            // before path partitioning or database lookup so claim-once also
+            // removes the persistence-pass cost, not merely the final INSERT.
+            if (source == routed_file_ids_.end()) {
+              continue;
             }
+            const FactPartitionKey owner = fact_partition(fact.src_path);
+            recorder_.set_current_file_id(source->second);
             recorder_.emit(IncludeDirectiveRecord{
                 .partition = owner,
                 .source = owner.file,
@@ -684,15 +683,11 @@ private:
           }
           for (const MacroUseFact &fact : state_.includes.macro_uses) {
             const auto source = routed_file_ids_.find(fact.src_path);
-            const FactPartitionKey owner = fact_partition(fact.src_path);
-            if (source != routed_file_ids_.end()) {
-              recorder_.set_current_file_id(source->second);
-            } else {
-              if (!db_.get_file(fact.src_path)) {
-                continue;
-              }
-              recorder_.set_partition(owner);
+            if (source == routed_file_ids_.end()) {
+              continue;
             }
+            const FactPartitionKey owner = fact_partition(fact.src_path);
+            recorder_.set_current_file_id(source->second);
             recorder_.emit(MacroUseRecord{
                 .partition = owner,
                 .source = owner.file,
@@ -707,19 +702,23 @@ private:
           }
           const std::size_t collapsed =
               state_.includes.includes.size() - unique_edges.size();
+          const std::size_t attempted = state_.includes.includes.size() +
+                                        state_.includes.macro_uses.size();
+          const std::size_t claim_duplicates = attempted - recorded;
           // Preserve the historical include-pass accounting contract: one
           // duplicate represents the TU include collector itself and each
           // collapsed edge represents its raw and normalized observations.
-          execution.metrics.note_duplicate(1 + (2 * collapsed));
+          // Facts observed from a header owned by another TU are additionally
+          // reported as claim duplicates rather than disappearing from
+          // telemetry.
+          execution.metrics.note_duplicate(1 + (2 * collapsed) +
+                                           claim_duplicates);
           // A non-empty include set contributes the legacy collector envelope
           // in addition to the concrete include and macro records.
           execution.metrics.note_emitted(
               recorded + (state_.includes.includes.empty() ? 0 : 1));
-          execution.metrics.note_fact_family(
-              "include_facts",
-              state_.includes.includes.size() +
-                  state_.includes.macro_uses.size(),
-              recorded);
+          execution.metrics.note_fact_family("include_facts", attempted,
+                                             recorded, claim_duplicates);
         });
     registry.register_pass(
         descriptor(

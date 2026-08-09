@@ -1174,4 +1174,244 @@ TEST_CASE(
   CHECK(after.front().id == first_id);
 }
 
+struct IncludeDedupFixture {
+  static constexpr std::size_t kTranslationUnits = 5;
+
+  IncludeDedupFixture() {
+    const std::int64_t universe =
+        storage.add_semantic_universe("workspace", "workspace");
+    const std::int64_t component =
+        storage.add_component("include-dedup", root(), "repo");
+    storage.set_component_semantic_universe(component, universe);
+    shared_file = storage.add_file_path(root() + "/shared.hpp");
+    leaf_file = storage.add_file_path(root() + "/leaf.hpp");
+    for (std::size_t index = 0; index < kTranslationUnits; ++index) {
+      tu_files.push_back(storage.add_file_path(tu_path(index)));
+    }
+  }
+
+  [[nodiscard]] static auto root() -> std::string {
+    return "/tmp/cidx-s116-include-dedup";
+  }
+
+  [[nodiscard]] static auto tu_path(std::size_t index) -> std::string {
+    return root() + "/tu" + std::to_string(index) + ".cpp";
+  }
+
+  [[nodiscard]] static auto file_partition(std::string file, std::size_t index)
+      -> ast::FactPartitionKey {
+    ast::FactPartitionKey result;
+    result.file.component_path = root();
+    result.file.file_name = std::move(file);
+    result.configuration.semantic_universe = "workspace";
+    result.configuration.translation_unit = tu_path(index);
+    result.configuration.normalized_configuration = "shared-config";
+    result.configuration.identity_source = result.file.portable_path();
+    return result;
+  }
+
+  [[nodiscard]] auto plan_for(std::size_t index, bool owns_shared) const
+      -> ast::OwnedHeaderRoutePlan {
+    const ast::FactPartitionKey main =
+        file_partition("tu" + std::to_string(index) + ".cpp", index);
+    ast::OwnedHeaderRouteCandidate main_route;
+    main_route.role = ast::PlannedFileRole::translation_unit;
+    main_route.translation_unit = tu_path(index);
+    main_route.translation_unit_file_id = tu_files.at(index);
+    main_route.path = main.file.portable_path();
+    main_route.existing_file_id = tu_files.at(index);
+    main_route.snapshot.md5 = "tu-" + std::to_string(index);
+    main_route.cleanup_symbols = true;
+    main_route.partition = main;
+    std::vector<ast::OwnedHeaderRouteCandidate> routes;
+    routes.push_back(std::move(main_route));
+    if (owns_shared) {
+      const ast::FactPartitionKey shared = file_partition("shared.hpp", index);
+      ast::OwnedHeaderRouteCandidate header_route;
+      header_route.role = ast::PlannedFileRole::owned_header;
+      header_route.translation_unit = tu_path(index);
+      header_route.translation_unit_file_id = tu_files.at(index);
+      header_route.path = shared.file.portable_path();
+      header_route.discovery_ordinal = 1;
+      header_route.existing_file_id = shared_file;
+      header_route.snapshot.md5 = "shared-md5";
+      header_route.cleanup_symbols = true;
+      header_route.partition = shared;
+      routes.push_back(std::move(header_route));
+    }
+    return ast::plan_owned_header_routes("generation-1", std::move(routes));
+  }
+
+  [[nodiscard]] static auto batch_for(const ast::OwnedHeaderRoutePlan &plan,
+                                      std::size_t index) -> ast::FactBatch {
+    const ast::SerialFactRoute route = plan.serial_route(tu_path(index));
+    REQUIRE_FALSE(route.partitions.empty());
+    const ast::FactPartitionKey main =
+        file_partition("tu" + std::to_string(index) + ".cpp", index);
+    const ast::FactPartitionKey shared = file_partition("shared.hpp", index);
+    const ast::FactPartitionKey leaf = file_partition("leaf.hpp", index);
+
+    ast::FactBatchRecorder recorder("include-dedup-contract-test");
+    recorder.set_partition(
+        main, route.partitions.at(route.main_partition).transient_file_handle);
+    recorder.set_partition(leaf);
+    const auto planned_header = std::ranges::find_if(
+        route.partitions, [&shared](const ast::FactRoutePartition &candidate) {
+          return candidate.partition.file == shared.file;
+        });
+    recorder.set_partition(shared, planned_header == route.partitions.end()
+                                       ? std::nullopt
+                                       : planned_header->transient_file_handle);
+
+    ast::IncludeDirectiveRecord shared_include;
+    shared_include.partition = shared;
+    shared_include.source = shared.file;
+    shared_include.destination = leaf.file;
+    shared_include.destination_path = leaf.file.portable_path();
+    shared_include.spelling = "leaf.hpp";
+    shared_include.line = 1;
+    shared_include.col = 1;
+    shared_include.begin_offset = 0;
+    shared_include.end_offset = 20;
+    shared_include.guarded = true;
+    recorder.emit(shared_include);
+
+    ast::MacroUseRecord shared_macro;
+    shared_macro.partition = shared;
+    shared_macro.source = shared.file;
+    shared_macro.definition = leaf.file;
+    shared_macro.definition_path = leaf.file.portable_path();
+    shared_macro.name = "LEAF_MACRO";
+    recorder.emit(shared_macro);
+
+    ast::IncludeDirectiveRecord main_include;
+    main_include.partition = main;
+    main_include.source = main.file;
+    main_include.destination = shared.file;
+    main_include.destination_path = shared.file.portable_path();
+    main_include.spelling = "shared.hpp";
+    main_include.line = 1;
+    main_include.col = 1;
+    main_include.begin_offset = 0;
+    main_include.end_offset = 22;
+    main_include.guarded = true;
+    recorder.emit(main_include);
+    return recorder.canonical_batch();
+  }
+
+  [[nodiscard]] static auto context_for(const ast::OwnedHeaderRoutePlan &plan,
+                                        std::size_t index)
+      -> storage::FactBatchPublicationContext {
+    cidx::TranslationUnitConfig configuration;
+    configuration.driver = "clang++";
+    configuration.working_dir = root();
+    configuration.language = "c++";
+    configuration.standard = "c++23";
+    configuration.arguments = {"-std=c++23"};
+
+    storage::FactBatchPublicationContext context;
+    context.route_plan = plan;
+    context.translation_unit = tu_path(index);
+    context.expected_generation = "generation-1";
+    context.source_is_current = [](const std::string &,
+                                   const ast::PlannedSourceSnapshot &) {
+      return true;
+    };
+    context.configuration = std::move(configuration);
+    return context;
+  }
+
+  Storage storage;
+  std::vector<std::int64_t> tu_files;
+  std::int64_t shared_file = -1;
+  std::int64_t leaf_file = -1;
+};
+
+TEST_CASE("FactBatchWriter persists shared include facts only for their "
+          "claimed owner") {
+  IncludeDedupFixture fixture;
+  storage::FactBatchWriter writer(fixture.storage);
+  std::int64_t normalized_config = -1;
+
+  for (std::size_t index = 0; index < IncludeDedupFixture::kTranslationUnits;
+       ++index) {
+    const bool owns_shared = index == 0;
+    const ast::OwnedHeaderRoutePlan plan = fixture.plan_for(index, owns_shared);
+    const auto result =
+        writer.apply(IncludeDedupFixture::batch_for(plan, index),
+                     IncludeDedupFixture::context_for(plan, index));
+    INFO(result.error.value_or(""));
+    REQUIRE(result.ok());
+    if (normalized_config < 0) {
+      normalized_config = result.configuration_id;
+    }
+    CHECK(result.configuration_id == normalized_config);
+
+    const auto &include_rows =
+        result.report.families.at(ast::FactFamily::includes);
+    const auto &macro_rows = result.report.families.at(ast::FactFamily::macros);
+    CHECK(include_rows.inserted == (owns_shared ? 4 : 2));
+    CHECK(macro_rows.inserted == (owns_shared ? 1 : 0));
+
+    const auto configs =
+        fixture.storage.include_configs_for_tu(fixture.tu_files.at(index));
+    REQUIRE(configs.size() == 1);
+    REQUIRE(configs.front().translation_unit_config_id.has_value());
+    CHECK(configs.front().translation_unit_config_id.value_or(-1) ==
+          normalized_config);
+    const auto main_edges = fixture.storage.include_edges_from_config(
+        fixture.tu_files.at(index), normalized_config, true);
+    REQUIRE(main_edges.size() == 1);
+    CHECK(main_edges.front().dst_path ==
+          IncludeDedupFixture::root() + "/shared.hpp");
+  }
+
+  const auto shared_edges = fixture.storage.include_edges_from_config(
+      fixture.shared_file, normalized_config, true);
+  REQUIRE(shared_edges.size() == 1);
+  CHECK(shared_edges.front().dst_path ==
+        IncludeDedupFixture::root() + "/leaf.hpp");
+
+  auto edge_owner = fixture.storage.raw_db().prepare(
+      "SELECT c.tu_file_id,e.id FROM include_edge e JOIN include_config c "
+      "ON c.id=e.config_id WHERE e.src_file_id=?");
+  edge_owner.bind(1, fixture.shared_file);
+  REQUIRE(edge_owner.step());
+  CHECK(edge_owner.col_int64(0) == fixture.tu_files.front());
+  const std::int64_t first_edge_id = edge_owner.col_int64(1);
+  edge_owner.step_done();
+
+  auto config_count =
+      fixture.storage.raw_db().prepare("SELECT COUNT(*) FROM include_config");
+  REQUIRE(config_count.step());
+  CHECK(config_count.col_int64(0) ==
+        static_cast<std::int64_t>(IncludeDedupFixture::kTranslationUnits));
+  config_count.step_done();
+
+  auto macro_count = fixture.storage.raw_db().prepare(
+      "SELECT COUNT(*) FROM include_macro_use WHERE src_file_id=?");
+  macro_count.bind(1, fixture.shared_file);
+  REQUIRE(macro_count.step());
+  CHECK(macro_count.col_int64(0) == 1);
+  macro_count.step_done();
+
+  const std::size_t repeat_index = IncludeDedupFixture::kTranslationUnits - 1;
+  const ast::OwnedHeaderRoutePlan repeat_plan =
+      fixture.plan_for(repeat_index, false);
+  const auto repeated =
+      writer.apply(IncludeDedupFixture::batch_for(repeat_plan, repeat_index),
+                   IncludeDedupFixture::context_for(repeat_plan, repeat_index));
+  INFO(repeated.error.value_or(""));
+  REQUIRE(repeated.ok());
+  CHECK(repeated.report.families.at(ast::FactFamily::includes).inserted == 2);
+  CHECK(repeated.report.families.at(ast::FactFamily::macros).inserted == 0);
+
+  auto shared_after = fixture.storage.raw_db().prepare(
+      "SELECT id FROM include_edge WHERE src_file_id=?");
+  shared_after.bind(1, fixture.shared_file);
+  REQUIRE(shared_after.step());
+  CHECK(shared_after.col_int64(0) == first_edge_id);
+  shared_after.step_done();
+}
+
 } // namespace
