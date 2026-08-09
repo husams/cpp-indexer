@@ -65,20 +65,24 @@ Unchanged — same files, same sizes:
 
   | Cluster | Exceptions | Removal issue(s) | Expires |
   |---|---|---|---|
-  | `query.plan` → `product.cli` / `analysis.graph` | 5 | HSE-24, HSE-68 | 2026-12-31 |
-  | `analysis.astgraph` → `product.cli` / `persistence` | 3 | HSE-62, HSE-68 | 2026-12-31 |
+  | `query.plan` → `product.cli` / `analysis.graph` | 4 | HSE-24 (3), HSE-68 (1) | 2026-12-31 |
+  | `analysis.astgraph` → `product.cli` / `persistence` | 3 | HSE-62 (2), HSE-68 (1) | 2026-12-31 |
   | `analysis.diff` → `product.cli` | 2 | HSE-68 | 2026-12-31 |
   | `analysis.graph` → `product.cli` | 2 | HSE-24 | 2026-12-31 |
   | `extraction.ast` → `persistence.sqlite` | 2 | HSE-63 | 2026-12-31 |
   | `persistence.sqlite` → `extraction.ast` (`storage/fact_batch_writer.hpp`) | 1 | HSE-62 | 2027-08-03 |
-  | other (`toolchain`, `util`, `include_hygiene`) | 3 | HSE-61, HSE-68 | 2026-12-31 |
+  | other (`toolchain`, `util` ×2, `include_hygiene`) | 4 | HSE-61 (2), HSE-68 (2) | 2026-12-31 |
+
+  Counted by removal issue instead: HSE-24 spans 5 exceptions (3 in
+  `query.plan` + 2 in `analysis.graph`), HSE-68 spans 6, HSE-62 spans 3,
+  HSE-61 and HSE-63 span 2 each — 18 in total.
 
 - **Correction to the previous snapshot:** the `storage ↔ ast` bidirectional
   coupling it flagged as an unmitigated smell is in fact a **single audited
   exception** (`fact_batch_writer.hpp` → `ast/`, HSE-62, expiring
   2027-08-03); the reverse direction (`ast/` → `storage/`, 5 files) is
   covered by HSE-63. The larger live debt is the **`query.plan` cluster**
-  (5 exceptions), all expiring 2026-12-31.
+  (4 exceptions), all expiring 2026-12-31.
 - **Fan-in/fan-out** (include-level): `util` fan-in 16, `storage` fan-in 15
   (expected for base layers); `cli` fan-out 12 (top-level aggregator).
   `extract/` has fan-in **0** inside `src/` — nothing includes its headers;
@@ -136,7 +140,10 @@ measurement corrections and deeper architecture evidence, not code drift:
 
 1. Exception inventory replaces the informal "layering smell" note —
    `storage ↔ ast` is one audited exception; `query.plan` is the bigger
-   cluster, and 17 of 18 exceptions expire 2026-12-31.
+   cluster (4 exceptions), and 17 of 18 exceptions expire 2026-12-31.
+   (Table corrected after review C-1657: `query.plan` has 4 exceptions, not
+   5 — the 5 is removal issue HSE-24, which also spans the 2
+   `analysis.graph` exceptions.)
 2. `std::expected` count corrected from ~9 to 0; `throw` count restated as
    546 statements.
 3. Debt markers corrected from 14 to 1.
@@ -156,9 +163,12 @@ Recommended focus areas (updated):
 1. Decompose `query/exec.cpp` first (22 long scopes, highest decision
    count), then `storage/storage_entity_rollup.cpp`,
    `storage/fact_batch_writer.cpp`, and `ast/index_engine.cpp`.
-2. Burn down the `query.plan` exception cluster (HSE-24/HSE-68) and the
-   `extraction.ast` → `persistence` pair (HSE-63) before their 2026-12-31
-   expiry; move fact-batch records into `model.contracts` to clear HSE-62.
+2. Burn down the `query.plan` exception cluster (4 exceptions,
+   HSE-24/HSE-68) and the `extraction.ast` → `persistence` pair (HSE-63)
+   before their 2026-12-31 expiry; move fact-batch records into
+   `model.contracts` to clear HSE-62. Removing exactly those 7 exceptions
+   leaves 11; reaching ≤10 additionally requires the 2 `analysis.graph` →
+   `product.cli` exceptions that complete the HSE-24 set.
 3. Decide on the error-handling direction: either start the
    `std::expected` migration at the `storage` boundary or retire the
    recommendation — it is currently unstarted with zero footprint.
