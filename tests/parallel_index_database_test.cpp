@@ -534,19 +534,28 @@ TEST_SUITE("clang") {
     CHECK(positions(serial) == expected);
     CHECK(positions(parallel) == expected);
 
-    // The bounded window keeps the same deterministic writer semantics while
-    // paying for one transaction and one temporary-schema check across all five
-    // consecutive ranks.
-    CHECK(counter(parallel, "parallel.publication_windows") == 1);
-    CHECK(counter(parallel, "parallel.peak_publish_window_items") ==
-          static_cast<std::int64_t>(kTranslationUnits));
-    CHECK(counter(parallel, "fact_batch_writer.windows_started") == 1);
-    CHECK(counter(parallel, "fact_batch_writer.windows_committed") == 1);
+    // The scheduler publishes whatever consecutive ranks are ready, so exact
+    // window grouping depends on worker completion order. Every grouping stays
+    // bounded and accounts for all five translation units, with one writer
+    // transaction and one temporary-schema check per observed window.
+    const std::int64_t publication_windows =
+        counter(parallel, "parallel.publication_windows");
+    CHECK(publication_windows >= 1);
+    CHECK(publication_windows <= static_cast<std::int64_t>(kTranslationUnits));
+    const std::int64_t peak_window_items =
+        counter(parallel, "parallel.peak_publish_window_items");
+    CHECK(peak_window_items >= 1);
+    CHECK(peak_window_items <= static_cast<std::int64_t>(kTranslationUnits));
+    CHECK(counter(parallel, "fact_batch_writer.windows_started") ==
+          publication_windows);
+    CHECK(counter(parallel, "fact_batch_writer.windows_committed") ==
+          publication_windows);
     CHECK(counter(parallel, "fact_batch_writer.window_items") ==
           static_cast<std::int64_t>(kTranslationUnits));
-    CHECK(counter(parallel, "fact_batch_writer.transactions_started") == 1);
+    CHECK(counter(parallel, "fact_batch_writer.transactions_started") ==
+          publication_windows);
     CHECK(counter(parallel, "fact_batch_writer.temporary_tables_checked") ==
-          15);
+          15 * publication_windows);
     const std::int64_t serial_prepared =
         counter(serial, "fact_batch_writer.statements_prepared");
     CHECK(serial_prepared > 0);
