@@ -46,6 +46,7 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <ctime>
@@ -2114,11 +2115,8 @@ auto writer_failure(IndexFailurePoint failure)
   }
 }
 
-void record_writer_profile(const cidx::storage::FactBatchWriterReport &report,
-                           bool profiling) {
-  if (!profiling) {
-    return;
-  }
+void record_writer_runtime_profile(
+    const cidx::storage::FactBatchWriterReport &report) {
   profile::add_counter("fact_batch_writer.statements_prepared",
                        report.statements_prepared);
   profile::add_counter("fact_batch_writer.statements_reused",
@@ -2127,27 +2125,136 @@ void record_writer_profile(const cidx::storage::FactBatchWriterReport &report,
                        report.statement_executions);
   profile::add_counter("fact_batch_writer.virtual_machine_steps",
                        report.virtual_machine_steps);
+  profile::add_counter("fact_batch_writer.fullscan_steps",
+                       report.fullscan_steps);
+  profile::add_counter("fact_batch_writer.includes.fullscan_steps",
+                       report.include_fullscan_steps);
+  profile::add_counter("fact_batch_writer.applicability.fullscan_steps",
+                       report.applicability_fullscan_steps);
+  profile::add_counter("fact_batch_writer.transactions_started",
+                       report.transactions_started);
+  profile::add_counter("fact_batch_writer.temporary_tables_checked",
+                       report.temporary_tables_checked);
+  profile::add_counter("fact_batch_writer.temporary_rows_cleared",
+                       report.temporary_rows_cleared);
   profile::add_timing("fact_batch_writer.prepare", report.prepare_seconds);
   profile::add_timing("fact_batch_writer.virtual_machine",
                       report.virtual_machine_seconds);
+  profile::add_timing("fact_batch_writer.transaction_begin",
+                      report.transaction_begin_seconds);
+  profile::add_timing("fact_batch_writer.temporary_schema",
+                      report.temporary_schema_seconds);
+  profile::add_timing("fact_batch_writer.temporary_clear",
+                      report.temporary_clear_seconds);
+  profile::add_timing("fact_batch_writer.staging", report.staging_seconds);
+  profile::add_timing("fact_batch_writer.classification",
+                      report.classification_seconds);
+  profile::add_timing("fact_batch_writer.includes", report.include_seconds);
+  profile::add_timing("fact_batch_writer.applicability",
+                      report.applicability_seconds);
+  profile::add_timing("fact_batch_writer.apply", report.apply_seconds);
   profile::add_timing("fact_batch_writer.commit", report.commit_seconds);
+}
+
+struct WriterRowTotals {
   std::uint64_t staged = 0;
+  std::uint64_t coalesced = 0;
   std::uint64_t inserted = 0;
   std::uint64_t updated = 0;
   std::uint64_t ignored = 0;
   std::uint64_t deleted = 0;
-  for (const auto &[_, rows] : report.families) {
-    staged += rows.staged;
-    inserted += rows.inserted;
-    updated += rows.updated;
-    ignored += rows.ignored;
-    deleted += rows.deleted;
+};
+
+auto record_writer_family_profile(
+    const cidx::storage::FactBatchWriterReport &report) -> WriterRowTotals {
+  static constexpr auto family_names = std::to_array<std::string_view>({
+      "symbols",
+      "declaration_sites",
+      "relations",
+      "edge_sites",
+      "call_arguments",
+      "template_parameters",
+      "template_arguments",
+      "types",
+      "type_edges",
+      "parameters",
+      "symbol_types",
+      "definitions",
+      "definition_edges",
+      "includes",
+      "macros",
+      "diagnostics",
+      "evidence",
+      "presentation_intents",
+      "lifecycle_cleanup",
+      "applicability",
+  });
+  WriterRowTotals totals;
+  for (const auto &[family, rows] : report.families) {
+    totals.staged += rows.staged;
+    totals.coalesced += rows.coalesced;
+    totals.inserted += rows.inserted;
+    totals.updated += rows.updated;
+    totals.ignored += rows.ignored;
+    totals.deleted += rows.deleted;
+    const std::string prefix =
+        "fact_batch_writer.family." +
+        std::string(family_names.at(std::to_underlying(family))) + ".rows_";
+    profile::add_counter(prefix + "staged", rows.staged);
+    profile::add_counter(prefix + "coalesced", rows.coalesced);
+    profile::add_counter(prefix + "inserted", rows.inserted);
+    profile::add_counter(prefix + "updated", rows.updated);
+    profile::add_counter(prefix + "ignored", rows.ignored);
+    profile::add_counter(prefix + "deleted", rows.deleted);
   }
-  profile::add_counter("fact_batch_writer.rows_staged", staged);
-  profile::add_counter("fact_batch_writer.rows_inserted", inserted);
-  profile::add_counter("fact_batch_writer.rows_updated", updated);
-  profile::add_counter("fact_batch_writer.rows_ignored", ignored);
-  profile::add_counter("fact_batch_writer.rows_deleted", deleted);
+  return totals;
+}
+
+void record_writer_applicability_profile(
+    const cidx::storage::FactBatchWriterReport &report) {
+  for (const auto &[kind, counts] : report.applicability) {
+    const std::string prefix = "fact_batch_writer.applicability." + kind + ".";
+    profile::add_counter(prefix + "attempted", counts.attempted);
+    profile::add_counter(prefix + "unique", counts.unique);
+    profile::add_counter(prefix + "virtual_machine_steps",
+                         counts.virtual_machine_steps);
+    profile::add_counter(prefix + "fullscan_steps", counts.fullscan_steps);
+    profile::add_timing(prefix + "seconds", counts.seconds);
+  }
+}
+
+void record_writer_phase_profile(
+    const cidx::storage::FactBatchWriterReport &report) {
+  for (const auto &[phase, seconds] : report.phase_seconds) {
+    profile::add_timing(
+        "fact_batch_writer.phase." +
+            std::string(cidx::storage::fact_batch_writer_phase_name(phase)),
+        seconds);
+  }
+  for (const auto &[phase, steps] : report.phase_fullscan_steps) {
+    profile::add_counter(
+        "fact_batch_writer.phase." +
+            std::string(cidx::storage::fact_batch_writer_phase_name(phase)) +
+            ".fullscan_steps",
+        steps);
+  }
+}
+
+void record_writer_profile(const cidx::storage::FactBatchWriterReport &report,
+                           bool profiling) {
+  if (!profiling) {
+    return;
+  }
+  record_writer_runtime_profile(report);
+  const WriterRowTotals totals = record_writer_family_profile(report);
+  record_writer_applicability_profile(report);
+  record_writer_phase_profile(report);
+  profile::add_counter("fact_batch_writer.rows_staged", totals.staged);
+  profile::add_counter("fact_batch_writer.rows_coalesced", totals.coalesced);
+  profile::add_counter("fact_batch_writer.rows_inserted", totals.inserted);
+  profile::add_counter("fact_batch_writer.rows_updated", totals.updated);
+  profile::add_counter("fact_batch_writer.rows_ignored", totals.ignored);
+  profile::add_counter("fact_batch_writer.rows_deleted", totals.deleted);
 }
 
 bool prepare_front_end_reuse(const TranslationUnitConfig &resolved,

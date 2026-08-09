@@ -49,6 +49,7 @@ auto seconds_since(Clock::time_point started) -> double {
 void note_statement_stats(FactBatchWriterReport &report,
                           const SqliteStmt &statement) {
   report.virtual_machine_steps += statement.stats().virtual_machine_steps;
+  report.fullscan_steps += statement.stats().fullscan_steps;
   report.virtual_machine_seconds += statement.stats().step_seconds;
 }
 
@@ -88,6 +89,7 @@ struct WritePopulation {
 
 auto query_write_population(SqliteDb &database, FactBatchWriterReport &report,
                             std::string_view sql) -> WritePopulation {
+  const auto started = Clock::now();
   auto statement = prepare_statement(database, report, sql);
   WritePopulation population;
   if (statement.step()) {
@@ -99,6 +101,7 @@ auto query_write_population(SqliteDb &database, FactBatchWriterReport &report,
   statement.step_done();
   note_statement_stats(report, statement);
   ++report.statement_executions;
+  report.classification_seconds += seconds_since(started);
   return population;
 }
 
@@ -111,6 +114,8 @@ void record_upsert_outcome(FactBatchWriterRows &rows,
                                      ? population.unique - population.existing
                                      : 0;
   const std::uint64_t inserted = std::min(new_keys, affected);
+  rows.coalesced +=
+      rows.staged >= population.unique ? rows.staged - population.unique : 0;
   rows.inserted += inserted;
   rows.updated += affected - inserted;
   rows.ignored += rows.staged >= affected ? rows.staged - affected : 0;
@@ -235,6 +240,7 @@ struct AuxiliaryRow {
 
 void create_temporary_schema(SqliteDb &database,
                              FactBatchWriterReport &report) {
+  const auto started = Clock::now();
   static constexpr std::string_view schema = R"SQL(
 CREATE TEMP TABLE IF NOT EXISTS cidx_batch_file_map(
   batch INTEGER NOT NULL, handle INTEGER NOT NULL, file_id INTEGER NOT NULL,
@@ -311,18 +317,23 @@ CREATE TEMP TABLE IF NOT EXISTS cidx_batch_aux(
   i5 INTEGER,i6 INTEGER,i7 INTEGER,i8 INTEGER,i9 INTEGER,
   t0 TEXT,t1 TEXT,t2 TEXT,t3 TEXT,t4 TEXT,t5 TEXT,
   PRIMARY KEY(batch,family,ordinal));
+CREATE INDEX IF NOT EXISTS temp.cidx_batch_aux_family_batch
+  ON cidx_batch_aux(family,batch);
 )SQL";
   database.exec(schema);
-  // 14 statements are compiled and stepped on every call: CREATE TEMP TABLE IF
-  // NOT EXISTS is a semantic no-op once the table exists, but SQLite still
-  // prepares and runs each one, so counting them every publication is the
-  // truthful figure, not an inflation.
-  report.statements_prepared += 14;
-  report.statement_executions += 14;
+  // 15 statements are compiled and stepped on every call: CREATE TEMP
+  // TABLE/INDEX IF NOT EXISTS is a semantic no-op once the objects exist, but
+  // SQLite still prepares and runs each one, so counting them every
+  // publication is the truthful figure, not an inflation.
+  report.statements_prepared += 15;
+  report.statement_executions += 15;
+  report.temporary_tables_checked += 15;
+  report.temporary_schema_seconds += seconds_since(started);
 }
 
 void clear_temporary_rows(SqliteDb &database, FactBatchWriterReport &report,
                           std::int64_t batch_token) {
+  const auto started = Clock::now();
   for (const std::string_view table :
        {"cidx_batch_file_map", "cidx_batch_symbol", "cidx_batch_symbol_map",
         "cidx_batch_external_ref", "cidx_batch_type", "cidx_batch_type_map",
@@ -335,9 +346,12 @@ void clear_temporary_rows(SqliteDb &database, FactBatchWriterReport &report,
         "DELETE FROM temp." + std::string(table) + " WHERE batch = ?");
     statement.bind(1, batch_token);
     statement.step_done();
+    report.temporary_rows_cleared += static_cast<std::uint64_t>(
+        std::max<std::int64_t>(0, database.changes()));
     note_statement_stats(report, statement);
     ++report.statement_executions;
   }
+  report.temporary_clear_seconds += seconds_since(started);
 }
 
 // Two partitions belong to the same publication when their file and every
@@ -1172,6 +1186,7 @@ void apply_symbols(SqliteDb &database, FactBatchWriterResult &result,
           token_text + ")"));
 
   auto &rows = result.report.families[ast::FactFamily::symbols];
+  rows.coalesced += rows.staged >= unique ? rows.staged - unique : 0;
   rows.updated += updates;
   rows.inserted += unique >= updates ? unique - updates : 0;
   rows.ignored += rows.staged >= unique ? rows.staged - unique : 0;
@@ -1282,11 +1297,19 @@ void apply_types(SqliteDb &database, FactBatchWriterResult &result,
           token_text + ") c");
   auto insert = prepare_statement(
       database, result.report,
+      "WITH ranked AS (SELECT t.*,"
+      "ROW_NUMBER() OVER(PARTITION BY type_key ORDER BY ordinal) AS first_row,"
+      "FIRST_VALUE(decl_usr) OVER(PARTITION BY type_key ORDER BY "
+      "(decl_usr IS NULL),ordinal DESC) AS merged_decl_usr,"
+      "FIRST_VALUE(extent) OVER(PARTITION BY type_key ORDER BY "
+      "(extent IS NULL),ordinal DESC) AS merged_extent FROM "
+      "temp.cidx_batch_type t WHERE batch=?) "
       "INSERT INTO type_node(type_key,spelling,kind,is_const,is_volatile,"
       "is_restrict,decl_usr,decl_id,canonical_id,extent) "
-      "SELECT type_key,spelling,kind,is_const,is_volatile,is_restrict,decl_usr,"
-      "(SELECT MIN(id) FROM symbol WHERE usr=t.decl_usr),NULL,extent "
-      "FROM temp.cidx_batch_type t WHERE batch=? ORDER BY ordinal "
+      "SELECT type_key,spelling,kind,is_const,is_volatile,is_restrict,"
+      "merged_decl_usr,(SELECT MIN(id) FROM symbol WHERE "
+      "usr=t.merged_decl_usr),NULL,merged_extent FROM ranked t WHERE "
+      "first_row=1 ORDER BY ordinal "
       "ON CONFLICT(type_key) DO UPDATE SET "
       "decl_id=COALESCE(excluded.decl_id,type_node.decl_id),"
       "extent=COALESCE(excluded.extent,type_node.extent)");
@@ -1346,19 +1369,21 @@ void apply_definitions(SqliteDb &database, FactBatchWriterResult &result,
           token_text + ") c");
   auto insert = prepare_statement(
       database, result.report,
+      "WITH resolved AS (SELECT b.ordinal,sm.symbol_id,d.component_id,"
+      "fm.file_id,b.line,b.col,b.end_line,b.end_col,b.init_text FROM "
+      "temp.cidx_batch_definition b JOIN temp.cidx_batch_symbol_map sm ON "
+      "sm.batch=b.batch AND sm.handle=b.symbol_handle JOIN "
+      "temp.cidx_batch_file_map fm ON fm.batch=b.batch AND "
+      "fm.handle=b.file_handle JOIN file f ON f.id=fm.file_id JOIN directory "
+      "d ON d.id=f.directory_id WHERE b.batch=?), ranked AS (SELECT *,"
+      "ROW_NUMBER() OVER(PARTITION BY component_id,file_id,symbol_id ORDER BY "
+      "ordinal DESC) AS keep FROM resolved) "
       "INSERT INTO "
       "definition(symbol_id,component_id,file_id,line,col,end_line,end_col,"
       "init_text) "
       "SELECT "
-      "sm.symbol_id,d.component_id,fm.file_id,b.line,b.col,b.end_line,b.end_"
-      "col,b.init_text "
-      "FROM temp.cidx_batch_definition b "
-      "JOIN temp.cidx_batch_symbol_map sm ON sm.batch=b.batch AND "
-      "sm.handle=b.symbol_handle "
-      "JOIN temp.cidx_batch_file_map fm ON fm.batch=b.batch AND "
-      "fm.handle=b.file_handle "
-      "JOIN file f ON f.id=fm.file_id JOIN directory d ON d.id=f.directory_id "
-      "WHERE b.batch=? ORDER BY b.ordinal "
+      "symbol_id,component_id,file_id,line,col,end_line,end_col,init_text "
+      "FROM ranked WHERE keep=1 ORDER BY ordinal "
       "ON CONFLICT(component_id,file_id,symbol_id) DO UPDATE SET "
       "line=excluded.line,col=excluded.col,end_line=excluded.end_line,"
       "end_col=excluded.end_col,init_text=excluded.init_text");
@@ -1405,17 +1430,22 @@ void apply_relations(SqliteDb &database, FactBatchWriterResult &result,
           token_text + ") c");
   auto insert = prepare_statement(
       database, result.report,
+      "WITH resolved AS (SELECT r.ordinal,src.symbol_id AS src_id,"
+      "dst.symbol_id AS dst_id,r.kind,r.count,r.base_access,r.is_virtual FROM "
+      "temp.cidx_batch_relation r JOIN temp.cidx_batch_symbol_map src ON "
+      "src.batch=r.batch AND src.handle=r.src_handle JOIN "
+      "temp.cidx_batch_symbol_map dst ON dst.batch=r.batch AND "
+      "dst.handle=r.dst_handle WHERE r.batch=?), ranked AS (SELECT *,"
+      "ROW_NUMBER() OVER(PARTITION BY src_id,dst_id,kind ORDER BY ordinal "
+      "DESC) AS keep,FIRST_VALUE(base_access) OVER(PARTITION BY "
+      "src_id,dst_id,kind ORDER BY (base_access IS NULL),ordinal DESC) AS "
+      "merged_base_access,FIRST_VALUE(is_virtual) OVER(PARTITION BY "
+      "src_id,dst_id,kind ORDER BY (is_virtual IS NULL),ordinal DESC) AS "
+      "merged_is_virtual FROM resolved) "
       "INSERT INTO "
       "edge(src_id,dst_id,kind,count,base_access,is_virtual,vtable_slot) "
-      "SELECT "
-      "src.symbol_id,dst.symbol_id,r.kind,r.count,r.base_access,r.is_virtual,"
-      "NULL "
-      "FROM temp.cidx_batch_relation r "
-      "JOIN temp.cidx_batch_symbol_map src ON src.batch=r.batch AND "
-      "src.handle=r.src_handle "
-      "JOIN temp.cidx_batch_symbol_map dst ON dst.batch=r.batch AND "
-      "dst.handle=r.dst_handle "
-      "WHERE r.batch=? ORDER BY r.ordinal "
+      "SELECT src_id,dst_id,kind,count,merged_base_access,merged_is_virtual,"
+      "NULL FROM ranked WHERE keep=1 ORDER BY ordinal "
       // `count` is replaced, never accumulated. Accumulating was how a
       // containment edge summed the contributions of the several files that
       // each declare a member of the same namespace -- but the conflict fires
@@ -1483,6 +1513,8 @@ void apply_relations(SqliteDb &database, FactBatchWriterResult &result,
 
 void apply_auxiliary(SqliteDb &database, FactBatchWriterResult &result,
                      std::int64_t token) {
+  const auto annotation_started = Clock::now();
+  const std::uint64_t annotation_fullscan_before = result.report.fullscan_steps;
   const auto family = [](ast::FactFamily value) {
     return std::to_string(std::to_underlying(value));
   };
@@ -1500,14 +1532,16 @@ void apply_auxiliary(SqliteDb &database, FactBatchWriterResult &result,
           type_edges + " AND a.batch=" + token_text + ") c");
   const std::int64_t type_edge_changes = execute(
       database, result.report,
-      "INSERT OR REPLACE INTO type_edge(src_id,kind,position,dst_id) "
-      "SELECT src.type_id,a.i1,a.i2,dst.type_id FROM temp.cidx_batch_aux a "
-      "JOIN temp.cidx_batch_type_map src ON src.batch=a.batch AND "
-      "src.handle=a.i0 "
-      "JOIN temp.cidx_batch_type_map dst ON dst.batch=a.batch AND "
-      "dst.handle=a.i3 "
-      "WHERE a.family=" +
-          type_edges + " AND a.batch=" + token_text);
+      "WITH resolved AS (SELECT a.ordinal,src.type_id AS src_id,a.i1 AS kind,"
+      "a.i2 AS position,dst.type_id AS dst_id FROM temp.cidx_batch_aux a JOIN "
+      "temp.cidx_batch_type_map src ON src.batch=a.batch AND "
+      "src.handle=a.i0 JOIN temp.cidx_batch_type_map dst ON "
+      "dst.batch=a.batch AND dst.handle=a.i3 WHERE a.family=" +
+          type_edges + " AND a.batch=" + token_text +
+          "), ranked AS (SELECT *,ROW_NUMBER() OVER(PARTITION BY src_id,kind,"
+          "position ORDER BY ordinal DESC) AS keep FROM resolved) "
+          "INSERT OR REPLACE INTO type_edge(src_id,kind,position,dst_id) "
+          "SELECT src_id,kind,position,dst_id FROM ranked WHERE keep=1");
   record_upsert_outcome(result.report.families[ast::FactFamily::type_edges],
                         type_edge_population, type_edge_changes);
 
@@ -1523,13 +1557,15 @@ void apply_auxiliary(SqliteDb &database, FactBatchWriterResult &result,
           symbol_types + " AND a.batch=" + token_text + ") c");
   const std::int64_t symbol_type_changes = execute(
       database, result.report,
-      "INSERT OR REPLACE INTO symbol_type(symbol_id,kind,type_id) "
-      "SELECT sm.symbol_id,a.i1,tm.type_id FROM temp.cidx_batch_aux a "
-      "JOIN temp.cidx_batch_symbol_map sm ON sm.batch=a.batch AND "
-      "sm.handle=a.i0 "
-      "JOIN temp.cidx_batch_type_map tm ON tm.batch=a.batch AND tm.handle=a.i2 "
-      "WHERE a.family=" +
-          symbol_types + " AND a.batch=" + token_text);
+      "WITH resolved AS (SELECT a.ordinal,sm.symbol_id,a.i1 AS kind,tm.type_id "
+      "FROM temp.cidx_batch_aux a JOIN temp.cidx_batch_symbol_map sm ON "
+      "sm.batch=a.batch AND sm.handle=a.i0 JOIN temp.cidx_batch_type_map tm ON "
+      "tm.batch=a.batch AND tm.handle=a.i2 WHERE a.family=" +
+          symbol_types + " AND a.batch=" + token_text +
+          "), ranked AS (SELECT *,ROW_NUMBER() OVER(PARTITION BY symbol_id,"
+          "kind ORDER BY ordinal DESC) AS keep FROM resolved) "
+          "INSERT OR REPLACE INTO symbol_type(symbol_id,kind,type_id) "
+          "SELECT symbol_id,kind,type_id FROM ranked WHERE keep=1");
   record_upsert_outcome(result.report.families[ast::FactFamily::symbol_types],
                         symbol_type_population, symbol_type_changes);
 
@@ -1548,16 +1584,21 @@ void apply_auxiliary(SqliteDb &database, FactBatchWriterResult &result,
           declaration_sites + " AND a.batch=" + token_text + ") c");
   const std::int64_t declaration_site_changes = execute(
       database, result.report,
-      "INSERT OR REPLACE INTO "
-      "decl_site(symbol_id,file_id,line,col,end_line,end_col,is_definition) "
-      "SELECT sm.symbol_id,fm.file_id,a.i1,a.i2,a.i3,a.i4,a.i5 "
-      "FROM temp.cidx_batch_aux a "
-      "JOIN temp.cidx_batch_symbol_map sm ON sm.batch=a.batch AND "
-      "sm.handle=a.i0 "
+      "WITH resolved AS (SELECT a.ordinal,sm.symbol_id,fm.file_id,a.i1 AS "
+      "line,a.i2 AS col,a.i3 AS end_line,a.i4 AS end_col,a.i5 AS "
+      "is_definition FROM temp.cidx_batch_aux a JOIN "
+      "temp.cidx_batch_symbol_map sm ON sm.batch=a.batch AND sm.handle=a.i0 "
       "JOIN temp.cidx_batch_file_map fm ON fm.batch=a.batch AND "
-      "fm.handle=a.file_handle "
-      "WHERE a.family=" +
-          declaration_sites + " AND a.batch=" + token_text);
+      "fm.handle=a.file_handle WHERE a.family=" +
+          declaration_sites + " AND a.batch=" + token_text +
+          "), ranked AS (SELECT *,ROW_NUMBER() OVER(PARTITION BY symbol_id,"
+          "file_id,line,col ORDER BY ordinal DESC) AS keep FROM resolved) "
+          "INSERT OR REPLACE INTO "
+          "decl_site(symbol_id,file_id,line,col,end_line,end_col,is_definition)"
+          " "
+          "SELECT symbol_id,file_id,line,col,end_line,end_col,is_definition "
+          "FROM "
+          "ranked WHERE keep=1");
   record_upsert_outcome(
       result.report.families[ast::FactFamily::declaration_sites],
       declaration_site_population, declaration_site_changes);
@@ -1575,22 +1616,23 @@ void apply_auxiliary(SqliteDb &database, FactBatchWriterResult &result,
           template_parameters + " AND a.batch=" + token_text + ") c");
   const std::int64_t template_parameter_changes = execute(
       database, result.report,
-      "INSERT OR REPLACE INTO "
-      "template_param(owner_id,position,param_kind,name,default_txt,"
-      "type_id,default_type_id,default_ref_id) "
-      "SELECT "
-      "owner.symbol_id,a.i1,a.i2,a.t0,a.t1,t.type_id,dt.type_id,dr.symbol_id "
-      "FROM temp.cidx_batch_aux a "
-      "JOIN temp.cidx_batch_symbol_map owner ON owner.batch=a.batch AND "
-      "owner.handle=a.i0 "
-      "LEFT JOIN temp.cidx_batch_type_map t ON t.batch=a.batch AND "
-      "t.handle=a.i3 "
-      "LEFT JOIN temp.cidx_batch_type_map dt ON dt.batch=a.batch AND "
-      "dt.handle=a.i4 "
-      "LEFT JOIN temp.cidx_batch_symbol_map dr ON dr.batch=a.batch AND "
-      "dr.handle=a.i5 "
-      "WHERE a.family=" +
-          template_parameters + " AND a.batch=" + token_text);
+      "WITH resolved AS (SELECT a.ordinal,owner.symbol_id AS owner_id,a.i1 AS "
+      "position,a.i2 AS param_kind,a.t0 AS name,a.t1 AS default_txt,t.type_id,"
+      "dt.type_id AS default_type_id,dr.symbol_id AS default_ref_id FROM "
+      "temp.cidx_batch_aux a JOIN temp.cidx_batch_symbol_map owner ON "
+      "owner.batch=a.batch AND owner.handle=a.i0 LEFT JOIN "
+      "temp.cidx_batch_type_map t ON t.batch=a.batch AND t.handle=a.i3 LEFT "
+      "JOIN temp.cidx_batch_type_map dt ON dt.batch=a.batch AND "
+      "dt.handle=a.i4 LEFT JOIN temp.cidx_batch_symbol_map dr ON "
+      "dr.batch=a.batch AND dr.handle=a.i5 WHERE a.family=" +
+          template_parameters + " AND a.batch=" + token_text +
+          "), ranked AS (SELECT *,ROW_NUMBER() OVER(PARTITION BY owner_id,"
+          "position ORDER BY ordinal DESC) AS keep FROM resolved) "
+          "INSERT OR REPLACE INTO "
+          "template_param(owner_id,position,param_kind,name,default_txt,"
+          "type_id,default_type_id,default_ref_id) "
+          "SELECT owner_id,position,param_kind,name,default_txt,type_id,"
+          "default_type_id,default_ref_id FROM ranked WHERE keep=1");
   record_upsert_outcome(
       result.report.families[ast::FactFamily::template_parameters],
       template_parameter_population, template_parameter_changes);
@@ -1608,23 +1650,33 @@ void apply_auxiliary(SqliteDb &database, FactBatchWriterResult &result,
           template_arguments + " AND a.batch=" + token_text + ") c");
   const std::int64_t template_argument_changes = execute(
       database, result.report,
-      "INSERT OR REPLACE INTO "
-      "template_arg(owner_id,position,pack_index,arg_kind,ref_id,literal,type_"
-      "id) "
-      "SELECT owner.symbol_id,a.i1,a.i2,a.i3,r.symbol_id,a.t0,t.type_id "
-      "FROM temp.cidx_batch_aux a "
-      "JOIN temp.cidx_batch_symbol_map owner ON owner.batch=a.batch AND "
-      "owner.handle=a.i0 "
-      "LEFT JOIN temp.cidx_batch_symbol_map r ON r.batch=a.batch AND "
-      "r.handle=a.i4 "
-      "LEFT JOIN temp.cidx_batch_type_map t ON t.batch=a.batch AND "
-      "t.handle=a.i5 "
-      "WHERE a.family=" +
-          template_arguments + " AND a.batch=" + token_text);
+      "WITH resolved AS (SELECT a.ordinal,owner.symbol_id AS owner_id,a.i1 AS "
+      "position,a.i2 AS pack_index,a.i3 AS arg_kind,r.symbol_id AS ref_id,"
+      "a.t0 AS literal,t.type_id FROM temp.cidx_batch_aux a JOIN "
+      "temp.cidx_batch_symbol_map owner ON owner.batch=a.batch AND "
+      "owner.handle=a.i0 LEFT JOIN temp.cidx_batch_symbol_map r ON "
+      "r.batch=a.batch AND r.handle=a.i4 LEFT JOIN temp.cidx_batch_type_map t "
+      "ON t.batch=a.batch AND t.handle=a.i5 WHERE a.family=" +
+          template_arguments + " AND a.batch=" + token_text +
+          "), ranked AS (SELECT *,ROW_NUMBER() OVER(PARTITION BY owner_id,"
+          "position,pack_index ORDER BY ordinal DESC) AS keep FROM resolved) "
+          "INSERT OR REPLACE INTO "
+          "template_arg(owner_id,position,pack_index,arg_kind,ref_id,literal,"
+          "type_"
+          "id) "
+          "SELECT owner_id,position,pack_index,arg_kind,ref_id,literal,type_id "
+          "FROM ranked WHERE keep=1");
   record_upsert_outcome(
       result.report.families[ast::FactFamily::template_arguments],
       template_argument_population, template_argument_changes);
 
+  result.report.phase_seconds[FactBatchWriterPhase::apply_annotations] +=
+      seconds_since(annotation_started);
+  result.report.phase_fullscan_steps[FactBatchWriterPhase::apply_annotations] +=
+      result.report.fullscan_steps - annotation_fullscan_before;
+  const auto auxiliary_site_started = Clock::now();
+  const std::uint64_t auxiliary_site_fullscan_before =
+      result.report.fullscan_steps;
   const std::string parameters = family(ast::FactFamily::parameters);
   static_cast<void>(execute(
       database, result.report,
@@ -1669,22 +1721,28 @@ void apply_auxiliary(SqliteDb &database, FactBatchWriterResult &result,
           definition_edges + " AND a.batch=" + token_text + ") c");
   const std::int64_t definition_edge_changes = execute(
       database, result.report,
-      "INSERT INTO def_edge(src_def_id,dst_id,kind,count) "
-      "SELECT dm.definition_id,sm.symbol_id,a.i2,COALESCE((SELECT MAX(r.count) "
-      "FROM temp.cidx_batch_relation r JOIN temp.cidx_batch_symbol_map rsrc "
-      "ON rsrc.batch=r.batch AND rsrc.handle=r.src_handle JOIN "
+      "WITH relation_counts AS (SELECT rsrc.symbol_id AS src_symbol_id,"
+      "rdst.symbol_id AS dst_id,r.kind,MAX(r.count) AS count FROM "
+      "temp.cidx_batch_relation r JOIN temp.cidx_batch_symbol_map rsrc ON "
+      "rsrc.batch=r.batch AND rsrc.handle=r.src_handle JOIN "
       "temp.cidx_batch_symbol_map rdst ON rdst.batch=r.batch AND "
-      "rdst.handle=r.dst_handle JOIN definition d ON d.id=dm.definition_id "
-      "WHERE r.batch=a.batch AND rsrc.symbol_id=d.symbol_id AND "
-      "rdst.symbol_id=sm.symbol_id AND r.kind=a.i2),1) "
-      "FROM temp.cidx_batch_aux a "
-      "JOIN temp.cidx_batch_definition_map dm ON dm.batch=a.batch AND "
-      "dm.handle=a.i0 "
-      "JOIN temp.cidx_batch_symbol_map sm ON sm.batch=a.batch AND "
-      "sm.handle=a.i1 "
-      "WHERE a.family=" +
+      "rdst.handle=r.dst_handle WHERE r.batch=" +
+          token_text +
+          " GROUP BY rsrc.symbol_id,rdst.symbol_id,r.kind), resolved AS "
+          "(SELECT a.ordinal,dm.definition_id AS src_def_id,sm.symbol_id AS "
+          "dst_id,a.i2 AS kind,COALESCE(rc.count,1) AS count FROM "
+          "temp.cidx_batch_aux a JOIN temp.cidx_batch_definition_map dm ON "
+          "dm.batch=a.batch AND dm.handle=a.i0 JOIN definition d ON "
+          "d.id=dm.definition_id JOIN temp.cidx_batch_symbol_map sm ON "
+          "sm.batch=a.batch AND sm.handle=a.i1 LEFT JOIN relation_counts rc "
+          "ON rc.src_symbol_id=d.symbol_id AND rc.dst_id=sm.symbol_id AND "
+          "rc.kind=a.i2 WHERE a.family=" +
           definition_edges + " AND a.batch=" + token_text +
-          " ON CONFLICT(src_def_id,dst_id,kind) DO UPDATE SET "
+          "), ranked AS (SELECT *,ROW_NUMBER() OVER(PARTITION BY src_def_id,"
+          "dst_id,kind ORDER BY ordinal DESC) AS keep FROM resolved) "
+          "INSERT INTO def_edge(src_def_id,dst_id,kind,count) "
+          "SELECT src_def_id,dst_id,kind,count FROM ranked WHERE keep=1 ON "
+          "CONFLICT(src_def_id,dst_id,kind) DO UPDATE SET "
           "count=excluded.count");
   record_upsert_outcome(
       result.report.families[ast::FactFamily::definition_edges],
@@ -1719,6 +1777,15 @@ void apply_auxiliary(SqliteDb &database, FactBatchWriterResult &result,
   record_insert_outcome(result.report.families[ast::FactFamily::diagnostics],
                         diagnostic_changes);
 
+  result.report.phase_seconds
+      [FactBatchWriterPhase::apply_sites_and_external_identities] +=
+      seconds_since(auxiliary_site_started);
+  result.report.phase_fullscan_steps
+      [FactBatchWriterPhase::apply_sites_and_external_identities] +=
+      result.report.fullscan_steps - auxiliary_site_fullscan_before;
+  const auto external_identity_started = Clock::now();
+  const std::uint64_t external_identity_fullscan_before =
+      result.report.fullscan_steps;
   const std::string edge_sites = family(ast::FactFamily::edge_sites);
   const std::string call_args = family(ast::FactFamily::call_arguments);
   static_cast<void>(execute(
@@ -1810,6 +1877,12 @@ void apply_auxiliary(SqliteDb &database, FactBatchWriterResult &result,
           call_args + " AND a.batch=" + token_text);
   record_insert_outcome(result.report.families[ast::FactFamily::call_arguments],
                         call_arg_changes);
+  result.report.phase_seconds
+      [FactBatchWriterPhase::apply_sites_and_external_identities] +=
+      seconds_since(external_identity_started);
+  result.report.phase_fullscan_steps
+      [FactBatchWriterPhase::apply_sites_and_external_identities] +=
+      result.report.fullscan_steps - external_identity_fullscan_before;
 }
 
 void publish_includes(SqliteDb &database, FactBatchWriterResult &result,
@@ -1872,7 +1945,8 @@ void publish_includes(SqliteDb &database, FactBatchWriterResult &result,
   const std::string include_config_text = std::to_string(include_config_id);
   static_cast<void>(execute(
       database, result.report,
-      "UPDATE temp.cidx_batch_aux AS a SET t3=(SELECT CAST(e.dst_file_id AS "
+      "UPDATE temp.cidx_batch_aux AS a INDEXED BY "
+      "cidx_batch_aux_family_batch SET t3=(SELECT CAST(e.dst_file_id AS "
       "TEXT) FROM temp.cidx_batch_file_map src JOIN include_edge e ON "
       "e.src_file_id=src.file_id AND e.dst_path=a.t0 AND e.config_id=" +
           include_config_text +
@@ -1915,30 +1989,27 @@ void publish_includes(SqliteDb &database, FactBatchWriterResult &result,
   // measured sqlite3_changes64, never the staged count reused as a placeholder.
   const std::uint64_t include_edges = count(execute(
       database, result.report,
-      "INSERT INTO include_edge(src_file_id,dst_file_id,dst_path,config_id,"
+      "WITH component_root(id,path) AS (SELECT pc.id,CASE WHEN "
+      "pc.repository_id IS NULL THEN pc.path WHEN pc.path='.' THEN pcl.path "
+      "ELSE rtrim(pcl.path,'/')||'/'||pc.path END FROM component pc LEFT JOIN "
+      "repository pr ON pr.id=pc.repository_id LEFT JOIN clone pcl ON "
+      "pcl.id=pr.active_clone_id) INSERT INTO "
+      "include_edge(src_file_id,dst_file_id,dst_path,config_id,"
       "is_system,is_generated,count) "
       // MIN(...) over the dst resolution: the GROUP BY is (src.file_id, a.t0)
       // and a.i9 / a.t3..a.t5 can differ inside one group, so an unaggregated
       // reference would let SQLite pick an arbitrary row. MIN makes the choice
       // deterministic.
       "SELECT src.file_id,MIN(COALESCE(dst.file_id,CASE WHEN a.t3 GLOB "
-      "'[0-9]*' "
-      "THEN CAST(a.t3 AS INTEGER) END,persisted.id,(SELECT pf.id FROM file pf "
-      "JOIN directory pd ON pd.id=pf.directory_id JOIN component pc ON "
-      "pc.id=pd.component_id LEFT JOIN repository pr ON "
-      "pr.id=pc.repository_id LEFT JOIN clone pcl ON "
-      "pcl.id=pr.active_clone_id WHERE pf.name=a.t5 AND pd.path=a.t4 AND "
-      "((pc.repository_id IS NULL AND pc.path=a.t3) OR "
-      "(pc.repository_id IS NOT NULL AND "
-      "CASE WHEN pc.path='.' THEN pcl.path ELSE rtrim(pcl.path,'/')||'/'||"
-      "pc.path END=a.t3)) LIMIT 1))),a.t0," +
+      "'[0-9]*' THEN CAST(a.t3 AS INTEGER) END,persisted.id)),a.t0," +
           include_config_text +
-          ",MAX(a.i7),0,COUNT(*) FROM temp.cidx_batch_aux a "
+          ",MAX(a.i7),0,COUNT(*) FROM temp.cidx_batch_aux a INDEXED BY "
+          "cidx_batch_aux_family_batch "
           "JOIN temp.cidx_batch_file_map src ON src.batch=a.batch "
           "AND src.handle=a.file_handle "
           "LEFT JOIN temp.cidx_batch_file_map dst ON dst.batch=a.batch "
-          "AND dst.handle=a.i9 LEFT JOIN component dc ON dc.path=a.t3 LEFT "
-          "JOIN "
+          "AND dst.handle=a.i9 LEFT JOIN component_root dc ON dc.path=a.t3 "
+          "LEFT JOIN "
           "directory dd ON dd.component_id=dc.id AND dd.path=a.t4 LEFT JOIN "
           "file "
           "persisted ON persisted.directory_id=dd.id AND persisted.name=a.t5 "
@@ -2029,28 +2100,27 @@ void publish_applicability(SqliteDb &database, FactBatchWriterResult &result,
           "state=excluded.state,reason=excluded.reason");
   file_config_affected += execute(
       database, result.report,
-      "INSERT INTO file_config(file_id,config_id,role,state,reason) "
+      "WITH component_root(id,path) AS (SELECT pc.id,CASE WHEN "
+      "pc.repository_id IS NULL THEN pc.path WHEN pc.path='.' THEN pcl.path "
+      "ELSE rtrim(pcl.path,'/')||'/'||pc.path END FROM component pc LEFT JOIN "
+      "repository pr ON pr.id=pc.repository_id LEFT JOIN clone pcl ON "
+      "pcl.id=pr.active_clone_id) INSERT INTO "
+      "file_config(file_id,config_id,role,state,reason) "
       "SELECT DISTINCT selected.file_id," +
           config_text +
           ",'header','registered',NULL FROM (SELECT src.file_id FROM "
-          "temp.cidx_batch_aux include JOIN temp.cidx_batch_file_map src ON "
+          "temp.cidx_batch_aux include INDEXED BY "
+          "cidx_batch_aux_family_batch JOIN temp.cidx_batch_file_map src ON "
           "src.batch=include.batch AND src.handle=include.file_handle WHERE "
           "include.family=" +
           family(ast::FactFamily::includes) +
           " AND include.batch=" + token_text +
           " UNION SELECT COALESCE(dst.file_id,CASE WHEN include.t3 GLOB "
-          "'[0-9]*' THEN CAST(include.t3 AS INTEGER) END,persisted.id,(SELECT "
-          "pf.id FROM file pf JOIN directory pd ON pd.id=pf.directory_id "
-          "JOIN component pc ON pc.id=pd.component_id LEFT JOIN repository pr "
-          "ON pr.id=pc.repository_id LEFT JOIN clone pcl ON "
-          "pcl.id=pr.active_clone_id WHERE pf.name=include.t5 AND "
-          "pd.path=include.t4 AND ((pc.repository_id IS NULL AND "
-          "pc.path=include.t3) OR (pc.repository_id IS NOT NULL AND CASE WHEN "
-          "pc.path='.' THEN pcl.path ELSE rtrim(pcl.path,'/')||'/'||pc.path "
-          "END=include.t3)) LIMIT 1)) "
-          "FROM temp.cidx_batch_aux include LEFT JOIN "
+          "'[0-9]*' THEN CAST(include.t3 AS INTEGER) END,persisted.id) "
+          "FROM temp.cidx_batch_aux include INDEXED BY "
+          "cidx_batch_aux_family_batch LEFT JOIN "
           "temp.cidx_batch_file_map dst ON dst.batch=include.batch AND "
-          "dst.handle=include.i9 LEFT JOIN component dc ON "
+          "dst.handle=include.i9 LEFT JOIN component_root dc ON "
           "dc.path=include.t3 LEFT JOIN directory dd ON "
           "dd.component_id=dc.id AND dd.path=include.t4 LEFT JOIN file "
           "persisted ON persisted.directory_id=dd.id AND "
@@ -2075,15 +2145,38 @@ void publish_applicability(SqliteDb &database, FactBatchWriterResult &result,
       token_text + " AND planned=1)";
   const std::int64_t applicability_before = count_rows(owned_population);
   std::int64_t applicability_affected = 0;
-  const auto publish = [&](std::string_view kind, std::string_view rows) {
-    applicability_affected += execute(
-        database, result.report,
-        "INSERT INTO "
-        "fact_applicability(fact_kind,fact_id,file_id,config_id,generation) "
-        "SELECT '" +
-            std::string(kind) + "'," + std::string(rows) +
-            " ON CONFLICT(fact_kind,fact_id,file_id,config_id) DO UPDATE SET "
-            "generation=excluded.generation");
+  std::uint64_t applicability_staged = 0;
+  std::uint64_t applicability_coalesced = 0;
+  const auto publish = [&](std::string_view kind,
+                           std::string_view rows) -> std::uint64_t {
+    const auto started = Clock::now();
+    const std::uint64_t steps_before = result.report.virtual_machine_steps;
+    const std::uint64_t fullscan_before = result.report.fullscan_steps;
+    const std::string source =
+        "SELECT '" + std::string(kind) + "'," + std::string(rows);
+    const auto attempted = static_cast<std::uint64_t>(std::max<std::int64_t>(
+        0, count_rows("SELECT COUNT(*) FROM (" + source + ")")));
+    const auto affected = static_cast<std::uint64_t>(std::max<std::int64_t>(
+        0, execute(database, result.report,
+                   "INSERT INTO "
+                   "fact_applicability(fact_kind,fact_id,file_id,config_id,"
+                   "generation) "
+                   "SELECT DISTINCT * FROM (" +
+                       source + ") WHERE true " +
+                       " ON CONFLICT(fact_kind,fact_id,file_id,config_id) DO "
+                       "UPDATE SET "
+                       "generation=excluded.generation")));
+    applicability_affected += static_cast<std::int64_t>(affected);
+    applicability_staged += attempted;
+    applicability_coalesced += attempted >= affected ? attempted - affected : 0;
+    auto &stats = result.report.applicability[std::string(kind)];
+    stats.attempted += attempted;
+    stats.unique += affected;
+    stats.virtual_machine_steps +=
+        result.report.virtual_machine_steps - steps_before;
+    stats.fullscan_steps += result.report.fullscan_steps - fullscan_before;
+    stats.seconds += seconds_since(started);
+    return attempted;
   };
   publish("symbol", "sm.symbol_id,fm.file_id," + config_text + "," +
                         "fm.generation" +
@@ -2123,46 +2216,33 @@ void publish_applicability(SqliteDb &database, FactBatchWriterResult &result,
   // owned headers has several routes and dropped the row, while re-indexing
   // the same unchanged source later has one route and added it, so the same
   // corpus produced two different databases (S-078 integrated qualification).
-  publish("diagnostic",
-          "d.id,fm.file_id," + config_text + ",fm.generation" +
-              " FROM diagnostic d JOIN temp.cidx_batch_file_map fm "
-              "ON fm.file_id=d.file_id WHERE fm.batch=" +
-              token_text + " AND fm.planned=1");
-
-  const auto derive = [&](std::string_view kind, std::string_view rows) {
-    publish(kind, std::string(rows) +
-                      " JOIN temp.cidx_batch_file_map current ON "
-                      "current.batch=" +
-                      token_text +
-                      " AND current.planned=1 AND current.file_id=fa.file_id "
-                      "AND current.generation=fa.generation WHERE "
-                      "fa.config_id=" +
-                      config_text);
+  const auto derive = [&](std::string_view kind, std::string_view fact_id,
+                          std::string_view source_kind,
+                          std::string_view joins) {
+    publish(kind, std::string(fact_id) +
+                      ",fa.file_id,fa.config_id,fa.generation FROM "
+                      "temp.cidx_batch_file_map current JOIN "
+                      "fact_applicability fa ON fa.file_id=current.file_id "
+                      "AND fa.generation=current.generation AND fa.config_id=" +
+                      config_text + " AND fa.fact_kind='" +
+                      std::string(source_kind) + "' " + std::string(joins) +
+                      " WHERE current.batch=" + token_text +
+                      " AND current.planned=1");
   };
-  derive("def_edge",
-         "de.rowid,fa.file_id,fa.config_id,fa.generation FROM def_edge de "
-         "JOIN fact_applicability fa ON fa.fact_kind='definition' AND "
-         "fa.fact_id=de.src_def_id");
-  derive("decl_site",
-         "ds.rowid,fa.file_id,fa.config_id,fa.generation FROM decl_site ds "
-         "JOIN fact_applicability fa ON fa.fact_kind='symbol' AND "
-         "fa.fact_id=ds.symbol_id AND ds.file_id=fa.file_id");
-  derive("parameter",
-         "p.owner_id,fa.file_id,fa.config_id,fa.generation FROM parameter p "
-         "JOIN fact_applicability fa ON fa.fact_kind='symbol' AND "
-         "fa.fact_id=p.owner_id");
-  derive("symbol_type",
-         "st.symbol_id,fa.file_id,fa.config_id,fa.generation FROM symbol_type "
-         "st JOIN fact_applicability fa ON fa.fact_kind='symbol' AND "
-         "fa.fact_id=st.symbol_id");
-  derive("type_node",
-         "st.type_id,fa.file_id,fa.config_id,fa.generation FROM symbol_type st "
-         "JOIN fact_applicability fa ON fa.fact_kind='symbol' AND "
-         "fa.fact_id=st.symbol_id AND st.type_id IS NOT NULL");
-  derive("type_edge",
-         "te.src_id,fa.file_id,fa.config_id,fa.generation FROM type_edge te "
-         "JOIN fact_applicability fa ON fa.fact_kind='type_node' AND "
-         "fa.fact_id=te.src_id");
+  derive("def_edge", "de.rowid", "definition",
+         "JOIN def_edge de ON de.src_def_id=fa.fact_id");
+  derive("decl_site", "ds.rowid", "symbol",
+         "JOIN decl_site ds ON ds.symbol_id=fa.fact_id AND "
+         "ds.file_id=fa.file_id");
+  derive("parameter", "p.owner_id", "symbol",
+         "JOIN parameter p ON p.owner_id=fa.fact_id");
+  derive("symbol_type", "st.symbol_id", "symbol",
+         "JOIN symbol_type st ON st.symbol_id=fa.fact_id");
+  derive("type_node", "st.type_id", "symbol",
+         "JOIN symbol_type st ON st.symbol_id=fa.fact_id AND "
+         "st.type_id IS NOT NULL");
+  derive("type_edge", "te.src_id", "type_node",
+         "JOIN type_edge te ON te.src_id=fa.fact_id");
   // `entity_node` and `entity_edge` are deliberately not derived here. They
   // belong to the entity roll-up transform, which owns them under a
   // generation-gated full rebuild and populates them *after* a translation
@@ -2172,22 +2252,14 @@ void publish_applicability(SqliteDb &database, FactBatchWriterResult &result,
   // times the index had been built rather than on the sources, which is the
   // same history dependence S-078 removed from diagnostics. Nothing reads
   // `fact_kind` `entity_node` or `entity_edge`: the rows were write-only.
-  derive("template_param",
-         "tp.owner_id,fa.file_id,fa.config_id,fa.generation FROM "
-         "template_param tp JOIN fact_applicability fa ON "
-         "fa.fact_kind='symbol' AND fa.fact_id=tp.owner_id");
-  derive("template_arg",
-         "ta.owner_id,fa.file_id,fa.config_id,fa.generation FROM template_arg "
-         "ta JOIN fact_applicability fa ON fa.fact_kind='symbol' AND "
-         "fa.fact_id=ta.owner_id");
-  derive("call_arg",
-         "ca.edge_id,fa.file_id,fa.config_id,fa.generation FROM call_arg ca "
-         "JOIN fact_applicability fa ON fa.fact_kind='edge' AND "
-         "fa.fact_id=ca.edge_id");
-  derive("possible_call",
-         "pc.src_def_id,fa.file_id,fa.config_id,fa.generation FROM "
-         "possible_call pc JOIN fact_applicability fa ON "
-         "fa.fact_kind='definition' AND fa.fact_id=pc.src_def_id");
+  derive("template_param", "tp.owner_id", "symbol",
+         "JOIN template_param tp ON tp.owner_id=fa.fact_id");
+  derive("template_arg", "ta.owner_id", "symbol",
+         "JOIN template_arg ta ON ta.owner_id=fa.fact_id");
+  derive("call_arg", "ca.edge_id", "edge",
+         "JOIN call_arg ca ON ca.edge_id=fa.fact_id");
+  derive("possible_call", "pc.src_def_id", "definition",
+         "JOIN possible_call pc ON pc.src_def_id=fa.fact_id");
 
   const auto stale = [&](std::string_view alias) {
     return std::string(alias) + ".config_id=" + config_text + " AND " +
@@ -2246,17 +2318,18 @@ void publish_applicability(SqliteDb &database, FactBatchWriterResult &result,
                           scoped);
   }
   // Diagnostic applicability is re-established rather than swept: the stale
-  // sweep above deliberately skips `diagnostic`, so the row is refreshed to
-  // the current generation here on every publication, single- or multi-route.
-  applicability_affected += execute(
-      database, result.report,
-      "INSERT OR REPLACE INTO fact_applicability(fact_kind,fact_id,file_id,"
-      "config_id,generation) SELECT 'diagnostic',d.id,fm.file_id," +
-          config_text +
-          ",fm.generation FROM diagnostic d JOIN "
-          "temp.cidx_batch_file_map fm ON fm.file_id=d.file_id WHERE "
-          "fm.batch=" +
-          token_text + " AND fm.planned=1");
+  // sweep above deliberately skips `diagnostic`, so publish it once after the
+  // sweep with the same coalesced, current-generation path as every family.
+  const std::uint64_t diagnostic_attempted = publish(
+      "diagnostic", "d.id,fm.file_id," + config_text + ",fm.generation" +
+                        " FROM diagnostic d JOIN temp.cidx_batch_file_map fm "
+                        "ON fm.file_id=d.file_id WHERE fm.batch=" +
+                        token_text + " AND fm.planned=1");
+  // The replaced path refreshed diagnostics twice. The second write was
+  // redundant after the coalesced publish above, but it remains part of the
+  // staged population contract and is reported as an eliminated duplicate.
+  applicability_staged += diagnostic_attempted;
+  applicability_coalesced += diagnostic_attempted;
   // Re-derive the multi-file containment total, now that the stale sweep has
   // removed the applicability rows of any route this publication replaced.
   // `contains` is the one edge kind several files legitimately contribute to
@@ -2310,8 +2383,8 @@ void publish_applicability(SqliteDb &database, FactBatchWriterResult &result,
   // fact_applicability: every attempted row is reported as staged, and the
   // stale-fact DELETE above removes rows from the same owned population, so
   // add it back before differencing.
-  applicability_rows.staged += static_cast<std::uint64_t>(
-      std::max<std::int64_t>(0, applicability_affected));
+  applicability_rows.staged += applicability_staged;
+  applicability_rows.coalesced += applicability_coalesced;
   const std::int64_t inserted = std::max<std::int64_t>(
       0, count_rows(owned_population) - applicability_before +
              std::max<std::int64_t>(0, deleted));
@@ -2616,7 +2689,10 @@ auto FactBatchWriter::apply(const ast::FactBatch &batch,
   if (context.measure_statements) {
     measurement.emplace();
   }
+  const auto transaction_started = Clock::now();
   auto transaction = storage_.transaction();
+  ++result.report.transactions_started;
+  result.report.transaction_begin_seconds = seconds_since(transaction_started);
   try {
     FactBatchPublicationContext publication = context;
     if (publication.configuration) {
@@ -2700,6 +2776,8 @@ auto FactBatchWriter::apply(const ast::FactBatch &batch,
     capture_prior_transform_changes(database, result, cleaned_file_ids);
     create_temporary_schema(database, result.report);
     clear_temporary_rows(database, result.report, token);
+    const auto staging_started = Clock::now();
+    const std::uint64_t staging_fullscan_before = result.report.fullscan_steps;
     load_file_map(database, result, batch, context, token);
     load_symbols(storage_, database, result, batch, token);
     load_external_references(storage_, database, result, batch, token);
@@ -2708,26 +2786,63 @@ auto FactBatchWriter::apply(const ast::FactBatch &batch,
     load_relations(database, result, batch, token);
     load_auxiliary_rows(database, result, auxiliary_rows(storage_, batch),
                         token);
+    result.report.staging_seconds = seconds_since(staging_started);
+    result.report.phase_seconds[FactBatchWriterPhase::load_temporary_staging] +=
+        result.report.staging_seconds;
+    result.report
+        .phase_fullscan_steps[FactBatchWriterPhase::load_temporary_staging] +=
+        result.report.fullscan_steps - staging_fullscan_before;
     inject(context.failure, FactBatchWriterFailurePoint::temporary_load);
 
+    const auto apply_started = Clock::now();
+    const auto time_phase = [&result](FactBatchWriterPhase phase,
+                                      auto operation) {
+      const auto started = Clock::now();
+      const std::uint64_t fullscan_before = result.report.fullscan_steps;
+      operation();
+      result.report.phase_seconds[phase] += seconds_since(started);
+      result.report.phase_fullscan_steps[phase] +=
+          result.report.fullscan_steps - fullscan_before;
+    };
     inject(context.failure,
            FactBatchWriterFailurePoint::natural_key_resolution);
-    reject_stale_cleanup_intents(batch, context);
-    apply_lifecycle_cleanup(database, result, token);
-    apply_symbols(database, result, token);
-    resolve_external_references(database, result, token);
-    apply_types(database, result, token);
-    apply_definitions(database, result, token);
+    time_phase(FactBatchWriterPhase::resolve_natural_keys, [&] {
+      reject_stale_cleanup_intents(batch, context);
+      apply_lifecycle_cleanup(database, result, token);
+    });
+    time_phase(FactBatchWriterPhase::apply_entities, [&] {
+      apply_symbols(database, result, token);
+      resolve_external_references(database, result, token);
+      apply_types(database, result, token);
+      apply_definitions(database, result, token);
+    });
     inject(context.failure, FactBatchWriterFailurePoint::entity_apply);
 
     inject(context.failure, FactBatchWriterFailurePoint::annotation_apply);
-    apply_relations(database, result, token);
+    time_phase(FactBatchWriterPhase::apply_relations,
+               [&] { apply_relations(database, result, token); });
     inject(context.failure, FactBatchWriterFailurePoint::relation_apply);
     apply_auxiliary(database, result, token);
-    collect_maps(database, result, token);
+    time_phase(FactBatchWriterPhase::apply_sites_and_external_identities,
+               [&] { collect_maps(database, result, token); });
     inject(context.failure, FactBatchWriterFailurePoint::site_apply);
-    publish_includes(database, result, publication, token);
-    publish_applicability(database, result, publication, token);
+    time_phase(FactBatchWriterPhase::publish_includes_and_applicability, [&] {
+      const auto includes_started = Clock::now();
+      const std::uint64_t includes_fullscan_before =
+          result.report.fullscan_steps;
+      publish_includes(database, result, publication, token);
+      result.report.include_seconds += seconds_since(includes_started);
+      result.report.include_fullscan_steps +=
+          result.report.fullscan_steps - includes_fullscan_before;
+      const auto applicability_started = Clock::now();
+      const std::uint64_t applicability_fullscan_before =
+          result.report.fullscan_steps;
+      publish_applicability(database, result, publication, token);
+      result.report.applicability_seconds +=
+          seconds_since(applicability_started);
+      result.report.applicability_fullscan_steps +=
+          result.report.fullscan_steps - applicability_fullscan_before;
+    });
     // Record what this batch published. capture_transform_changes_for_file
     // above only names the prior identities lifecycle cleanup invalidates; a
     // change set carrying those alone tells incremental transforms to
@@ -2736,7 +2851,9 @@ auto FactBatchWriter::apply(const ast::FactBatch &batch,
     // the same seam by ending in note_transform_changes. This is not gated on
     // a configuration id: applicability publication is, and a
     // configuration-less publication still makes facts current.
-    record_transform_changes(database, result, token);
+    time_phase(FactBatchWriterPhase::cleanup_stale_facts,
+               [&] { record_transform_changes(database, result, token); });
+    result.report.apply_seconds = seconds_since(apply_started);
     inject(context.failure, FactBatchWriterFailurePoint::publication);
 
     for (const ast::PlannedFileRoute &route : context.route_plan.routes()) {

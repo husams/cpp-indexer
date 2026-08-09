@@ -55,13 +55,25 @@ inline constexpr std::array kFactBatchWriterPhaseOrder{
 
 struct FactBatchWriterRows {
   std::uint64_t staged = 0;
+  std::uint64_t coalesced = 0;
   std::uint64_t inserted = 0;
   std::uint64_t updated = 0;
   std::uint64_t ignored = 0;
   std::uint64_t deleted = 0;
 };
 
+struct FactBatchWriterApplicability {
+  std::uint64_t attempted = 0;
+  std::uint64_t unique = 0;
+  std::uint64_t virtual_machine_steps = 0;
+  std::uint64_t fullscan_steps = 0;
+  double seconds = 0.0;
+};
+
 struct FactBatchWriterReport {
+  std::uint64_t transactions_started = 0;
+  std::uint64_t temporary_tables_checked = 0;
+  std::uint64_t temporary_rows_cleared = 0;
   std::uint64_t statements_prepared = 0;
   std::uint64_t statements_reused = 0;
   // Statements eliminated relative to the replaced row-at-a-time path is not
@@ -70,12 +82,27 @@ struct FactBatchWriterReport {
   // baseline prepare_calls - candidate prepare_calls, never synthesized here.
   std::uint64_t statement_executions = 0;
   std::uint64_t virtual_machine_steps = 0;
+  std::uint64_t fullscan_steps = 0;
+  std::uint64_t include_fullscan_steps = 0;
+  std::uint64_t applicability_fullscan_steps = 0;
   double prepare_seconds = 0.0;
   double virtual_machine_seconds = 0.0;
+  double transaction_begin_seconds = 0.0;
+  double temporary_schema_seconds = 0.0;
+  double temporary_clear_seconds = 0.0;
+  double staging_seconds = 0.0;
+  double classification_seconds = 0.0;
+  double include_seconds = 0.0;
+  double applicability_seconds = 0.0;
+  double apply_seconds = 0.0;
   double commit_seconds = 0.0;
   bool commit_attempted = false;
   bool committed = false;
   std::map<ast::FactFamily, FactBatchWriterRows> families;
+  std::map<std::string, FactBatchWriterApplicability, std::less<>>
+      applicability;
+  std::map<FactBatchWriterPhase, double> phase_seconds;
+  std::map<FactBatchWriterPhase, std::uint64_t> phase_fullscan_steps;
 };
 
 enum class FactBatchWriterFailurePoint : std::uint8_t {
