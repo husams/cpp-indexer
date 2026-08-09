@@ -10,6 +10,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -178,6 +179,42 @@ struct Fixture {
   ast::OwnedHeaderRoutePlan plan;
 };
 
+auto measured_context(const Fixture &fixture)
+    -> storage::FactBatchPublicationContext {
+  auto context = fixture.context();
+  TranslationUnitConfig configuration;
+  configuration.descriptor_hash = "writer-config";
+  configuration.descriptor_json = "{}";
+  context.configuration = std::move(configuration);
+  context.measure_statements = true;
+  return context;
+}
+
+auto queryable_fact_projection(Fixture &fixture) -> std::vector<std::string> {
+  auto query = fixture.storage.raw_db().prepare(
+      "SELECT value FROM ("
+      "SELECT 'symbol|'||usr||'|'||spelling||'|'||kind||'|'||"
+      "is_definition AS value FROM symbol UNION ALL "
+      "SELECT 'edge|'||src.usr||'|'||dst.usr||'|'||edge.kind||'|'||"
+      "edge.count FROM edge JOIN symbol src ON src.id=edge.src_id JOIN symbol "
+      "dst ON dst.id=edge.dst_id UNION ALL "
+      "SELECT 'definition|'||symbol.usr||'|'||file.name||'|'||definition.line||"
+      "'|'||definition.col FROM definition JOIN symbol ON "
+      "symbol.id=definition.symbol_id JOIN file ON file.id=definition.file_id "
+      "UNION ALL SELECT 'symbol_type|'||symbol.usr||'|'||type_node.type_key||"
+      "'|'||symbol_type.kind FROM symbol_type JOIN symbol ON "
+      "symbol.id=symbol_type.symbol_id JOIN type_node ON "
+      "type_node.id=symbol_type.type_id UNION ALL "
+      "SELECT 'include|'||source.name||'|'||include_edge.dst_path||'|'||"
+      "include_edge.count FROM include_edge JOIN file source ON "
+      "source.id=include_edge.src_file_id) ORDER BY value");
+  std::vector<std::string> rows;
+  while (query.step()) {
+    rows.push_back(query.col_text(0));
+  }
+  return rows;
+}
+
 TEST_CASE("FactBatchWriter publishes the golden phase contract set-wise") {
   constexpr std::array expected{
       storage::FactBatchWriterPhase::validate_plan,
@@ -226,7 +263,12 @@ TEST_CASE("FactBatchWriter publishes the golden phase contract set-wise") {
   auto temporary = fixture.storage.raw_db().prepare(
       "SELECT COUNT(*) FROM sqlite_temp_schema WHERE name LIKE 'cidx_batch_%'");
   REQUIRE(temporary.step());
-  CHECK(temporary.col_int64(0) == 14);
+  CHECK(temporary.col_int64(0) == 15);
+  auto family_index = fixture.storage.raw_db().prepare(
+      "SELECT COUNT(*) FROM sqlite_temp_schema WHERE "
+      "name='cidx_batch_aux_family_batch' AND type='index'");
+  REQUIRE(family_index.step());
+  CHECK(family_index.col_int64(0) == 1);
   auto persisted = fixture.storage.raw_db().prepare(
       "SELECT COUNT(*) FROM sqlite_schema WHERE name LIKE 'cidx_batch_%'");
   REQUIRE(persisted.step());
@@ -348,6 +390,67 @@ TEST_CASE(
   CHECK(second.report.families.at(ast::FactFamily::symbol_types).updated > 0);
   CHECK(second.report.families.at(ast::FactFamily::edge_sites).ignored > 0);
   CHECK(second.report.families.at(ast::FactFamily::diagnostics).ignored > 0);
+}
+
+TEST_CASE(
+    "FactBatchWriter classifies fresh duplicate existing and mixed rows") {
+  const auto totals = [](const storage::FactBatchWriterResult &result,
+                         auto member) {
+    std::uint64_t total = 0;
+    for (const auto &[family, rows] : result.report.families) {
+      static_cast<void>(family);
+      total += rows.*member;
+    }
+    return total;
+  };
+
+  Fixture fixture;
+  storage::FactBatchWriter writer(fixture.storage);
+  const auto context = measured_context(fixture);
+  const auto fresh = writer.apply(fixture.batch(), context);
+  INFO(fresh.error.value_or(""));
+  REQUIRE(fresh.ok());
+  CHECK(totals(fresh, &storage::FactBatchWriterRows::inserted) > 0);
+  CHECK(totals(fresh, &storage::FactBatchWriterRows::updated) == 0);
+  CHECK(totals(fresh, &storage::FactBatchWriterRows::coalesced) > 0);
+
+  const auto existing = writer.apply(fixture.batch(), context);
+  INFO(existing.error.value_or(""));
+  REQUIRE(existing.ok());
+  CHECK(totals(existing, &storage::FactBatchWriterRows::updated) > 0);
+
+  const auto mixed = writer.apply(fixture.batch(true), context);
+  INFO(mixed.error.value_or(""));
+  REQUIRE(mixed.ok());
+  CHECK(totals(mixed, &storage::FactBatchWriterRows::inserted) > 0);
+  CHECK(totals(mixed, &storage::FactBatchWriterRows::updated) > 0);
+  CHECK(mixed.report.transactions_started == 1);
+  CHECK(mixed.report.temporary_tables_checked == 15);
+  CHECK_FALSE(mixed.report.phase_seconds.empty());
+}
+
+TEST_CASE(
+    "FactBatchWriter fresh and incremental publications query identically") {
+  Fixture fresh_fixture;
+  storage::FactBatchWriter fresh_writer(fresh_fixture.storage);
+  const auto fresh = fresh_writer.apply(fresh_fixture.batch(true),
+                                        measured_context(fresh_fixture));
+  INFO(fresh.error.value_or(""));
+  REQUIRE(fresh.ok());
+
+  Fixture incremental_fixture;
+  storage::FactBatchWriter incremental_writer(incremental_fixture.storage);
+  const auto initial = incremental_writer.apply(
+      incremental_fixture.batch(), measured_context(incremental_fixture));
+  INFO(initial.error.value_or(""));
+  REQUIRE(initial.ok());
+  const auto incremental = incremental_writer.apply(
+      incremental_fixture.batch(true), measured_context(incremental_fixture));
+  INFO(incremental.error.value_or(""));
+  REQUIRE(incremental.ok());
+
+  CHECK(queryable_fact_projection(fresh_fixture) ==
+        queryable_fact_projection(incremental_fixture));
 }
 
 TEST_CASE("FactBatchWriter captures incremental transform invalidation") {

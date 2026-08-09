@@ -1,0 +1,18 @@
+{
+  "story": "S-115",
+  "revision": "aca41dc042fd53fe6b1929c6744d86c40b90913c",
+  "corpus": ["src/query/exec.cpp"],
+  "database": "fresh",
+  "host": {"architecture": "arm64", "macos": "26.1"},
+  "sqlite_vdbe_seconds": 4.8058024149969327,
+  "sqlite_virtual_machine_steps": 421805936,
+  "sqlite_fullscan_steps": 50367,
+  "sqlite_prepare_calls": 242524,
+  "sqlite_step_calls": 354291,
+  "writer_virtual_machine_steps": 417625018,
+  "writer_rows_staged": 294316,
+  "writer_rows_inserted": 51906,
+  "writer_rows_updated": 234714,
+  "writer_rows_ignored": 7651,
+  "translation_unit_wall_seconds": 9.3986304579999995
+}
