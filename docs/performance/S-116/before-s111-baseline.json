@@ -1,0 +1,12 @@
+{
+  "source": "Backlog S-111 accepted --profile-json evidence",
+  "captured_at": "2026-08-08",
+  "single_tu": {
+    "translation_unit": "src/query/exec.cpp",
+    "include_persistence_seconds": 0.98
+  },
+  "five_tu_batch": {
+    "include_persistence_seconds": 7.90
+  },
+  "note": "Normalized relevant fields from the independently reviewed S-111 baseline named by S-116; this is not presented as a new measurement."
+}
