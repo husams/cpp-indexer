@@ -166,7 +166,9 @@ Recommended focus areas (updated):
 2. Burn down the `query.plan` exception cluster (4 exceptions,
    HSE-24/HSE-68) and the `extraction.ast` → `persistence` pair (HSE-63)
    before their 2026-12-31 expiry; move fact-batch records into
-   `model.contracts` to clear HSE-62. Removing exactly those 7 exceptions
+   `model.contracts` to clear HSE-62's storage-side exception (HSE-62 spans
+   3 exceptions; the two `analysis.astgraph` → `persistence` ones remain and
+   are tracked separately). Removing exactly those 7 exceptions
    leaves 11; reaching ≤10 additionally requires the 2 `analysis.graph` →
    `product.cli` exceptions that complete the HSE-24 set.
 3. Decide on the error-handling direction: either start the
