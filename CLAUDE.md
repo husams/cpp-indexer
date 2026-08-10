@@ -133,26 +133,65 @@ layering rules.
   next branch fork from an old base and reintroduces already-merged conflicts.
 - Keep agent scratch files under `/tmp` only — never in the repository tree.
   Do not commit generated artifacts (build dirs, caches, `__pycache__`, temp
-  databases, local virtualenvs). The one exception is the checked-in semantic
-  index `index.db` (see below).
-- **Re-indexing is manual and on request only.** The semantic index `index.db`
-  is committed to the repo, but regenerating it takes far too long to sit on the
-  critical path of a change. Do **not** regenerate or commit `index.db` as part
-  of ordinary work, and never make it an acceptance criterion, an exit gate, or
-  a merge blocker — a change that alters what the index would contain is
-  complete without it, and `index.db` may legitimately lag `main` (including its
-  `schema_version`). Regenerate only when the user explicitly asks. Revisit this
-  once indexing performance is fixed.
-- When a re-index **is** requested, run it from the **canonical checkout**
-  (`/Users/husam/workspace/cpp-indexer`, never a feature worktree — absolute
-  paths get baked into the DB) as the **full three-pass pipeline**:
-  `export INDEXER_CACHE="$(pwd)"`, then `rm index.db` → `./build/cidx import --db
-  "$(pwd)/build" --name cpp-indexer` → `./build/cidx index` → `./build/cidx
-  resolve`. Export `INDEXER_CACHE` once for all three passes; a per-command
-  prefix leaves `index`/`resolve` pointed at the global `~/.cache/cidx/index.db`.
-  Skipping `resolve` leaves Layer-1 empty (`entity_node` / `entity_edge` /
-  `dispatch_calls` = 0, no `meta.graph_resolved_at`). Verify: `sqlite3 index.db
-  "SELECT value FROM meta WHERE key='schema_version';"` matches the current
-  schema version; `SELECT COUNT(*) FROM entity_edge;` is non-zero;
-  `meta.graph_resolved_at` is set; and no worktree paths leaked
-  (`strings index.db | grep -c cpp-indexer- ` → 0).
+  databases, local virtualenvs, `index.db`).
+
+## Semantic index (`index.db`)
+
+`index.db` is **not in git** — it is ~158 MiB, is listed in `.gitignore`, and
+lives in the private `cidx-index` bucket on `minio-api.senussi.me`
+(Tailscale-only). [`scripts/index-db.sh`](scripts/index-db.sh) is the only
+supported way to move it: `push` / `pull` / `list`. Credentials come from the
+`minio` secret in the cluster's `infrastructure` namespace, or from
+`MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY`.
+
+- **Pull before you start work — always.** The first thing in any session,
+  branch, or worktree: `./scripts/index-db.sh pull`. Never start a task against
+  a missing index, and never work around a missing one by rebuilding it.
+- **Never run a full re-index.** The three-pass `import → index → resolve`
+  rebuild is measured in minutes-to-hours and is not part of ordinary work. It
+  is never an acceptance criterion, an exit gate, or a merge blocker. Rebuild
+  from scratch only when the user explicitly asks for it.
+- **Re-index only the files you changed**, incrementally, as you change them.
+  Export `INDEXER_CACHE` once for every `cidx` invocation in the shell — a
+  per-command prefix leaves `index`/`resolve` pointed at the global
+  `~/.cache/cidx/index.db`. Run from the checkout root; relative paths resolve
+  against `$PWD`, not the component root.
+
+  ```bash
+  export INDEXER_CACHE="$(pwd)"
+  ./build/cidx file set pending=True --file src/util/env.cpp   # once per changed file
+  ./build/cidx index src/util/env.cpp                          # ~5 s per TU
+  ./build/cidx resolve                                         # relink edges, ~5 s
+  ```
+
+  Always finish with `resolve`; skipping it leaves Layer-1 (`entity_node` /
+  `entity_edge`, `meta.graph_resolved_at`) stale. For a **newly added** source
+  file, register it first with `./build/cidx import --db "$(pwd)/build" --name
+  cpp-indexer` (no `--force` — `--force` deletes and re-indexes the whole
+  component), then index just that file. For a **deleted** file, use
+  `./build/cidx file rm`.
+- **Upload only after the PR is merged**, never before, and only from the
+  canonical checkout `/Users/husam/workspace/cpp-indexer` — absolute paths are
+  baked into the DB, so a worktree-rooted database must never be pushed. After
+  merging and bringing local `main` up to date, incrementally re-index the files
+  the PR touched, then `./scripts/index-db.sh push`. A feature branch's index
+  changes are local scratch; they die with the branch.
+
+### Using the index inside a git worktree
+
+Give the worktree its own copy of the database and re-point the repository at
+it — do not query or mutate the canonical checkout's copy from a worktree.
+
+```bash
+WT=~/.claude/worktrees/cpp-indexer/<branch>
+cd "$WT" && export INDEXER_CACHE="$WT"
+/Users/husam/workspace/cpp-indexer/scripts/index-db.sh pull "$WT/index.db"
+CIDX=/Users/husam/workspace/cpp-indexer/build/cidx   # or the worktree's own build
+"$CIDX" repo add-clone cpp-indexer "$WT" --label <branch>
+"$CIDX" repo switch    cpp-indexer <branch>
+```
+
+`repo switch` rewrites the component root to the worktree, so the incremental
+recipe above then indexes *your* copy of each file. Verify with `cidx repo show
+cpp-indexer` — the active clone must be the worktree. The worktree's `index.db`
+is disposable: delete it with the worktree, and never `push` it.
