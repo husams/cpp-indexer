@@ -19,7 +19,6 @@
 #include "storage/records.hpp"
 #include "storage/sqlite.hpp"
 #include "storage/storage.hpp"
-#include "util/errors.hpp"
 
 namespace {
 

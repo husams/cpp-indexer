@@ -15,12 +15,9 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#include "compiledb/compiledb.hpp"
 #include "storage/storage_detail.hpp"
-#include "storage/storage_schema.hpp"
 #include "util/errors.hpp"
 #include "util/json_min.hpp"
-#include "util/logger.hpp"
 #include "util/pathutil.hpp"
 
 namespace cidx {

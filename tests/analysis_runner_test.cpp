@@ -18,7 +18,6 @@
 #include "analysis/facts.hpp"
 #include "analysis/runner.hpp"
 #include "astgraph/astgraph.hpp"
-#include "astgraph/schema.hpp"
 #include "catalogs/generated_catalog.hpp"
 #include "storage/sqlite.hpp"
 #include "storage/storage.hpp"

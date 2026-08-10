@@ -11,7 +11,6 @@
 #include "storage/storage.hpp"
 #include "ui/assets.hpp"
 #include "ui/graph_view.hpp"
-#include "util/errors.hpp"
 
 using cidx::Storage;
 

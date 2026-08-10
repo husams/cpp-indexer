@@ -41,7 +41,6 @@
 #include "cli/args.hpp"
 #include "cli/commands.hpp"
 #include "index/parallel_index.hpp"
-#include "profile/index_profile.hpp"
 #include "storage/sqlite.hpp"
 #include "storage/storage.hpp"
 #include "util/logger.hpp"

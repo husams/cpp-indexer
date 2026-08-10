@@ -17,7 +17,6 @@
 
 #include "storage/sqlite.hpp"
 #include "storage/storage.hpp"
-#include "util/errors.hpp"
 
 #ifndef CIDX_FIXTURES_DIR
 #error "CIDX_FIXTURES_DIR must be defined by the build"

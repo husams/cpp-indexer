@@ -19,7 +19,6 @@
 #include "storage/storage.hpp"
 #include "util/errors.hpp"
 #include "util/hashing.hpp"
-#include "util/pathutil.hpp"
 #include "util/subprocess.hpp"
 
 namespace cidx::analysis {

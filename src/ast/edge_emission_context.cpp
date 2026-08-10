@@ -1,6 +1,5 @@
 #include "ast/edge_emission_context.hpp"
 
-#include "ast/clang_compat.hpp"
 #include "ast/fact_emitters.hpp"
 #include "ast/location.hpp"
 #include "ast/pass_registry.hpp"
