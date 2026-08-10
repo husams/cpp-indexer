@@ -331,16 +331,27 @@ CREATE INDEX IF NOT EXISTS temp.cidx_batch_aux_family_batch
   report.temporary_schema_seconds += seconds_since(started);
 }
 
+inline constexpr auto kTemporaryBatchTables = std::to_array<std::string_view>({
+    "cidx_batch_file_map",
+    "cidx_batch_symbol",
+    "cidx_batch_symbol_map",
+    "cidx_batch_external_ref",
+    "cidx_batch_type",
+    "cidx_batch_type_map",
+    "cidx_batch_relation",
+    "cidx_batch_relation_map",
+    "cidx_batch_definition",
+    "cidx_batch_definition_map",
+    "cidx_batch_edge_site",
+    "cidx_batch_call_arg",
+    "cidx_batch_diagnostic",
+    "cidx_batch_aux",
+});
+
 void clear_temporary_rows(SqliteDb &database, FactBatchWriterReport &report,
                           std::int64_t batch_token) {
   const auto started = Clock::now();
-  for (const std::string_view table :
-       {"cidx_batch_file_map", "cidx_batch_symbol", "cidx_batch_symbol_map",
-        "cidx_batch_external_ref", "cidx_batch_type", "cidx_batch_type_map",
-        "cidx_batch_relation", "cidx_batch_relation_map",
-        "cidx_batch_definition", "cidx_batch_definition_map",
-        "cidx_batch_edge_site", "cidx_batch_call_arg", "cidx_batch_diagnostic",
-        "cidx_batch_aux"}) {
+  for (const std::string_view table : kTemporaryBatchTables) {
     auto statement = prepare_statement(
         database, report,
         "DELETE FROM temp." + std::string(table) + " WHERE batch = ?");
@@ -352,6 +363,75 @@ void clear_temporary_rows(SqliteDb &database, FactBatchWriterReport &report,
     ++report.statement_executions;
   }
   report.temporary_clear_seconds += seconds_since(started);
+}
+
+void clear_all_temporary_rows(SqliteDb &database,
+                              FactBatchWriterReport &report) {
+  const auto started = Clock::now();
+  for (const std::string_view table : kTemporaryBatchTables) {
+    database.exec("DELETE FROM temp." + std::string(table));
+    report.temporary_rows_cleared += static_cast<std::uint64_t>(
+        std::max<std::int64_t>(0, database.changes()));
+    ++report.statements_prepared;
+    ++report.statement_executions;
+  }
+  report.temporary_clear_seconds += seconds_since(started);
+}
+
+void merge_report(FactBatchWriterReport &target,
+                  const FactBatchWriterReport &source) {
+  target.windows_started += source.windows_started;
+  target.windows_committed += source.windows_committed;
+  target.windows_rolled_back += source.windows_rolled_back;
+  target.translation_units_replayed += source.translation_units_replayed;
+  target.window_items += source.window_items;
+  target.window_bytes += source.window_bytes;
+  target.transactions_started += source.transactions_started;
+  target.temporary_tables_checked += source.temporary_tables_checked;
+  target.temporary_rows_cleared += source.temporary_rows_cleared;
+  target.statements_prepared += source.statements_prepared;
+  target.statements_reused += source.statements_reused;
+  target.statement_executions += source.statement_executions;
+  target.virtual_machine_steps += source.virtual_machine_steps;
+  target.fullscan_steps += source.fullscan_steps;
+  target.include_fullscan_steps += source.include_fullscan_steps;
+  target.applicability_fullscan_steps += source.applicability_fullscan_steps;
+  target.prepare_seconds += source.prepare_seconds;
+  target.virtual_machine_seconds += source.virtual_machine_seconds;
+  target.transaction_begin_seconds += source.transaction_begin_seconds;
+  target.temporary_schema_seconds += source.temporary_schema_seconds;
+  target.temporary_clear_seconds += source.temporary_clear_seconds;
+  target.staging_seconds += source.staging_seconds;
+  target.classification_seconds += source.classification_seconds;
+  target.include_seconds += source.include_seconds;
+  target.applicability_seconds += source.applicability_seconds;
+  target.apply_seconds += source.apply_seconds;
+  target.commit_seconds += source.commit_seconds;
+  target.commit_attempted = target.commit_attempted || source.commit_attempted;
+  target.committed = target.committed || source.committed;
+  for (const auto &[family, rows] : source.families) {
+    auto &combined = target.families[family];
+    combined.staged += rows.staged;
+    combined.coalesced += rows.coalesced;
+    combined.inserted += rows.inserted;
+    combined.updated += rows.updated;
+    combined.ignored += rows.ignored;
+    combined.deleted += rows.deleted;
+  }
+  for (const auto &[kind, counts] : source.applicability) {
+    auto &combined = target.applicability[kind];
+    combined.attempted += counts.attempted;
+    combined.unique += counts.unique;
+    combined.virtual_machine_steps += counts.virtual_machine_steps;
+    combined.fullscan_steps += counts.fullscan_steps;
+    combined.seconds += counts.seconds;
+  }
+  for (const auto &[phase, seconds] : source.phase_seconds) {
+    target.phase_seconds[phase] += seconds;
+  }
+  for (const auto &[phase, steps] : source.phase_fullscan_steps) {
+    target.phase_fullscan_steps[phase] += steps;
+  }
 }
 
 // Two partitions belong to the same publication when their file and every
@@ -375,12 +455,15 @@ auto publishes_same_partition(const ast::FactPartitionKey &route,
 }
 
 auto batch_token(const ast::FactBatch &batch,
-                 const FactBatchPublicationContext &context) -> std::int64_t {
+                 const FactBatchPublicationContext &context,
+                 std::size_t window_ordinal) -> std::int64_t {
   std::string material = context.route_plan.token();
   material += '\x1f';
   material += batch.producer();
   material += '\x1f';
   material += std::to_string(batch.producer_version());
+  material += '\x1f';
+  material += std::to_string(window_ordinal);
   return static_cast<std::int64_t>(ast::stable_fact_hash(material) &
                                    0x7fff'ffff'ffff'ffffULL);
 }
@@ -2683,214 +2766,226 @@ auto fact_batch_writer_phase_name(FactBatchWriterPhase phase)
 FactBatchWriter::FactBatchWriter(cidx::SqliteStorageService &storage)
     : storage_(storage) {}
 
-auto FactBatchWriter::apply(const ast::FactBatch &batch,
-                            const FactBatchPublicationContext &context)
+auto FactBatchWriter::apply_in_transaction(
+    const ast::FactBatch &batch, const FactBatchPublicationContext &context,
+    TemporaryRowPolicy temporary_rows, std::size_t window_ordinal)
     -> FactBatchWriterResult {
   FactBatchWriterResult result;
-  const std::int64_t token = batch_token(batch, context);
+  const std::int64_t token = batch_token(batch, context, window_ordinal);
   std::optional<StatementMeasurementScope> measurement;
   if (context.measure_statements) {
     measurement.emplace();
   }
-  const auto transaction_started = Clock::now();
-  auto transaction = storage_.transaction();
-  ++result.report.transactions_started;
-  result.report.transaction_begin_seconds = seconds_since(transaction_started);
-  try {
-    FactBatchPublicationContext publication = context;
-    if (publication.configuration) {
-      publication.configuration_id =
-          storage_.add_translation_unit_config(*publication.configuration);
+  FactBatchPublicationContext publication = context;
+  if (publication.configuration) {
+    publication.configuration_id =
+        storage_.add_translation_unit_config(*publication.configuration);
+  }
+  result.configuration_id = publication.configuration_id;
+  if (context.route_plan.generation() != context.expected_generation) {
+    throw StorageError("FactBatch publication plan generation is stale");
+  }
+  if (context.translation_unit.empty()) {
+    throw StorageError("FactBatch publication requires a translation unit");
+  }
+  for (const ast::PlannedFileRoute &route : context.route_plan.routes()) {
+    if (route.translation_unit != context.translation_unit) {
+      continue;
     }
-    result.configuration_id = publication.configuration_id;
-    if (context.route_plan.generation() != context.expected_generation) {
-      throw StorageError("FactBatch publication plan generation is stale");
+    if (context.source_is_current &&
+        !context.source_is_current(route.path, route.snapshot)) {
+      throw StorageError(route.path +
+                         ": source changed before FactBatch publication");
     }
-    if (context.translation_unit.empty()) {
-      throw StorageError("FactBatch publication requires a translation unit");
+    if (route.role == ast::PlannedFileRole::translation_unit &&
+        !route.existing_file_id) {
+      throw StorageError("translation-unit route has no existing file row");
     }
-    for (const ast::PlannedFileRoute &route : context.route_plan.routes()) {
-      if (route.translation_unit != context.translation_unit) {
-        continue;
+    const std::int64_t file_id =
+        route.existing_file_id
+            ? *route.existing_file_id
+            : storage_.add_file_path(route.path, route.snapshot.mtime,
+                                     route.snapshot.md5, route.compile_options,
+                                     route.driver);
+    if (!route.extraction.transient_file_handle) {
+      throw StorageError("publication route has no transient file handle");
+    }
+    result.file_ids.emplace(*route.extraction.transient_file_handle, file_id);
+  }
+
+  for (const auto &[batch_handle, partition] : batch.file_keys()) {
+    const auto route = std::ranges::find_if(
+        context.route_plan.routes(),
+        [&partition, &context](const ast::PlannedFileRoute &candidate) {
+          return candidate.translation_unit == context.translation_unit &&
+                 candidate.extraction.partition == partition;
+        });
+    if (route == context.route_plan.routes().end()) {
+      const auto existing = storage_.get_file(partition.file.portable_path());
+      if (!existing) {
+        throw StorageError(
+            "FactBatch partition is absent from publication plan: " +
+            partition.file.portable_path());
       }
-      if (context.source_is_current &&
-          !context.source_is_current(route.path, route.snapshot)) {
-        throw StorageError(route.path +
-                           ": source changed before FactBatch publication");
-      }
-      if (route.role == ast::PlannedFileRole::translation_unit &&
-          !route.existing_file_id) {
-        throw StorageError("translation-unit route has no existing file row");
-      }
-      const std::int64_t file_id =
-          route.existing_file_id
-              ? *route.existing_file_id
-              : storage_.add_file_path(route.path, route.snapshot.mtime,
-                                       route.snapshot.md5,
-                                       route.compile_options, route.driver);
+      result.file_ids.emplace(batch_handle, existing->id);
+      continue;
+    }
+    if (!route->extraction.transient_file_handle) {
+      throw StorageError("FactBatch publication route has no file handle");
+    }
+    result.file_ids.emplace(
+        batch_handle,
+        result.file_ids.at(*route->extraction.transient_file_handle));
+  }
+
+  // Capture the previous persistent identities before any lifecycle cleanup
+  // or upsert mutates them. Incremental transforms consume this change set.
+  // Owned-header candidates do not carry existing_file_id, so use the file
+  // id resolved above for every route whose prior facts will be cleaned.
+  std::vector<std::int64_t> cleaned_file_ids;
+  for (const ast::PlannedFileRoute &route : context.route_plan.routes()) {
+    if (route.translation_unit == context.translation_unit &&
+        route.cleanup_symbols) {
       if (!route.extraction.transient_file_handle) {
         throw StorageError("publication route has no transient file handle");
       }
-      result.file_ids.emplace(*route.extraction.transient_file_handle, file_id);
+      cleaned_file_ids.push_back(route.existing_file_id.value_or(
+          result.file_ids.at(*route.extraction.transient_file_handle)));
     }
+  }
 
-    for (const auto &[batch_handle, partition] : batch.file_keys()) {
-      const auto route = std::ranges::find_if(
-          context.route_plan.routes(),
-          [&partition, &context](const ast::PlannedFileRoute &candidate) {
-            return candidate.translation_unit == context.translation_unit &&
-                   candidate.extraction.partition == partition;
-          });
-      if (route == context.route_plan.routes().end()) {
-        const auto existing = storage_.get_file(partition.file.portable_path());
-        if (!existing) {
-          throw StorageError(
-              "FactBatch partition is absent from publication plan: " +
-              partition.file.portable_path());
-        }
-        result.file_ids.emplace(batch_handle, existing->id);
-        continue;
-      }
-      if (!route->extraction.transient_file_handle) {
-        throw StorageError("FactBatch publication route has no file handle");
-      }
-      result.file_ids.emplace(
-          batch_handle,
-          result.file_ids.at(*route->extraction.transient_file_handle));
-    }
-
-    // Capture the previous persistent identities before any lifecycle cleanup
-    // or upsert mutates them. Incremental transforms consume this change set.
-    // Owned-header candidates do not carry existing_file_id, so use the file
-    // id resolved above for every route whose prior facts will be cleaned.
-    std::vector<std::int64_t> cleaned_file_ids;
-    for (const ast::PlannedFileRoute &route : context.route_plan.routes()) {
-      if (route.translation_unit == context.translation_unit &&
-          route.cleanup_symbols) {
-        if (!route.extraction.transient_file_handle) {
-          throw StorageError("publication route has no transient file handle");
-        }
-        cleaned_file_ids.push_back(route.existing_file_id.value_or(
-            result.file_ids.at(*route.extraction.transient_file_handle)));
-      }
-    }
-
-    SqliteDb &database = storage_.raw_db();
-    capture_prior_transform_changes(database, result, cleaned_file_ids);
+  SqliteDb &database = storage_.raw_db();
+  capture_prior_transform_changes(database, result, cleaned_file_ids);
+  if (temporary_rows == TemporaryRowPolicy::per_item) {
     create_temporary_schema(database, result.report);
     clear_temporary_rows(database, result.report, token);
-    const auto staging_started = Clock::now();
-    const std::uint64_t staging_fullscan_before = result.report.fullscan_steps;
-    load_file_map(database, result, batch, context, token);
-    load_symbols(storage_, database, result, batch, token);
-    load_external_references(storage_, database, result, batch, token);
-    load_types(database, result, batch, token);
-    load_definitions(database, result, batch, token);
-    load_relations(database, result, batch, token);
-    load_auxiliary_rows(database, result, auxiliary_rows(storage_, batch),
-                        token);
-    result.report.staging_seconds = seconds_since(staging_started);
-    result.report.phase_seconds[FactBatchWriterPhase::load_temporary_staging] +=
-        result.report.staging_seconds;
-    result.report
-        .phase_fullscan_steps[FactBatchWriterPhase::load_temporary_staging] +=
-        result.report.fullscan_steps - staging_fullscan_before;
-    inject(context.failure, FactBatchWriterFailurePoint::temporary_load);
+  }
+  const auto staging_started = Clock::now();
+  const std::uint64_t staging_fullscan_before = result.report.fullscan_steps;
+  load_file_map(database, result, batch, context, token);
+  load_symbols(storage_, database, result, batch, token);
+  load_external_references(storage_, database, result, batch, token);
+  load_types(database, result, batch, token);
+  load_definitions(database, result, batch, token);
+  load_relations(database, result, batch, token);
+  load_auxiliary_rows(database, result, auxiliary_rows(storage_, batch), token);
+  result.report.staging_seconds = seconds_since(staging_started);
+  result.report.phase_seconds[FactBatchWriterPhase::load_temporary_staging] +=
+      result.report.staging_seconds;
+  result.report
+      .phase_fullscan_steps[FactBatchWriterPhase::load_temporary_staging] +=
+      result.report.fullscan_steps - staging_fullscan_before;
+  inject(context.failure, FactBatchWriterFailurePoint::temporary_load);
 
-    const auto apply_started = Clock::now();
-    const auto time_phase = [&result](FactBatchWriterPhase phase,
-                                      auto operation) {
-      const auto started = Clock::now();
-      const std::uint64_t fullscan_before = result.report.fullscan_steps;
-      operation();
-      result.report.phase_seconds[phase] += seconds_since(started);
-      result.report.phase_fullscan_steps[phase] +=
-          result.report.fullscan_steps - fullscan_before;
-    };
-    inject(context.failure,
-           FactBatchWriterFailurePoint::natural_key_resolution);
-    time_phase(FactBatchWriterPhase::resolve_natural_keys, [&] {
-      reject_stale_cleanup_intents(batch, context);
-      apply_lifecycle_cleanup(database, result, token);
-    });
-    time_phase(FactBatchWriterPhase::apply_entities, [&] {
-      apply_symbols(database, result, token);
-      resolve_external_references(database, result, token);
-      apply_types(database, result, token);
-      apply_definitions(database, result, token);
-    });
-    inject(context.failure, FactBatchWriterFailurePoint::entity_apply);
+  const auto apply_started = Clock::now();
+  const auto time_phase = [&result](FactBatchWriterPhase phase,
+                                    auto operation) {
+    const auto started = Clock::now();
+    const std::uint64_t fullscan_before = result.report.fullscan_steps;
+    operation();
+    result.report.phase_seconds[phase] += seconds_since(started);
+    result.report.phase_fullscan_steps[phase] +=
+        result.report.fullscan_steps - fullscan_before;
+  };
+  inject(context.failure, FactBatchWriterFailurePoint::natural_key_resolution);
+  time_phase(FactBatchWriterPhase::resolve_natural_keys, [&] {
+    reject_stale_cleanup_intents(batch, context);
+    apply_lifecycle_cleanup(database, result, token);
+  });
+  time_phase(FactBatchWriterPhase::apply_entities, [&] {
+    apply_symbols(database, result, token);
+    resolve_external_references(database, result, token);
+    apply_types(database, result, token);
+    apply_definitions(database, result, token);
+  });
+  inject(context.failure, FactBatchWriterFailurePoint::entity_apply);
 
-    inject(context.failure, FactBatchWriterFailurePoint::annotation_apply);
-    time_phase(FactBatchWriterPhase::apply_relations,
-               [&] { apply_relations(database, result, token); });
-    inject(context.failure, FactBatchWriterFailurePoint::relation_apply);
-    apply_auxiliary(database, result, token);
-    time_phase(FactBatchWriterPhase::apply_sites_and_external_identities,
-               [&] { collect_maps(database, result, token); });
-    inject(context.failure, FactBatchWriterFailurePoint::site_apply);
-    time_phase(FactBatchWriterPhase::publish_includes_and_applicability, [&] {
-      const auto includes_started = Clock::now();
-      const std::uint64_t includes_fullscan_before =
-          result.report.fullscan_steps;
-      publish_includes(database, result, publication, token);
-      result.report.include_seconds += seconds_since(includes_started);
-      result.report.include_fullscan_steps +=
-          result.report.fullscan_steps - includes_fullscan_before;
-      const auto applicability_started = Clock::now();
-      const std::uint64_t applicability_fullscan_before =
-          result.report.fullscan_steps;
-      publish_applicability(database, result, publication, token);
-      result.report.applicability_seconds +=
-          seconds_since(applicability_started);
-      result.report.applicability_fullscan_steps +=
-          result.report.fullscan_steps - applicability_fullscan_before;
-    });
-    // Record what this batch published. capture_transform_changes_for_file
-    // above only names the prior identities lifecycle cleanup invalidates; a
-    // change set carrying those alone tells incremental transforms to
-    // re-derive over removed ids while silently omitting every fact the batch
-    // created. The per-file applicability routine this writer replaced closed
-    // the same seam by ending in note_transform_changes. This is not gated on
-    // a configuration id: applicability publication is, and a
-    // configuration-less publication still makes facts current.
-    time_phase(FactBatchWriterPhase::cleanup_stale_facts,
-               [&] { record_transform_changes(database, result, token); });
-    result.report.apply_seconds = seconds_since(apply_started);
-    inject(context.failure, FactBatchWriterFailurePoint::publication);
+  inject(context.failure, FactBatchWriterFailurePoint::annotation_apply);
+  time_phase(FactBatchWriterPhase::apply_relations,
+             [&] { apply_relations(database, result, token); });
+  inject(context.failure, FactBatchWriterFailurePoint::relation_apply);
+  apply_auxiliary(database, result, token);
+  time_phase(FactBatchWriterPhase::apply_sites_and_external_identities,
+             [&] { collect_maps(database, result, token); });
+  inject(context.failure, FactBatchWriterFailurePoint::site_apply);
+  time_phase(FactBatchWriterPhase::publish_includes_and_applicability, [&] {
+    const auto includes_started = Clock::now();
+    const std::uint64_t includes_fullscan_before = result.report.fullscan_steps;
+    publish_includes(database, result, publication, token);
+    result.report.include_seconds += seconds_since(includes_started);
+    result.report.include_fullscan_steps +=
+        result.report.fullscan_steps - includes_fullscan_before;
+    const auto applicability_started = Clock::now();
+    const std::uint64_t applicability_fullscan_before =
+        result.report.fullscan_steps;
+    publish_applicability(database, result, publication, token);
+    result.report.applicability_seconds += seconds_since(applicability_started);
+    result.report.applicability_fullscan_steps +=
+        result.report.fullscan_steps - applicability_fullscan_before;
+  });
+  // Record what this batch published. capture_transform_changes_for_file
+  // above only names the prior identities lifecycle cleanup invalidates; a
+  // change set carrying those alone tells incremental transforms to
+  // re-derive over removed ids while silently omitting every fact the batch
+  // created. The per-file applicability routine this writer replaced closed
+  // the same seam by ending in note_transform_changes. This is not gated on
+  // a configuration id: applicability publication is, and a
+  // configuration-less publication still makes facts current.
+  time_phase(FactBatchWriterPhase::cleanup_stale_facts,
+             [&] { record_transform_changes(database, result, token); });
+  result.report.apply_seconds = seconds_since(apply_started);
+  inject(context.failure, FactBatchWriterFailurePoint::publication);
 
-    for (const ast::PlannedFileRoute &route : context.route_plan.routes()) {
-      if (route.translation_unit != context.translation_unit ||
-          !route.extraction.transient_file_handle) {
-        continue;
-      }
-      if (context.source_is_current &&
-          !context.source_is_current(route.path, route.snapshot)) {
-        throw StorageError(route.path +
-                           ": source changed before FactBatch commit");
-      }
+  for (const ast::PlannedFileRoute &route : context.route_plan.routes()) {
+    if (route.translation_unit != context.translation_unit ||
+        !route.extraction.transient_file_handle) {
+      continue;
     }
-    inject(context.failure, FactBatchWriterFailurePoint::cleanup);
-
-    for (const ast::PlannedFileRoute &route : context.route_plan.routes()) {
-      if (route.translation_unit != context.translation_unit ||
-          !route.extraction.transient_file_handle) {
-        continue;
-      }
-      const std::int64_t file_id =
-          result.file_ids.at(*route.extraction.transient_file_handle);
-      storage_.mark_file_indexed(file_id, route.snapshot.mtime,
-                                 route.snapshot.md5);
+    if (context.source_is_current &&
+        !context.source_is_current(route.path, route.snapshot)) {
+      throw StorageError(route.path +
+                         ": source changed before FactBatch commit");
     }
-    inject(context.failure, FactBatchWriterFailurePoint::before_commit);
+  }
+  inject(context.failure, FactBatchWriterFailurePoint::cleanup);
+
+  for (const ast::PlannedFileRoute &route : context.route_plan.routes()) {
+    if (route.translation_unit != context.translation_unit ||
+        !route.extraction.transient_file_handle) {
+      continue;
+    }
+    const std::int64_t file_id =
+        result.file_ids.at(*route.extraction.transient_file_handle);
+    storage_.mark_file_indexed(file_id, route.snapshot.mtime,
+                               route.snapshot.md5);
+  }
+  inject(context.failure, FactBatchWriterFailurePoint::before_commit);
+  if (temporary_rows == TemporaryRowPolicy::per_item) {
+    clear_temporary_rows(database, result.report, token);
+  }
+  return result;
+}
+
+auto FactBatchWriter::apply(const ast::FactBatch &batch,
+                            const FactBatchPublicationContext &context)
+    -> FactBatchWriterResult {
+  FactBatchWriterResult result;
+  const auto transaction_started = Clock::now();
+  auto transaction = storage_.transaction();
+  const double transaction_begin_seconds = seconds_since(transaction_started);
+  try {
+    result = apply_in_transaction(batch, context, TemporaryRowPolicy::per_item);
+    ++result.report.transactions_started;
+    result.report.transaction_begin_seconds += transaction_begin_seconds;
     result.report.commit_attempted = true;
     const auto commit_started = Clock::now();
     if (context.failure == FactBatchWriterFailurePoint::commit) {
       throw StorageError("injected FactBatchWriter commit failure");
     }
-    clear_temporary_rows(database, result.report, token);
     transaction.commit();
     result.report.commit_seconds = seconds_since(commit_started);
+    result.report.phase_seconds[FactBatchWriterPhase::commit] +=
+        result.report.commit_seconds;
     result.report.committed = true;
   } catch (const std::exception &error) {
     std::string failure = error.what();
@@ -2904,6 +2999,102 @@ auto FactBatchWriter::apply(const ast::FactBatch &batch,
     result.error = std::move(failure);
   }
   return result;
+}
+
+auto FactBatchWriter::apply_window(
+    std::span<const FactBatchWriterWindowItem> items,
+    const std::function<bool()> &cancelled, FactBatchWriterWindowMode mode)
+    -> FactBatchWriterWindowResult {
+  FactBatchWriterWindowResult window;
+  if (items.empty()) {
+    window.report.committed = true;
+    return window;
+  }
+  window.results.reserve(items.size());
+  window.report.windows_started = 1;
+  window.report.window_items = items.size();
+  for (const FactBatchWriterWindowItem &item : items) {
+    if (item.batch == nullptr) {
+      throw std::invalid_argument("FactBatchWriter window item has no batch");
+    }
+    window.report.window_bytes += item.approximate_bytes;
+  }
+  const auto replay_items = [&] {
+    window.replayed = true;
+    window.results.clear();
+    for (const FactBatchWriterWindowItem &item : items) {
+      FactBatchPublicationContext replay = item.context;
+      replay.failure = FactBatchWriterFailurePoint::none;
+      FactBatchWriterResult result = apply(*item.batch, replay);
+      merge_report(window.report, result.report);
+      ++window.report.translation_units_replayed;
+      window.results.push_back(std::move(result));
+    }
+    window.report.committed = window.ok();
+  };
+  if (mode == FactBatchWriterWindowMode::replay_only) {
+    window.report.windows_rolled_back = 1;
+    window.speculative_error =
+        "publication window contained a prepublication failure";
+    replay_items();
+    return window;
+  }
+
+  const auto transaction_started = Clock::now();
+  auto transaction = storage_.transaction();
+  ++window.report.transactions_started;
+  window.report.transaction_begin_seconds = seconds_since(transaction_started);
+  try {
+    SqliteDb &database = storage_.raw_db();
+    create_temporary_schema(database, window.report);
+    clear_all_temporary_rows(database, window.report);
+    bool inject_commit_failure = false;
+    for (std::size_t index = 0; index < items.size(); ++index) {
+      const FactBatchWriterWindowItem &item = items[index];
+      FactBatchWriterResult result =
+          apply_in_transaction(*item.batch, item.context,
+                               TemporaryRowPolicy::shared_window, index + 1);
+      inject_commit_failure =
+          inject_commit_failure ||
+          item.context.failure == FactBatchWriterFailurePoint::commit;
+      merge_report(window.report, result.report);
+      window.results.push_back(std::move(result));
+      if (cancelled && cancelled()) {
+        throw StorageError("FactBatch publication window cancelled");
+      }
+    }
+    clear_all_temporary_rows(database, window.report);
+    window.report.commit_attempted = true;
+    const auto commit_started = Clock::now();
+    if (inject_commit_failure) {
+      throw StorageError("injected FactBatchWriter window commit failure");
+    }
+    transaction.commit();
+    window.report.commit_seconds += seconds_since(commit_started);
+    window.report.phase_seconds[FactBatchWriterPhase::commit] +=
+        window.report.commit_seconds;
+    window.report.windows_committed = 1;
+    window.report.committed = true;
+    for (FactBatchWriterResult &result : window.results) {
+      result.report.commit_attempted = true;
+      result.report.committed = true;
+    }
+    return window;
+  } catch (const std::exception &error) {
+    std::string failure = error.what();
+    try {
+      transaction.rollback();
+    } catch (const std::exception &rollback_error) {
+      failure += "; rollback failed: ";
+      failure += rollback_error.what();
+    }
+    window.report.windows_rolled_back = 1;
+    window.report.committed = false;
+    window.speculative_error = std::move(failure);
+  }
+
+  replay_items();
+  return window;
 }
 
 } // namespace cidx::storage

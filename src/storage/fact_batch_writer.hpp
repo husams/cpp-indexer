@@ -5,12 +5,16 @@
 #include "ast/owned_header_plan.hpp"
 #include "storage/records.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace cidx {
 class SqliteStorageService;
@@ -71,6 +75,12 @@ struct FactBatchWriterApplicability {
 };
 
 struct FactBatchWriterReport {
+  std::uint64_t windows_started = 0;
+  std::uint64_t windows_committed = 0;
+  std::uint64_t windows_rolled_back = 0;
+  std::uint64_t translation_units_replayed = 0;
+  std::uint64_t window_items = 0;
+  std::uint64_t window_bytes = 0;
   std::uint64_t transactions_started = 0;
   std::uint64_t temporary_tables_checked = 0;
   std::uint64_t temporary_rows_cleared = 0;
@@ -148,6 +158,28 @@ struct FactBatchWriterResult {
   }
 };
 
+struct FactBatchWriterWindowItem {
+  const ast::FactBatch *batch = nullptr;
+  FactBatchPublicationContext context;
+  std::uint64_t approximate_bytes = 0;
+};
+
+struct FactBatchWriterWindowResult {
+  std::vector<FactBatchWriterResult> results;
+  FactBatchWriterReport report;
+  bool replayed = false;
+  std::optional<std::string> speculative_error;
+
+  [[nodiscard]] auto ok() const -> bool {
+    return std::ranges::all_of(results, &FactBatchWriterResult::ok);
+  }
+};
+
+enum class FactBatchWriterWindowMode : std::uint8_t {
+  speculative,
+  replay_only,
+};
+
 class FactBatchWriter {
 public:
   explicit FactBatchWriter(cidx::SqliteStorageService &storage);
@@ -156,7 +188,25 @@ public:
                            const FactBatchPublicationContext &context)
       -> FactBatchWriterResult;
 
+  // Apply a bounded consecutive-rank window in one transaction. Any failure
+  // rolls the whole speculative window back, then replays every item through
+  // apply() with failure injection disabled so the durable result has exactly
+  // the established one-translation-unit transaction semantics.
+  [[nodiscard]] auto apply_window(
+      std::span<const FactBatchWriterWindowItem> items,
+      const std::function<bool()> &cancelled = {},
+      FactBatchWriterWindowMode mode = FactBatchWriterWindowMode::speculative)
+      -> FactBatchWriterWindowResult;
+
 private:
+  enum class TemporaryRowPolicy : std::uint8_t { per_item, shared_window };
+
+  [[nodiscard]] auto
+  apply_in_transaction(const ast::FactBatch &batch,
+                       const FactBatchPublicationContext &context,
+                       TemporaryRowPolicy temporary_rows,
+                       std::size_t window_ordinal = 0) -> FactBatchWriterResult;
+
   cidx::SqliteStorageService &storage_;
 };
 

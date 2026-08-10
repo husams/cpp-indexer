@@ -17,11 +17,12 @@
 namespace cidx::index {
 
 template <typename Payload>
-auto run_parallel_extraction(
-    const ParallelPlan &plan, std::size_t count,
+auto run_parallel_extraction_windowed(
+    const ParallelPlan &plan, std::size_t count, std::size_t max_window_items,
     const std::function<ParallelResult<Payload>(std::size_t, std::size_t)>
         &extract,
-    const std::function<bool(std::size_t, ParallelResult<Payload> &)> &publish,
+    const std::function<ParallelWindowPublication(
+        std::span<RankedParallelResult<Payload>>)> &publish,
     const std::function<bool()> &cancelled,
     const std::function<void(std::size_t)> &on_abandon,
     ParallelRunMetrics &metrics) -> ParallelRunStatus {
@@ -170,55 +171,72 @@ auto run_parallel_extraction(
     // mutation happens under the mutex and is followed by a notify. Advancing
     // it outside the lock, or notifying before advancing, loses the wakeup and
     // deadlocks a full buffer.
+    const std::size_t bounded_window_items =
+        std::max<std::size_t>(max_window_items, 1);
     while (true) {
-      ParallelResult<Payload> result;
-      std::size_t rank = 0;
-      {
+      if (cancelled()) {
+        const std::scoped_lock lock(mutex);
+        stopping = true;
+        status = ParallelRunStatus::cancelled;
+        break;
+      }
+
+      std::vector<RankedParallelResult<Payload>> window;
+      window.reserve(bounded_window_items);
+      std::uint64_t window_bytes = 0;
+      while (window.size() < bounded_window_items) {
         std::unique_lock lock(mutex);
         if (next_publish >= count) {
           break;
         }
-        rank = next_publish;
-        const auto wait_started = Clock::now();
-        arrived.wait(lock, [&] { return stopping || ready.contains(rank); });
-        metrics.total_publish_wait_seconds +=
-            std::chrono::duration<double>(Clock::now() - wait_started).count();
+        const std::size_t rank = next_publish;
+        if (window.empty()) {
+          const auto wait_started = Clock::now();
+          arrived.wait(lock, [&] { return stopping || ready.contains(rank); });
+          metrics.total_publish_wait_seconds +=
+              std::chrono::duration<double>(Clock::now() - wait_started)
+                  .count();
+        } else if (!ready.contains(rank)) {
+          // Publish the consecutive results that are already available. Waiting
+          // here for a full window would put extraction and publication back
+          // into serial phases, delaying every ready rank behind the slowest
+          // extraction in the window.
+          break;
+        }
         if (stopping) {
           break;
         }
         auto entry = ready.find(rank);
-        result = std::move(entry->second);
+        if (!window.empty() && plan.max_queue_bytes != 0 &&
+            window_bytes + entry->second.bytes > plan.max_queue_bytes) {
+          break;
+        }
+        window_bytes += entry->second.bytes;
+        window.push_back({.rank = rank, .result = std::move(entry->second)});
         ready.erase(entry);
-        buffered_bytes -= result.bytes;
+        buffered_bytes -= window.back().result.bytes;
+        next_publish = rank + 1;
+        lock.unlock();
+        admit.notify_all();
       }
-      admit.notify_all();
+      if (window.empty()) {
+        break;
+      }
 
-      if (cancelled()) {
+      ++metrics.publication_windows;
+      metrics.peak_publish_window_items =
+          std::max(metrics.peak_publish_window_items, window.size());
+      metrics.peak_publish_window_bytes =
+          std::max(metrics.peak_publish_window_bytes, window_bytes);
+      const ParallelWindowPublication publication = publish(window);
+      metrics.items_published += publication.items_published;
+      if (publication.stop_status != ParallelRunStatus::none) {
         {
           const std::scoped_lock lock(mutex);
           stopping = true;
+          status = publication.stop_status;
         }
-        status = ParallelRunStatus::cancelled;
-        on_abandon(rank);
-        break;
-      }
-      const bool keep_going = publish(rank, result);
-      if (keep_going) {
-        // A publication that STOPS the run is not a published item: counting it
-        // would overstate progress in exactly the failure report an operator
-        // reads to find out how far a run got.
-        ++metrics.items_published;
-      }
-      {
-        const std::scoped_lock lock(mutex);
-        next_publish = rank + 1;
-        if (!keep_going) {
-          stopping = true;
-          status = ParallelRunStatus::publication_stopped;
-        }
-      }
-      admit.notify_all();
-      if (!keep_going) {
+        admit.notify_all();
         break;
       }
     }
@@ -235,6 +253,28 @@ auto run_parallel_extraction(
   metrics.wall_seconds =
       std::chrono::duration<double>(Clock::now() - run_started).count();
   return status;
+}
+
+template <typename Payload>
+auto run_parallel_extraction(
+    const ParallelPlan &plan, std::size_t count,
+    const std::function<ParallelResult<Payload>(std::size_t, std::size_t)>
+        &extract,
+    const std::function<bool(std::size_t, ParallelResult<Payload> &)> &publish,
+    const std::function<bool()> &cancelled,
+    const std::function<void(std::size_t)> &on_abandon,
+    ParallelRunMetrics &metrics) -> ParallelRunStatus {
+  return run_parallel_extraction_windowed<Payload>(
+      plan, count, 1, extract,
+      [&publish](std::span<RankedParallelResult<Payload>> window) {
+        const bool keep_going =
+            publish(window.front().rank, window.front().result);
+        return ParallelWindowPublication{
+            .items_published = keep_going ? 1U : 0U,
+            .stop_status = keep_going ? ParallelRunStatus::none
+                                      : ParallelRunStatus::publication_stopped};
+      },
+      cancelled, on_abandon, metrics);
 }
 
 } // namespace cidx::index

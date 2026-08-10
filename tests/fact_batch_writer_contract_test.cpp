@@ -904,6 +904,144 @@ TEST_CASE("FactBatchWriter rolls back at every declared failure point") {
   }
 }
 
+TEST_CASE("FactBatchWriter commits a bounded ordered window once") {
+  Fixture fixture;
+  storage::FactBatchWriter writer(fixture.storage);
+  const ast::FactBatch first = fixture.batch();
+  const ast::FactBatch second = fixture.batch(true);
+  const std::array items{
+      storage::FactBatchWriterWindowItem{.batch = &first,
+                                         .context = fixture.context(),
+                                         .approximate_bytes = 1024},
+      storage::FactBatchWriterWindowItem{.batch = &second,
+                                         .context = fixture.context(),
+                                         .approximate_bytes = 2048},
+  };
+
+  const auto result = writer.apply_window(items);
+  INFO(result.speculative_error.value_or(""));
+  REQUIRE(result.ok());
+  REQUIRE(result.results.size() == items.size());
+  CHECK_FALSE(result.replayed);
+  CHECK(result.report.windows_started == 1);
+  CHECK(result.report.windows_committed == 1);
+  CHECK(result.report.windows_rolled_back == 0);
+  CHECK(result.report.transactions_started == 1);
+  CHECK(result.report.temporary_tables_checked == 15);
+  CHECK(result.report.window_items == items.size());
+  CHECK(result.report.window_bytes == 3072);
+  CHECK(fixture.storage.lookup_symbols_by_usr("usr-header-added").size() == 1);
+}
+
+TEST_CASE("FactBatchWriter rolls back and replays a failed whole window") {
+  constexpr std::array points{
+      storage::FactBatchWriterFailurePoint::temporary_load,
+      storage::FactBatchWriterFailurePoint::natural_key_resolution,
+      storage::FactBatchWriterFailurePoint::entity_apply,
+      storage::FactBatchWriterFailurePoint::annotation_apply,
+      storage::FactBatchWriterFailurePoint::relation_apply,
+      storage::FactBatchWriterFailurePoint::site_apply,
+      storage::FactBatchWriterFailurePoint::publication,
+      storage::FactBatchWriterFailurePoint::cleanup,
+      storage::FactBatchWriterFailurePoint::before_commit,
+      storage::FactBatchWriterFailurePoint::commit};
+  for (const auto point : points) {
+    CAPTURE(static_cast<int>(point));
+    Fixture baseline;
+    storage::FactBatchWriter baseline_writer(baseline.storage);
+    const ast::FactBatch baseline_first = baseline.batch();
+    const ast::FactBatch baseline_second = baseline.batch(true);
+    REQUIRE(baseline_writer.apply(baseline_first, baseline.context()).ok());
+    REQUIRE(baseline_writer.apply(baseline_second, baseline.context()).ok());
+    const auto expected = queryable_fact_projection(baseline);
+
+    Fixture fixture;
+    storage::FactBatchWriter writer(fixture.storage);
+    const ast::FactBatch first = fixture.batch();
+    const ast::FactBatch second = fixture.batch(true);
+    const std::array items{
+        storage::FactBatchWriterWindowItem{.batch = &first,
+                                           .context = fixture.context()},
+        storage::FactBatchWriterWindowItem{.batch = &second,
+                                           .context = fixture.context(point)},
+    };
+    const auto result = writer.apply_window(items);
+    INFO(result.speculative_error.value_or(""));
+    REQUIRE(result.ok());
+    CHECK(result.replayed);
+    CHECK(result.report.windows_started == 1);
+    CHECK(result.report.windows_committed == 0);
+    CHECK(result.report.windows_rolled_back == 1);
+    CHECK(result.report.translation_units_replayed == items.size());
+    CHECK(result.report.transactions_started == 3);
+    CHECK(queryable_fact_projection(fixture) == expected);
+  }
+}
+
+TEST_CASE("FactBatchWriter cancellation rolls back then replays the window") {
+  Fixture baseline;
+  storage::FactBatchWriter baseline_writer(baseline.storage);
+  const ast::FactBatch baseline_first = baseline.batch();
+  const ast::FactBatch baseline_second = baseline.batch(true);
+  REQUIRE(baseline_writer.apply(baseline_first, baseline.context()).ok());
+  REQUIRE(baseline_writer.apply(baseline_second, baseline.context()).ok());
+  const auto expected = queryable_fact_projection(baseline);
+
+  Fixture fixture;
+  storage::FactBatchWriter writer(fixture.storage);
+  const ast::FactBatch first = fixture.batch();
+  const ast::FactBatch second = fixture.batch(true);
+  const std::array items{
+      storage::FactBatchWriterWindowItem{.batch = &first,
+                                         .context = fixture.context()},
+      storage::FactBatchWriterWindowItem{.batch = &second,
+                                         .context = fixture.context()},
+  };
+  std::size_t cancellation_checks = 0;
+  const auto result = writer.apply_window(
+      items, [&cancellation_checks] { return cancellation_checks++ == 0; });
+  REQUIRE(result.ok());
+  CHECK(result.replayed);
+  CHECK(result.report.windows_rolled_back == 1);
+  CHECK(result.report.translation_units_replayed == items.size());
+  CHECK(queryable_fact_projection(fixture) == expected);
+}
+
+TEST_CASE(
+    "FactBatchWriter source mutation rolls back then replays the window") {
+  Fixture baseline;
+  storage::FactBatchWriter baseline_writer(baseline.storage);
+  const ast::FactBatch baseline_first = baseline.batch();
+  const ast::FactBatch baseline_second = baseline.batch(true);
+  REQUIRE(baseline_writer.apply(baseline_first, baseline.context()).ok());
+  REQUIRE(baseline_writer.apply(baseline_second, baseline.context()).ok());
+  const auto expected = queryable_fact_projection(baseline);
+
+  Fixture fixture;
+  storage::FactBatchWriter writer(fixture.storage);
+  const ast::FactBatch first = fixture.batch();
+  const ast::FactBatch second = fixture.batch(true);
+  std::size_t source_checks = 0;
+  auto moved_once = fixture.context();
+  moved_once.source_is_current =
+      [&source_checks](const std::string &,
+                       const ast::PlannedSourceSnapshot &) {
+        return ++source_checks != 3;
+      };
+  const std::array items{
+      storage::FactBatchWriterWindowItem{.batch = &first,
+                                         .context = fixture.context()},
+      storage::FactBatchWriterWindowItem{.batch = &second,
+                                         .context = std::move(moved_once)},
+  };
+  const auto result = writer.apply_window(items);
+  REQUIRE(result.ok());
+  CHECK(result.replayed);
+  CHECK(result.report.windows_rolled_back == 1);
+  CHECK(result.report.translation_units_replayed == items.size());
+  CHECK(queryable_fact_projection(fixture) == expected);
+}
+
 // Re-expresses the deleted tests/owned_header_plan_test.cpp "stale plans are
 // rejected before lifecycle mutation" case against FactBatchWriter, which now
 // owns the guard.

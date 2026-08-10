@@ -534,15 +534,36 @@ TEST_SUITE("clang") {
     CHECK(positions(serial) == expected);
     CHECK(positions(parallel) == expected);
 
-    // Both modes use the same prepared statement set. Parallel header claims
-    // identify shared include facts before publication, so staged,
-    // execution/VM, and insert work may only decrease relative to serial
-    // publication.
+    // The scheduler publishes whatever consecutive ranks are ready, so exact
+    // window grouping depends on worker completion order. Every grouping stays
+    // bounded and accounts for all five translation units, with one writer
+    // transaction and one temporary-schema check per observed window.
+    const std::int64_t publication_windows =
+        counter(parallel, "parallel.publication_windows");
+    CHECK(publication_windows >= 1);
+    CHECK(publication_windows <= static_cast<std::int64_t>(kTranslationUnits));
+    const std::int64_t peak_window_items =
+        counter(parallel, "parallel.peak_publish_window_items");
+    CHECK(peak_window_items >= 1);
+    CHECK(peak_window_items <= static_cast<std::int64_t>(kTranslationUnits));
+    CHECK(counter(parallel, "fact_batch_writer.windows_started") ==
+          publication_windows);
+    CHECK(counter(parallel, "fact_batch_writer.windows_committed") ==
+          publication_windows);
+    CHECK(counter(parallel, "fact_batch_writer.window_items") ==
+          static_cast<std::int64_t>(kTranslationUnits));
+    CHECK(counter(parallel, "fact_batch_writer.transactions_started") ==
+          publication_windows);
+    CHECK(counter(parallel, "fact_batch_writer.temporary_tables_checked") ==
+          15 * publication_windows);
     const std::int64_t serial_prepared =
         counter(serial, "fact_batch_writer.statements_prepared");
     CHECK(serial_prepared > 0);
-    CHECK(counter(parallel, "fact_batch_writer.statements_prepared") ==
+    CHECK(counter(parallel, "fact_batch_writer.statements_prepared") <
           serial_prepared);
+    // Parallel header claims identify shared include facts before publication,
+    // so staged, execution/VM, and insert work may only decrease relative to
+    // serial publication.
     for (const char *name :
          {"fact_batch_writer.statement_executions",
           "fact_batch_writer.virtual_machine_steps",
