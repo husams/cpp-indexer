@@ -4,7 +4,6 @@
 #include "ast/decl_flags.hpp"
 #include "ast/declaration_edge_visitor.hpp"
 #include "ast/edge_emission_context.hpp"
-#include "ast/edge_sink.hpp"
 #include "ast/instantiation_edges.hpp"
 #include "ast/kind_map.hpp"
 #include "ast/location.hpp"

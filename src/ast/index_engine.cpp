@@ -7,7 +7,6 @@
 #include "ast/fact_batch.hpp"
 #include "ast/function_definition_visitor.hpp"
 #include "ast/include_facts.hpp"
-#include "ast/kind_map.hpp"
 #include "ast/location.hpp"
 #include "ast/namespace_use_visitor.hpp"
 #include "ast/owned_header_plan.hpp"

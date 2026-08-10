@@ -11,7 +11,6 @@
 #include <vector>
 
 #include "storage/records.hpp"
-#include "storage/sqlite.hpp"
 #include "storage/storage.hpp"
 
 namespace {

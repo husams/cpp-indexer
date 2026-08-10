@@ -22,8 +22,6 @@
 
 #include "compiledb/compiledb.hpp"
 #include "util/errors.hpp"
-#include "util/logger.hpp"
-#include "util/pathutil.hpp"
 
 using cidx::CompileCommand;
 using cidx::CompileDb;

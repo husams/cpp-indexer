@@ -1,6 +1,5 @@
 #include "ast/declaration_edge_visitor.hpp"
 
-#include "ast/clang_compat.hpp"
 #include "ast/decl_flags.hpp"
 #include "ast/fact_emitters.hpp"
 #include "ast/instantiation_edges.hpp"

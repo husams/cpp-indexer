@@ -15,7 +15,6 @@
 #include "include_hygiene/graph.hpp"
 #include "include_hygiene/plan.hpp"
 #include "storage/storage.hpp"
-#include "util/errors.hpp"
 #include "util/files.hpp"
 #include "util/pathutil.hpp"
 

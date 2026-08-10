@@ -24,7 +24,6 @@
 #include "diff/target.hpp"
 #include "storage/sqlite.hpp"
 #include "storage/storage.hpp"
-#include "util/errors.hpp"
 #include "util/logger.hpp"
 
 namespace diff = cidx::diff;

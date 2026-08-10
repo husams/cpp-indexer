@@ -24,11 +24,7 @@
 
 #include "catalogs/generated_catalog.hpp"
 #include "catalogs/generated_catalog_sql.hpp"
-#include "compiledb/compiledb.hpp"
 #include "util/errors.hpp"
-#include "util/json_min.hpp"
-#include "util/logger.hpp"
-#include "util/pathutil.hpp"
 
 #include "storage/sqlite_adapters.hpp"
 #include "storage/storage_detail.hpp"

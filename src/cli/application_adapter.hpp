@@ -9,7 +9,6 @@
 #include <vector>
 
 #include "application/requests.hpp"
-#include "cli/args.hpp"
 #include "cli/commands.hpp"
 
 namespace cidx::cli {

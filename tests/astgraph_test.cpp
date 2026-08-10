@@ -16,7 +16,6 @@
 #include "astgraph/astgraph.hpp"
 #include "astgraph/souffle_runner.hpp"
 #include "storage/sqlite.hpp"
-#include "util/errors.hpp"
 
 namespace fs = std::filesystem;
 using cidx::SqliteDb;

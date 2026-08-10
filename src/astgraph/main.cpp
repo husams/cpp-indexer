@@ -21,10 +21,8 @@
 #include "cli/args.hpp"     // kVersion
 #include "cli/commands.hpp" // resolve_cache_dir()
 #include "cli/json_out.hpp"
-#include "compiledb/compiledb.hpp"
 #include "storage/storage.hpp"
 #include "util/errors.hpp"
-#include "util/hashing.hpp"
 #include "util/logger.hpp"
 #include "util/pathutil.hpp"
 

@@ -17,7 +17,6 @@
 #include "storage/database_verification.hpp"
 #include "storage/sqlite.hpp"
 #include "storage/storage.hpp"
-#include "util/hashing.hpp"
 
 namespace {
 

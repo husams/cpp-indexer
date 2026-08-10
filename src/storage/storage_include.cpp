@@ -17,12 +17,9 @@
 
 #include "compiledb/compiledb.hpp"
 #include "storage/storage_detail.hpp"
-#include "storage/storage_schema.hpp"
 #include "util/errors.hpp"
 #include "util/hashing.hpp"
 #include "util/json_min.hpp"
-#include "util/logger.hpp"
-#include "util/pathutil.hpp"
 
 namespace cidx {
 
