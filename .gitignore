@@ -50,3 +50,7 @@ web/node_modules/
 *.db-journal
 *.db-wal
 *.db-shm
+
+# Semantic index — too large for GitHub; stored in private MinIO.
+# Use scripts/index-db.sh push|pull.
+/index.db
