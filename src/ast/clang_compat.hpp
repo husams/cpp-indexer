@@ -3,6 +3,7 @@
 // source-stable across majors — this header localizes the divergences.
 #pragma once
 
+#include "clang/AST/ASTContext.h"
 #include "clang/AST/PrettyPrinter.h"
 #include "clang/AST/TemplateBase.h"
 #include "llvm/ADT/APSInt.h"
@@ -39,6 +40,18 @@ inline std::string nns_spelling(NNS qualifier,
   }
 #endif
   return text;
+}
+
+// ASTContext::getCanonicalType is static in LLVM 22 and a const member in
+// LLVM 21; call it the way each major expects.
+inline clang::QualType canonical_type(const clang::ASTContext &context,
+                                      clang::QualType type) {
+#if LLVM_VERSION_MAJOR >= 22
+  (void)context;
+  return clang::ASTContext::getCanonicalType(type);
+#else
+  return context.getCanonicalType(type);
+#endif
 }
 
 } // namespace cidx::ast::compat

@@ -49,6 +49,7 @@
 #include "llvm/Config/llvm-config.h"
 #include "llvm/Support/Casting.h"
 
+#include "ast/clang_compat.hpp"
 #include "ast/usr.hpp"
 #include "astgraph/schema.hpp"
 #include "catalogs/generated_catalog.hpp"
@@ -584,7 +585,7 @@ private:
       add_edge(id, intern_decl(tdt->getDecl()), kRelTypeDecl, 0);
     }
 
-    if (const clang::QualType canon = clang::ASTContext::getCanonicalType(qt);
+    if (const clang::QualType canon = cidx::ast::compat::canonical_type(ctx_, qt);
         !canon.isNull() && canon.getTypePtrOrNull() != tp) {
       add_edge(id, intern_type(canon), kRelCanonicalType, 0);
     }

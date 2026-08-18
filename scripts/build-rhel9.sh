@@ -103,7 +103,11 @@ if [ ! -f /usr/lib64/libsqlite3.a ] || [ "${FORCE_SQLITE:-0}" = "1" ]; then
   echo "==> building static libsqlite3.a (SQLITE_FROM=$SQLITE_FROM)"
   tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
   fetch_sqlite_src "$tmp"
+  # SQLITE_USE_URI is required: cidx ATTACHes artifact databases by URI
+  # ("file:...?mode=ro"), and ATTACH only honours URI filenames when URI
+  # handling is enabled globally. macOS's system SQLite ships with it on.
   gcc -O2 -fPIC -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_JSON1 -DSQLITE_ENABLE_RTREE \
+      -DSQLITE_USE_URI=1 \
       -c "$tmp/sqlite3.c" -o "$tmp/sqlite3.o"
   $SUDO ar rcs /usr/lib64/libsqlite3.a "$tmp/sqlite3.o"
   $SUDO install -m 0644 "$tmp/sqlite3.h" /usr/include/
