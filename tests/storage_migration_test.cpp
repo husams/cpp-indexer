@@ -583,6 +583,35 @@ TEST_CASE("v28 -> v29: template_arg arg_kind remapped to the canonical codes") {
   CHECK(st.col_text(0) == std::string("3")); // stayed template-template
 }
 
+TEST_CASE("v28 migration rolls back when schema installation fails") {
+  const std::string tmp = make_temp_dir();
+  const std::string path = tmp + "/v28_atomic.db";
+  {
+    cidx::Storage db(path);
+  }
+  {
+    cidx::SqliteDb raw(path);
+    raw.exec("INSERT INTO symbol (id, usr, spelling, kind, "
+             "semantic_universe_id, identity_key) VALUES "
+             "(1, 'c:@S@Spec', 'Spec', 2, 1, "
+             "'legacy' || char(31) || 'c:@S@Spec')");
+    raw.exec("INSERT INTO template_arg (owner_id, position, arg_kind) "
+             "VALUES (1, 0, 8)");
+    raw.exec("DROP INDEX idx_artifact_state");
+    raw.exec("CREATE TABLE idx_artifact_state (value INTEGER)");
+    raw.exec("UPDATE meta SET value = '28' WHERE key = 'schema_version'");
+  }
+
+  CHECK_THROWS([&path] { cidx::Storage db(path); }());
+
+  cidx::SqliteDb raw(path);
+  CHECK(meta_version(raw) == "28");
+  auto arg = raw.prepare(
+      "SELECT arg_kind FROM template_arg WHERE owner_id = 1 AND position = 0");
+  REQUIRE(arg.step());
+  CHECK(arg.col_int64(0) == 8);
+}
+
 TEST_CASE("v28 database with Souffle adapter views migrates through the "
           "template_arg rebuild") {
   // examples/souffle-index/cidx_views.sql installs PERSISTENT views into the

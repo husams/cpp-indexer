@@ -9,6 +9,8 @@ canonical codes exactly once, disambiguating the overloaded 3 by owner kind.
 
 import sqlite3
 
+import pytest
+
 from indexer.storage import SCHEMA_VERSION, Storage
 
 
@@ -82,3 +84,52 @@ def test_v29_migration_runs_exactly_once(tmp_path):
     kinds = _kinds(path)
     assert kinds[(1, 1)] == 3
     assert kinds[(2, 1)] == 3
+
+
+def test_v28_migration_rolls_back_if_schema_installation_fails(tmp_path):
+    path = str(tmp_path / "v28-atomic.db")
+    _make_v28(path)
+    conn = sqlite3.connect(path)
+    conn.execute("DROP INDEX idx_artifact_state")
+    conn.execute("CREATE TABLE idx_artifact_state (value INTEGER)")
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(sqlite3.OperationalError, match="idx_artifact_state"):
+        Storage(path)
+
+    conn = sqlite3.connect(path)
+    version = conn.execute(
+        "SELECT value FROM meta WHERE key = 'schema_version'"
+    ).fetchone()[0]
+    arg_kind = conn.execute(
+        "SELECT arg_kind FROM template_arg WHERE owner_id = 1 AND position = 0"
+    ).fetchone()[0]
+    conn.close()
+    assert version == "28"
+    assert arg_kind == 8
+
+
+def test_large_v28_template_arg_remap_preserves_canonical_kinds(tmp_path):
+    path = str(tmp_path / "v28-large.db")
+    _make_v28(path)
+    conn = sqlite3.connect(path)
+    conn.executemany(
+        "INSERT INTO template_arg "
+        "(owner_id, position, pack_index, arg_kind) VALUES (1, 20, ?, ?)",
+        ((pack_index, 5 + pack_index % 4) for pack_index in range(25_000)),
+    )
+    conn.commit()
+    conn.close()
+
+    Storage(path).close()
+
+    conn = sqlite3.connect(path)
+    counts = dict(
+        conn.execute(
+            "SELECT arg_kind, COUNT(*) FROM template_arg "
+            "WHERE owner_id = 1 AND position = 20 GROUP BY arg_kind"
+        )
+    )
+    conn.close()
+    assert counts == {2: 6_250, 3: 12_500, 4: 6_250}

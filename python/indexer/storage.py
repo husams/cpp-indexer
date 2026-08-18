@@ -28,8 +28,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import sqlite3
+import time
 from dataclasses import dataclass, field, fields, replace
 from collections.abc import Iterator, Sequence
 from typing import Any, Optional
@@ -49,6 +51,28 @@ PREVIOUS_SCHEMA_VERSION = SCHEMA_VERSION - 1
 # Keep this explicit so an unrelated semantic catalog is never silently
 # accepted merely because the database is writable.
 PREVIOUS_CATALOG_HASH = "3337824260ee0afe1260859b6be88e6fb8280852fd736cde5e12cca5c3847ba4"
+
+_LOGGER = logging.getLogger("cidx.storage.migration")
+
+
+def _execute_script(conn: sqlite3.Connection, script: str) -> None:
+    """Execute a SQL script without sqlite3.executescript's implicit commit."""
+    statement = ""
+    for line in script.splitlines(keepends=True):
+        statement += line
+        if sqlite3.complete_statement(statement):
+            conn.execute(statement)
+            statement = ""
+    if statement.strip():
+        conn.execute(statement)
+
+
+def _source_kind_case(column: str) -> str:
+    clauses = " ".join(
+        f"WHEN {source_kind!r} THEN {source_kind_id}"
+        for source_kind, source_kind_id in SOURCE_KIND_IDS.items()
+    )
+    return f"CASE {column} WHEN 'value' THEN NULL {clauses} ELSE NULL END"
 
 
 def _md5_of(path: str) -> Optional[str]:
@@ -1952,14 +1976,28 @@ class Storage:
                 f"requires schema_version {PREVIOUS_SCHEMA_VERSION} -> "
                 f"{SCHEMA_VERSION}, found {stored_schema_version!r} for {path}"
             )
-        self._migrate()  # before _SCHEMA: its indexes need new columns
-        self._conn.executescript(_SCHEMA)
-        self._conn.commit()
-        if predecessor_catalog:
-            self._conn.execute(
-                "UPDATE meta SET value=? WHERE key='catalog_hash'", (CATALOG_HASH,)
-            )
+        started_at = time.perf_counter()
+        self._conn.execute("PRAGMA foreign_keys = OFF")
+        self._conn.execute("BEGIN")
+        try:
+            self._migrate()  # before _SCHEMA: its indexes need new columns
+            _execute_script(self._conn, _SCHEMA)
+            if predecessor_catalog:
+                self._conn.execute(
+                    "UPDATE meta SET value=? WHERE key='catalog_hash'",
+                    (CATALOG_HASH,),
+                )
             self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+        finally:
+            self._conn.execute("PRAGMA foreign_keys = ON")
+        if stored_schema_version is not None and stored_schema_version < SCHEMA_VERSION:
+            _LOGGER.info(
+                "schema_catalog total_ms=%d",
+                round((time.perf_counter() - started_at) * 1000),
+            )
         self._in_txn = False
         self._backfill_translation_unit_configs()
         # v21 -> v22 one-time backfill: entity_node is a pure-DB classification
@@ -2066,6 +2104,23 @@ class Storage:
         flags were hand-edited via `cidx file` so re-import does not clobber
         them. Defaults to 0; no backfill needed.
         """
+        started_at = time.perf_counter()
+        previous_checkpoint = started_at
+        timing_enabled = False
+
+        def checkpoint(step: str) -> None:
+            nonlocal previous_checkpoint
+            if not timing_enabled:
+                return
+            now = time.perf_counter()
+            _LOGGER.info(
+                "%s step_ms=%d total_ms=%d",
+                step,
+                round((now - previous_checkpoint) * 1000),
+                round((now - started_at) * 1000),
+            )
+            previous_checkpoint = now
+
         tables = {
             r[0]
             for r in self._conn.execute(
@@ -2073,6 +2128,7 @@ class Storage:
             )
         }
         if "symbol" not in tables:
+            checkpoint("fresh_database")
             return  # fresh database: _SCHEMA creates everything
         stored_version_row = self._conn.execute(
             "SELECT value FROM meta WHERE key = 'schema_version'"
@@ -2087,6 +2143,7 @@ class Storage:
             # stamp it down to the reader's version while opening read-side
             # storage.
             return
+        timing_enabled = stored_version > 0 and stored_version < SCHEMA_VERSION
         if "storage_enum_catalog" in tables:
             self._conn.execute("DROP VIEW IF EXISTS edge_site_read")
             self._conn.execute("DROP VIEW IF EXISTS call_arg_read")
@@ -2285,8 +2342,9 @@ class Storage:
                     f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
                 )
 
+        checkpoint("legacy_schema")
         if stored_version < SCHEMA_VERSION:
-            self._conn.executescript(
+            _execute_script(self._conn,
                 """
                 CREATE TABLE IF NOT EXISTS external_identity (
                     id INTEGER PRIMARY KEY,
@@ -2336,6 +2394,11 @@ class Storage:
             )
             has_edge_identity_text = {"recv_type_usr", "recv_decl_usr"}.issubset(edge_cols)
             has_call_identity_text = {"type_usr", "decl_usr", "callee_usr"}.issubset(call_cols)
+            edge_source_kind_expr = (
+                _source_kind_case("recv_src_kind")
+                if "recv_src_kind" in edge_cols
+                else "NULL"
+            )
             if "edge_site" in tables:
                 for column, definition in (
                     ("recv_src_kind_id", "INTEGER"),
@@ -2346,24 +2409,13 @@ class Storage:
                 ):
                     add_column("edge_site", column, definition)
                 if "recv_src_kind" in edge_cols:
-                    # v34 benchmark fixtures used "value" as a placeholder
-                    # for absent provenance. It is missing evidence, not a
-                    # source-kind domain member, so normalize it to NULL.
-                    self._conn.execute(
-                        "UPDATE edge_site SET recv_src_kind=NULL WHERE recv_src_kind='value'"
-                    )
-                    for source_kind, source_kind_id in SOURCE_KIND_IDS.items():
-                        self._conn.execute(
-                            "UPDATE edge_site SET recv_src_kind_id=? WHERE recv_src_kind=?",
-                            (source_kind_id, source_kind),
-                        )
                     unknown = self._conn.execute(
                         "SELECT recv_src_kind FROM edge_site WHERE recv_src_kind IS NOT NULL "
-                        "AND recv_src_kind_id IS NULL LIMIT 1"
+                        "AND recv_src_kind_id IS NULL AND recv_src_kind <> 'value' AND "
+                        f"{_source_kind_case('recv_src_kind')} IS NULL LIMIT 1"
                     ).fetchone()
                     if unknown is not None:
                         raise ValueError(f"unknown source kind {unknown[0]!r} in edge_site migration")
-                    self._conn.execute("UPDATE edge_site SET recv_src_kind=NULL")
                 if has_type_node:
                     self._conn.execute(
                         "INSERT OR IGNORE INTO external_identity(identity_kind,identity_text,resolution_status,type_id) "
@@ -2387,10 +2439,6 @@ class Storage:
                         "UPDATE edge_site SET recv_type_id = (SELECT id FROM type_node t WHERE t.decl_usr = edge_site.recv_type_usr), "
                         "recv_type_identity_id = (SELECT id FROM external_identity i WHERE i.identity_kind=1 AND i.identity_text=edge_site.recv_type_usr)"
                     )
-                if has_edge_identity_text and has_type_node:
-                    self._conn.execute(
-                        "UPDATE edge_site SET recv_type_usr = NULL, recv_decl_usr = NULL"
-                    )
             if "call_arg" in tables:
                 for column, definition in (
                     ("src_kind_id", "INTEGER"),
@@ -2405,45 +2453,6 @@ class Storage:
                 for column in ("type_usr", "decl_usr", "callee_usr"):
                     add_column("call_arg", column, "TEXT")
                 add_column("call_arg", "type_is_value", "INTEGER")
-                source_kind_not_null = any(
-                    row[1] == "src_kind" and row[3] for row in self._conn.execute("PRAGMA table_info(call_arg)")
-                )
-                if source_kind_not_null:
-                    self._conn.execute("DROP VIEW IF EXISTS call_arg_read")
-                    self._conn.execute("PRAGMA foreign_keys = OFF")
-                    type_ref = " REFERENCES type_node(id) ON DELETE SET NULL" if has_type_node else ""
-                    self._conn.executescript(
-                        f"""
-                        CREATE TABLE call_arg_v35 (
-                            edge_id INTEGER NOT NULL REFERENCES edge(id) ON DELETE CASCADE,
-                            file_id INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
-                            line INTEGER NOT NULL,
-                            col INTEGER NOT NULL,
-                            position INTEGER NOT NULL,
-                            src_kind TEXT,
-                            type_usr TEXT,
-                            decl_usr TEXT,
-                            callee_usr TEXT,
-                            src_kind_id INTEGER,
-                            type_id INTEGER{type_ref},
-                            decl_id INTEGER REFERENCES symbol(id) ON DELETE SET NULL,
-                            callee_id INTEGER REFERENCES symbol(id) ON DELETE SET NULL,
-                            type_identity_id INTEGER REFERENCES external_identity(id) ON DELETE SET NULL,
-                            decl_identity_id INTEGER REFERENCES external_identity(id) ON DELETE SET NULL,
-                            callee_identity_id INTEGER REFERENCES external_identity(id) ON DELETE SET NULL,
-                            type_is_value INTEGER,
-                            PRIMARY KEY (edge_id, file_id, line, col, position)
-                        ) WITHOUT ROWID;
-                        INSERT INTO call_arg_v35 SELECT edge_id,file_id,line,col,position,
-                            src_kind,type_usr,decl_usr,callee_usr,src_kind_id,type_id,
-                            decl_id,callee_id,type_identity_id,decl_identity_id,
-                            callee_identity_id,type_is_value FROM call_arg;
-                        DROP TABLE call_arg;
-                        ALTER TABLE call_arg_v35 RENAME TO call_arg;
-                        CREATE INDEX IF NOT EXISTS idx_call_arg_edge ON call_arg(edge_id);
-                        """
-                    )
-                    self._conn.execute("PRAGMA foreign_keys = ON")
                 if has_type_node:
                     self._conn.execute(
                         "INSERT OR IGNORE INTO external_identity(identity_kind,identity_text,resolution_status,type_id) "
@@ -2465,29 +2474,17 @@ class Storage:
                         "decl_identity_id=(SELECT id FROM external_identity i WHERE i.identity_kind=2 AND i.identity_text=call_arg.decl_usr), "
                         "callee_identity_id=(SELECT id FROM external_identity i WHERE i.identity_kind=2 AND i.identity_text=call_arg.callee_usr)"
                     )
-                for source_kind, source_kind_id in SOURCE_KIND_IDS.items():
-                    self._conn.execute(
-                        "UPDATE call_arg SET src_kind=NULL WHERE src_kind='value'"
-                    )
-                    self._conn.execute(
-                        "UPDATE call_arg SET src_kind_id=? WHERE src_kind=?",
-                        (source_kind_id, source_kind),
-                    )
                 unknown = self._conn.execute(
                     "SELECT src_kind FROM call_arg WHERE src_kind IS NOT NULL "
-                    "AND src_kind_id IS NULL LIMIT 1"
+                    "AND src_kind_id IS NULL AND src_kind <> 'value' AND "
+                    f"{_source_kind_case('src_kind')} IS NULL LIMIT 1"
                 ).fetchone()
                 if unknown is not None:
                     raise ValueError(f"unknown source kind {unknown[0]!r} in call_arg migration")
-                self._conn.execute("UPDATE call_arg SET src_kind=NULL")
                 if has_call_identity_text and has_type_node:
                     self._conn.execute(
                         "UPDATE call_arg SET type_id=(SELECT id FROM type_node t WHERE t.decl_usr=call_arg.type_usr), "
                         "type_identity_id=(SELECT id FROM external_identity i WHERE i.identity_kind=1 AND i.identity_text=call_arg.type_usr)"
-                    )
-                if has_call_identity_text and has_type_node:
-                    self._conn.execute(
-                        "UPDATE call_arg SET type_usr=NULL, decl_usr=NULL, callee_usr=NULL"
                     )
             # ALTER TABLE cannot add the CHECK clauses required by the
             # normalized domains. Rebuild migrated hot tables to match the
@@ -2496,8 +2493,8 @@ class Storage:
                 add_column("edge_site", "args_sig", "TEXT")
                 add_column("edge_site", "recv_param_pos", "INTEGER")
                 add_column("edge_site", "recv_type_is_value", "INTEGER")
-                self._conn.executescript(
-                    """
+                _execute_script(self._conn,
+                    f"""
                     DROP VIEW IF EXISTS edge_site_read;
                     PRAGMA foreign_keys = OFF;
                     CREATE TABLE edge_site_v37 (
@@ -2517,7 +2514,10 @@ class Storage:
                     ) WITHOUT ROWID;
                     INSERT INTO edge_site_v37
                     SELECT edge_id,file_id,line,col,conditional,args_sig,
-                           NULL,NULL,NULL,recv_src_kind_id,recv_type_id,
+                           NULL,NULL,NULL,
+                           COALESCE(recv_src_kind_id,
+                                    {edge_source_kind_expr}),
+                           recv_type_id,
                            recv_decl_id,recv_type_identity_id,
                            recv_decl_identity_id,recv_param_pos,recv_type_is_value
                     FROM edge_site;
@@ -2528,8 +2528,8 @@ class Storage:
                 )
             if "call_arg" in tables:
                 add_column("call_arg", "type_is_value", "INTEGER")
-                self._conn.executescript(
-                    """
+                _execute_script(self._conn,
+                    f"""
                     DROP VIEW IF EXISTS call_arg_read;
                     PRAGMA foreign_keys = OFF;
                     CREATE TABLE call_arg_v37 (
@@ -2550,7 +2550,9 @@ class Storage:
                     ) WITHOUT ROWID;
                     INSERT INTO call_arg_v37
                     SELECT edge_id,file_id,line,col,position,NULL,NULL,NULL,NULL,
-                           src_kind_id,type_id,decl_id,callee_id,type_identity_id,
+                           COALESCE(src_kind_id,
+                                    {_source_kind_case('src_kind')}),
+                           type_id,decl_id,callee_id,type_identity_id,
                            decl_identity_id,callee_identity_id,type_is_value
                     FROM call_arg;
                     DROP TABLE call_arg;
@@ -2560,6 +2562,7 @@ class Storage:
                     """
                 )
             changed = True
+        checkpoint("occurrence_normalization")
         fcols = {r[1] for r in self._conn.execute("PRAGMA table_info(file)")}
         if "file" in tables and "driver" not in fcols:
             # No backfill possible from stored data -- re-import to populate.
@@ -2796,19 +2799,19 @@ class Storage:
             ).fetchone()
             stored = int(row[0]) if row is not None and row[0] else 0
             if 0 < stored < 29:
+                # Keep the canonical mapping in one declarative rewrite. The
+                # enclosing transaction removes the fsync cost; this CASE is
+                # not assumed to beat four narrow UPDATEs in isolation.
                 self._conn.execute(
-                    "UPDATE template_arg SET arg_kind = 2 WHERE arg_kind = 3 "
-                    "AND owner_id IN (SELECT id FROM symbol "
-                    "                 WHERE kind IN (2, 3, 4, 31))"
-                )
-                self._conn.execute(
-                    "UPDATE template_arg SET arg_kind = 3 WHERE arg_kind IN (5, 6)"
-                )
-                self._conn.execute(
-                    "UPDATE template_arg SET arg_kind = 2 WHERE arg_kind = 7"
-                )
-                self._conn.execute(
-                    "UPDATE template_arg SET arg_kind = 4 WHERE arg_kind = 8"
+                    "UPDATE template_arg SET arg_kind = CASE "
+                    "WHEN arg_kind = 3 AND owner_id IN (SELECT id FROM symbol "
+                    "WHERE kind IN (2, 3, 4, 31)) THEN 2 "
+                    "WHEN arg_kind IN (5, 6) THEN 3 "
+                    "WHEN arg_kind = 7 THEN 2 "
+                    "WHEN arg_kind = 8 THEN 4 ELSE arg_kind END "
+                    "WHERE arg_kind IN (5, 6, 7, 8) OR "
+                    "(arg_kind = 3 AND owner_id IN (SELECT id FROM symbol "
+                    "WHERE kind IN (2, 3, 4, 31)))"
                 )
                 self._conn.execute("DELETE FROM template_arg WHERE arg_kind = 0")
                 changed = True
@@ -2845,8 +2848,6 @@ class Storage:
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name='parameter'"
             ).fetchone()[0] or ""
             if "PRIMARY KEY (owner_id, position, pack_index)" not in sql:
-                self._conn.commit()
-                self._conn.execute("PRAGMA foreign_keys = OFF")
                 self._conn.execute("""
                     CREATE TABLE parameter_v32 (
                         owner_id INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
@@ -2866,8 +2867,6 @@ class Storage:
                 self._conn.execute("INSERT INTO parameter_v32 SELECT owner_id, position, pack_index, name, type_id, declared_type_id, adjusted_type_id, default_text, default_origin, reference_semantics, file_id, line, col FROM parameter")
                 self._conn.execute("DROP TABLE parameter")
                 self._conn.execute("ALTER TABLE parameter_v32 RENAME TO parameter")
-                self._conn.commit()
-                self._conn.execute("PRAGMA foreign_keys = ON")
                 changed = True
         if "template_param" in tables:
             cols = {r[1] for r in self._conn.execute("PRAGMA table_info(template_param)")}
@@ -2894,8 +2893,6 @@ class Storage:
                     if "type_node" in tables
                     else ""
                 )
-                self._conn.commit()
-                self._conn.execute("PRAGMA foreign_keys = OFF")
                 self._conn.execute("""
                     CREATE TABLE template_arg_v32 (
                         owner_id INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
@@ -2911,8 +2908,6 @@ class Storage:
                 self._conn.execute("INSERT INTO template_arg_v32 SELECT owner_id, position, pack_index, arg_kind, ref_id, literal, type_id FROM template_arg")
                 self._conn.execute("DROP TABLE template_arg")
                 self._conn.execute("ALTER TABLE template_arg_v32 RENAME TO template_arg")
-                self._conn.commit()
-                self._conn.execute("PRAGMA foreign_keys = ON")
                 changed = True
         if "include_edge" not in tables:
             # v30 -> v31: include tier (include_config/include_edge/
@@ -2959,7 +2954,7 @@ class Storage:
                 ):
                     self._conn.execute(f"DROP INDEX IF EXISTS {index}")
                 self._conn.execute("ALTER TABLE artifact RENAME TO artifact_v35")
-                self._conn.executescript(
+                _execute_script(self._conn,
                     """
                     CREATE TABLE artifact (
                         id INTEGER PRIMARY KEY,
@@ -3013,7 +3008,7 @@ class Storage:
                            created_at, published_at
                     FROM artifact_v35""",
                 )
-                self._conn.executescript(
+                _execute_script(self._conn,
                     """
                     CREATE UNIQUE INDEX idx_artifact_current_logical
                         ON artifact(logical_id) WHERE state = 'current';
@@ -3139,7 +3134,7 @@ class Storage:
                 "UPDATE meta SET value = ? WHERE key = 'schema_version'",
                 (str(SCHEMA_VERSION),),
             )
-            self._conn.commit()
+        checkpoint("complete")
 
     def _backfill_translation_unit_configs(self) -> None:
         """Adapt v34 include rows into the v35 normalized identity tier."""
@@ -3176,7 +3171,7 @@ class Storage:
         """v38 -> v39: scope portable USRs by a declared semantic universe."""
         self._conn.execute("DROP VIEW IF EXISTS edge_site_read")
         self._conn.execute("DROP VIEW IF EXISTS call_arg_read")
-        self._conn.executescript("""
+        _execute_script(self._conn, """
             CREATE TABLE IF NOT EXISTS semantic_universe (
                 id INTEGER PRIMARY KEY,
                 key TEXT NOT NULL UNIQUE,
@@ -3209,8 +3204,6 @@ class Storage:
         if "semantic_universe_id" in symbol_cols:
             return
 
-        self._conn.commit()
-        self._conn.execute("PRAGMA foreign_keys = OFF")
         has_file_paths = {
             "file", "directory", "component", "repository"
         }.issubset(tables)
@@ -3226,7 +3219,7 @@ class Storage:
             )
         else:
             legacy_source = "'source:unknown'"
-        self._conn.executescript(f"""
+        _execute_script(self._conn, f"""
             CREATE TABLE symbol_v35 (
                 id INTEGER PRIMARY KEY,
                 usr TEXT NOT NULL,
@@ -3281,8 +3274,6 @@ class Storage:
             DROP TABLE symbol;
             ALTER TABLE symbol_v35 RENAME TO symbol;
         """)
-        self._conn.commit()
-        self._conn.execute("PRAGMA foreign_keys = ON")
 
     def _migrate_symbol_kind_to_int(self) -> None:
         """v15 -> v16: rebuild `symbol` with kind stored as its CXCursorKind int.
@@ -3297,9 +3288,7 @@ class Storage:
         case = "CASE kind " + " ".join(
             f"WHEN {name!r} THEN {i}" for name, i in SYMBOL_KIND_IDS.items()
         ) + " ELSE kind END"
-        self._conn.commit()  # close any open txn so the pragma below takes effect
-        self._conn.execute("PRAGMA foreign_keys = OFF")
-        self._conn.executescript(f"""
+        _execute_script(self._conn, f"""
             CREATE TABLE symbol_new (
                 id           INTEGER PRIMARY KEY,
                 usr          TEXT NOT NULL UNIQUE,
@@ -3333,8 +3322,6 @@ class Storage:
             DROP TABLE symbol;
             ALTER TABLE symbol_new RENAME TO symbol;
         """)
-        self._conn.commit()
-        self._conn.execute("PRAGMA foreign_keys = ON")
 
     def _migrate_component_repo_unique(self) -> None:
         """v23 -> v24: rebuild `component` so `path` is UNIQUE per repository
@@ -3345,9 +3332,7 @@ class Storage:
         the copied rows carry). The schema script (run right after) is a no-op
         (CREATE TABLE IF NOT EXISTS). Mirrors _migrate_symbol_kind_to_int.
         """
-        self._conn.commit()  # close any open txn so the pragma takes effect
-        self._conn.execute("PRAGMA foreign_keys = OFF")
-        self._conn.executescript("""
+        _execute_script(self._conn, """
             CREATE TABLE component_new (
                 id      INTEGER PRIMARY KEY,
                 name    TEXT NOT NULL,
@@ -3364,8 +3349,6 @@ class Storage:
             DROP TABLE component;
             ALTER TABLE component_new RENAME TO component;
         """)
-        self._conn.commit()
-        self._conn.execute("PRAGMA foreign_keys = ON")
 
     # -- lifecycle -----------------------------------------------------------
 
