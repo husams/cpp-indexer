@@ -202,27 +202,7 @@ SqliteStorageService::SqliteStorageService(const std::string &path,
         " does not match the required " + std::string(catalog::kCatalogHash) +
         " (regenerate the database with the matching semantic catalogs)");
   }
-  migrate(); // BEFORE the schema script: its indexes need migrated columns
-             // (G19)
-  db_.exec(kSchema);
-  std::string stored_catalog_hash;
-  auto catalog_stmt =
-      db_.prepare("SELECT value FROM meta WHERE key = 'catalog_hash'");
-  if (catalog_stmt.step()) {
-    stored_catalog_hash = catalog_stmt.col_text(0);
-  }
-  if (!stored_catalog_hash.empty() &&
-      stored_catalog_hash != catalog::kCatalogHash && !predecessor_catalog) {
-    throw CidxError(
-        "catalog_hash " + stored_catalog_hash +
-        " does not match the required " + std::string(catalog::kCatalogHash) +
-        " (regenerate the database with the matching semantic catalogs)");
-  }
-  if (predecessor_catalog) {
-    db_.exec("UPDATE meta SET value = '" + std::string(catalog::kCatalogHash) +
-             "' WHERE key = 'catalog_hash'");
-  }
-  db_.exec(catalog::kSeedSql);
+  migrate(predecessor_catalog); // BEFORE post-schema backfills (G19)
   // v34 -> v35: preserve every legacy include configuration as one canonical
   // descriptor and attach its compatibility row to that descriptor.
   {

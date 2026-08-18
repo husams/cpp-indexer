@@ -856,7 +856,7 @@ private:
   friend class Transaction;
   friend class ArtifactStore;
 
-  void migrate(); // column-presence detection, §4.1
+  void migrate(bool predecessor_catalog); // column-presence detection, §4.1
   void
   reconcile_external_identities(); // resolve evidence after local rows arrive
   void reconcile_symbol_identity(int64_t symbol_id, std::string_view usr);

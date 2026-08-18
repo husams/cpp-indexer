@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cstring>
 #include <exception>
 #include <filesystem>
@@ -16,6 +17,7 @@
 #include <unordered_set>
 
 #include "catalogs/generated_catalog.hpp"
+#include "catalogs/generated_catalog_sql.hpp"
 #include "compiledb/compiledb.hpp"
 #include "storage/storage_detail.hpp"
 #include "storage/storage_schema.hpp"
@@ -71,10 +73,120 @@ private:
   bool previous_ = false;
 };
 
+// migrate() issues about 150 separate statements. The migration profile uses a
+// rollback journal with synchronous=FULL, so without an enclosing transaction
+// each one is its own durable commit and an upgrade pays ~150 fsyncs. That is
+// invisible on an SSD and dominates on a spinning disk, a VM with write
+// barriers, or a network filesystem -- the same database upgrades in seconds on
+// one machine and minutes on another. One transaction pays a single fsync, and
+// makes the upgrade atomic: today a crash halfway through leaves a database on
+// neither the old schema nor the new one, with no way back.
+//
+// Foreign keys are disabled OUTSIDE the transaction on purpose: PRAGMA
+// foreign_keys is a no-op while a transaction is open, and the table rebuilds
+// (create scratch -> copy -> drop original -> rename) require it off, so the
+// per-rebuild pragmas the steps already issue would silently stop working.
+class MigrationTransaction {
+public:
+  explicit MigrationTransaction(SqliteDb &db) : db_(db) {
+    db_.exec("PRAGMA foreign_keys = OFF");
+    db_.exec("BEGIN");
+  }
+  void commit() {
+    // Deliberately no PRAGMA foreign_key_check here. The migration steps
+    // already ran with foreign keys off before this change and were never
+    // validated afterwards, so real databases can carry inconsistencies the
+    // engine has always tolerated. Turning those into a hard migration failure
+    // would be a separate decision, not a side effect of batching the writes.
+    db_.exec("COMMIT");
+    done_ = true;
+    db_.exec("PRAGMA foreign_keys = ON");
+  }
+
+  ~MigrationTransaction() {
+    if (done_) {
+      return;
+    }
+    // Unwinding a failed migration: roll the whole upgrade back so the
+    // database stays readable at its original version.
+    try {
+      db_.exec("ROLLBACK");
+      db_.exec("PRAGMA foreign_keys = ON");
+    } catch (const std::exception &error) {
+      Logger::root().error("cidx.storage",
+                           std::string("could not roll back the migration: ") +
+                               error.what());
+    }
+  }
+  MigrationTransaction(const MigrationTransaction &) = delete;
+  MigrationTransaction &operator=(const MigrationTransaction &) = delete;
+  MigrationTransaction(MigrationTransaction &&) = delete;
+  MigrationTransaction &operator=(MigrationTransaction &&) = delete;
+
+private:
+  SqliteDb &db_;
+  bool done_ = false;
+};
+
+std::string source_kind_case(std::string_view column) {
+  std::string expression =
+      "CASE " + std::string(column) + " WHEN 'value' THEN NULL";
+  for (const auto &entry : catalog::kSourceKinds) {
+    expression += " WHEN '" + std::string(entry.name) + "' THEN " +
+                  std::to_string(entry.id);
+  }
+  expression += " ELSE NULL END";
+  return expression;
+}
+
 } // namespace
 
-void SqliteStorageService::migrate() {
+void SqliteStorageService::migrate(bool predecessor_catalog) {
+  const auto started_at = std::chrono::steady_clock::now();
+  auto previous_checkpoint = started_at;
+  bool timing_enabled = false;
+  const auto checkpoint = [&previous_checkpoint, &timing_enabled,
+                           started_at](std::string_view step) {
+    if (!timing_enabled) {
+      return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    const auto step_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             now - previous_checkpoint)
+                             .count();
+    const auto total_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - started_at)
+            .count();
+    Logger::root().info("cidx.storage.migration",
+                        std::string(step) +
+                            " step_ms=" + std::to_string(step_ms) +
+                            " total_ms=" + std::to_string(total_ms));
+    previous_checkpoint = now;
+  };
   const LegacyAlterTableScope legacy_rename(db_);
+  MigrationTransaction migration(db_);
+  const auto install_current_schema = [this, predecessor_catalog] {
+    db_.exec(kSchema);
+    std::string stored_catalog_hash;
+    auto catalog_stmt =
+        db_.prepare("SELECT value FROM meta WHERE key = 'catalog_hash'");
+    if (catalog_stmt.step()) {
+      stored_catalog_hash = catalog_stmt.col_text(0);
+    }
+    if (!stored_catalog_hash.empty() &&
+        stored_catalog_hash != catalog::kCatalogHash && !predecessor_catalog) {
+      throw CidxError(
+          "catalog_hash " + stored_catalog_hash +
+          " does not match the required " + std::string(catalog::kCatalogHash) +
+          " (regenerate the database with the matching semantic catalogs)");
+    }
+    if (predecessor_catalog) {
+      db_.exec("UPDATE meta SET value = '" +
+               std::string(catalog::kCatalogHash) +
+               "' WHERE key = 'catalog_hash'");
+    }
+    db_.exec(catalog::kSeedSql);
+  };
   std::vector<std::string> tables;
   {
     auto st =
@@ -87,7 +199,11 @@ void SqliteStorageService::migrate() {
     return std::ranges::find(tables, name) != tables.end();
   };
   if (!has_table("symbol")) {
-    return; // fresh database: the schema script creates everything
+    install_current_schema();
+    checkpoint("schema_catalog");
+    migration.commit();
+    checkpoint("complete");
+    return;
   }
   if (has_table("storage_enum_catalog")) {
     db_.exec("DROP VIEW IF EXISTS edge_site_read");
@@ -646,12 +762,18 @@ void SqliteStorageService::migrate() {
       }
     }
     if (stored > 0 && stored < 29) {
-      db_.exec("UPDATE template_arg SET arg_kind = 2 WHERE arg_kind = 3 "
-               "AND owner_id IN (SELECT id FROM symbol "
-               "                 WHERE kind IN (2, 3, 4, 31))");
-      db_.exec("UPDATE template_arg SET arg_kind = 3 WHERE arg_kind IN (5, 6)");
-      db_.exec("UPDATE template_arg SET arg_kind = 2 WHERE arg_kind = 7");
-      db_.exec("UPDATE template_arg SET arg_kind = 4 WHERE arg_kind = 8");
+      // Keep the canonical mapping in one declarative rewrite. The enclosing
+      // transaction removes the fsync cost; this CASE is not assumed to beat
+      // four narrow UPDATEs in isolation.
+      db_.exec(
+          "UPDATE template_arg SET arg_kind = CASE "
+          "WHEN arg_kind = 3 AND owner_id IN (SELECT id FROM symbol "
+          "WHERE kind IN (2, 3, 4, 31)) THEN 2 "
+          "WHEN arg_kind IN (5, 6) THEN 3 "
+          "WHEN arg_kind = 7 THEN 2 "
+          "WHEN arg_kind = 8 THEN 4 ELSE arg_kind END "
+          "WHERE arg_kind IN (5, 6, 7, 8) OR (arg_kind = 3 AND owner_id IN "
+          "(SELECT id FROM symbol WHERE kind IN (2, 3, 4, 31)))");
       db_.exec("DELETE FROM template_arg WHERE arg_kind = 0");
       changed = true;
     }
@@ -864,6 +986,9 @@ void SqliteStorageService::migrate() {
       }
     }
   }
+  timing_enabled =
+      stored_schema_version > 0 && stored_schema_version < kSchemaVersion;
+  checkpoint("legacy_schema");
   if (stored_schema_version < kSchemaVersion) {
     // v34 -> v35: compact high-cardinality occurrence identities. Resolvable
     // USRs move to local integer FKs; values with no local row are retained
@@ -933,21 +1058,15 @@ void SqliteStorageService::migrate() {
       add_col("edge_site", "recv_decl_identity_id",
               "INTEGER REFERENCES external_identity(id) ON DELETE SET NULL");
       if (has_col(table_columns("edge_site"), "recv_src_kind")) {
-        db_.exec("UPDATE edge_site SET recv_src_kind = NULL WHERE "
-                 "recv_src_kind = 'value'");
-        for (const auto &entry : catalog::kSourceKinds) {
-          db_.exec("UPDATE edge_site SET recv_src_kind_id = " +
-                   std::to_string(entry.id) + " WHERE recv_src_kind = '" +
-                   std::string(entry.name) + "'");
-        }
-        auto unknown = db_.prepare("SELECT recv_src_kind FROM edge_site WHERE "
-                                   "recv_src_kind IS NOT NULL "
-                                   "AND recv_src_kind_id IS NULL LIMIT 1");
+        auto unknown = db_.prepare(
+            "SELECT recv_src_kind FROM edge_site WHERE recv_src_kind IS NOT "
+            "NULL AND recv_src_kind_id IS NULL AND recv_src_kind <> 'value' "
+            "AND " +
+            source_kind_case("recv_src_kind") + " IS NULL LIMIT 1");
         if (unknown.step()) {
           throw StorageError("unknown source kind '" + unknown.col_text(0) +
                              "' in edge_site migration");
         }
-        db_.exec("UPDATE edge_site SET recv_src_kind = NULL");
       }
       if (has_edge_identity_text && has_type_node) {
         db_.exec("INSERT OR IGNORE INTO "
@@ -980,10 +1099,6 @@ void SqliteStorageService::migrate() {
             "WHERE i.identity_kind = 1 AND i.identity_text = "
             "edge_site.recv_type_usr)");
       }
-      if (has_edge_identity_text && has_type_node) {
-        db_.exec(
-            "UPDATE edge_site SET recv_type_usr = NULL, recv_decl_usr = NULL");
-      }
     }
     if (has_table("call_arg")) {
       add_col("call_arg", "src_kind_id", "INTEGER");
@@ -1003,48 +1118,6 @@ void SqliteStorageService::migrate() {
       add_col("call_arg", "decl_usr", "TEXT");
       add_col("call_arg", "callee_usr", "TEXT");
       add_col("call_arg", "type_is_value", "INTEGER");
-      bool source_kind_not_null = false;
-      {
-        auto info = db_.prepare("PRAGMA table_info(call_arg)");
-        while (info.step()) {
-          if (info.col_text(1) == "src_kind") {
-            source_kind_not_null = info.col_int64(3) != 0;
-          }
-        }
-      }
-      if (source_kind_not_null) {
-        db_.exec("DROP VIEW IF EXISTS call_arg_read");
-        db_.exec("PRAGMA foreign_keys = OFF");
-        db_.exec(
-            "CREATE TABLE call_arg_v35 ("
-            "edge_id INTEGER NOT NULL REFERENCES edge(id) ON DELETE CASCADE, "
-            "file_id INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE, "
-            "line INTEGER NOT NULL, col INTEGER NOT NULL, position INTEGER NOT "
-            "NULL, "
-            "src_kind TEXT, type_usr TEXT, decl_usr TEXT, callee_usr TEXT, "
-            "src_kind_id INTEGER, type_id INTEGER REFERENCES type_node(id) ON "
-            "DELETE SET NULL, "
-            "decl_id INTEGER REFERENCES symbol(id) ON DELETE SET NULL, "
-            "callee_id INTEGER REFERENCES symbol(id) ON DELETE SET NULL, "
-            "type_identity_id INTEGER REFERENCES external_identity(id) ON "
-            "DELETE SET NULL, "
-            "decl_identity_id INTEGER REFERENCES external_identity(id) ON "
-            "DELETE SET NULL, "
-            "callee_identity_id INTEGER REFERENCES external_identity(id) ON "
-            "DELETE SET NULL, "
-            "type_is_value INTEGER, "
-            "PRIMARY KEY(edge_id,file_id,line,col,position)) WITHOUT ROWID");
-        db_.exec(
-            "INSERT INTO call_arg_v35 SELECT edge_id,file_id,line,col,position,"
-            "src_kind,type_usr,decl_usr,callee_usr,src_kind_id,type_id,decl_id,"
-            "callee_id,type_identity_id,decl_identity_id,callee_identity_id,"
-            "type_is_value FROM call_arg");
-        db_.exec("DROP TABLE call_arg");
-        db_.exec("ALTER TABLE call_arg_v35 RENAME TO call_arg");
-        db_.exec("CREATE INDEX IF NOT EXISTS idx_call_arg_edge ON "
-                 "call_arg(edge_id)");
-        db_.exec("PRAGMA foreign_keys = ON");
-      }
       if (has_call_identity_text && has_type_node) {
         db_.exec(
             "INSERT OR IGNORE INTO "
@@ -1081,24 +1154,13 @@ void SqliteStorageService::migrate() {
             "FROM external_identity i WHERE i.identity_kind = 1 AND "
             "i.identity_text = call_arg.type_usr)");
       }
-      for (const auto &entry : catalog::kSourceKinds) {
-        db_.exec(
-            "UPDATE call_arg SET src_kind = NULL WHERE src_kind = 'value'");
-        db_.exec(
-            "UPDATE call_arg SET src_kind_id = " + std::to_string(entry.id) +
-            " WHERE src_kind = '" + std::string(entry.name) + "'");
-      }
       auto unknown = db_.prepare(
-          "SELECT src_kind FROM call_arg WHERE src_kind IS NOT NULL "
-          "AND src_kind_id IS NULL LIMIT 1");
+          "SELECT src_kind FROM call_arg WHERE src_kind IS NOT NULL AND "
+          "src_kind_id IS NULL AND src_kind <> 'value' AND " +
+          source_kind_case("src_kind") + " IS NULL LIMIT 1");
       if (unknown.step()) {
         throw StorageError("unknown source kind '" + unknown.col_text(0) +
                            "' in call_arg migration");
-      }
-      db_.exec("UPDATE call_arg SET src_kind = NULL");
-      if (has_call_identity_text && has_type_node) {
-        db_.exec("UPDATE call_arg SET type_usr = NULL, decl_usr = NULL, "
-                 "callee_usr = NULL");
       }
     }
     // ALTER TABLE cannot add the CHECK clauses that protect normalized enum
@@ -1127,7 +1189,9 @@ void SqliteStorageService::migrate() {
           "(edge_id,file_id,line,col)) WITHOUT ROWID");
       db_.exec(
           "INSERT INTO edge_site_v37 SELECT edge_id,file_id,line,col,"
-          "conditional,args_sig,NULL,NULL,NULL,recv_src_kind_id,recv_type_id,"
+          "conditional,args_sig,NULL,NULL,NULL,COALESCE(recv_src_kind_id," +
+          source_kind_case("recv_src_kind") +
+          "),recv_type_id,"
           "recv_decl_id,recv_type_identity_id,recv_decl_identity_id,"
           "recv_param_pos,recv_type_is_value FROM edge_site");
       db_.exec("DROP TABLE edge_site");
@@ -1156,7 +1220,9 @@ void SqliteStorageService::migrate() {
           "PRIMARY KEY(edge_id,file_id,line,col,position)) WITHOUT ROWID");
       db_.exec(
           "INSERT INTO call_arg_v37 SELECT edge_id,file_id,line,col,position,"
-          "NULL,NULL,NULL,NULL,src_kind_id,type_id,decl_id,callee_id,"
+          "NULL,NULL,NULL,NULL,COALESCE(src_kind_id," +
+          source_kind_case("src_kind") +
+          "),type_id,decl_id,callee_id,"
           "type_identity_id,decl_identity_id,callee_identity_id,type_is_value "
           "FROM call_arg");
       db_.exec("DROP TABLE call_arg");
@@ -1212,12 +1278,17 @@ void SqliteStorageService::migrate() {
     }
     changed = true;
   }
+  checkpoint("occurrence_normalization");
   if (changed) {
     auto st =
         db_.prepare("UPDATE meta SET value = ? WHERE key = 'schema_version'");
     st.bind(1, std::string_view(std::to_string(kSchemaVersion)));
     st.step_done();
   }
+  install_current_schema();
+  checkpoint("schema_catalog");
+  migration.commit();
+  checkpoint("complete");
 }
 
 void SqliteStorageService::migrate_symbol_identity_scope() {
