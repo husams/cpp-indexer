@@ -1,5 +1,6 @@
 #include "ast/type_graph.hpp"
 
+#include "ast/clang_compat.hpp"
 #include "ast/edge_sink.hpp"
 #include "ast/usr.hpp"
 
@@ -8,6 +9,7 @@
 #include "clang/AST/Expr.h"
 #include "clang/AST/TemplateBase.h"
 #include "llvm/ADT/SmallString.h"
+#include "llvm/Config/llvm-config.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <utility>
@@ -96,7 +98,7 @@ TypeInterner::Result TypeInterner::emit_node(clang::QualType qt,
   // elaborated TagType vs its canonical TagType both key on the decl USR);
   // comparing keys keeps such self-canonical rows at NULL instead of writing
   // a self-loop.
-  const clang::QualType canon = clang::ASTContext::getCanonicalType(qt);
+  const clang::QualType canon = compat::canonical_type(context_, qt);
   if (canon.getAsOpaquePtr() != qt.getAsOpaquePtr() && depth < kMaxDepth) {
     if (const std::optional<Result> c = build(canon, depth + 1);
         c && c->key != rec.type_key) {
@@ -122,7 +124,7 @@ std::optional<TypeInterner::Result> TypeInterner::build(clang::QualType qt,
   TypeNodeRecord rec;
 
   if (depth >= kMaxDepth) {
-    const clang::QualType canon = clang::ASTContext::getCanonicalType(qt);
+    const clang::QualType canon = compat::canonical_type(context_, qt);
     rec.kind = kTypeOther;
     rec.type_key = "o:" + canon.getAsString(context_.getPrintingPolicy());
     return emit_node(qt, std::move(rec), depth);
@@ -263,7 +265,14 @@ std::optional<TypeInterner::Result> TypeInterner::build(clang::QualType qt,
 
   if (const auto *mp = llvm::dyn_cast<clang::MemberPointerType>(t)) {
     const auto component = build(mp->getPointeeType(), depth + 1);
+    // NestedNameSpecifier is a value type in LLVM 22, a pointer in LLVM 21.
+#if LLVM_VERSION_MAJOR >= 22
     const clang::QualType owner(mp->getQualifier().getAsType(), 0);
+#else
+    const auto *const mp_qualifier = mp->getQualifier();
+    const clang::QualType owner(
+        mp_qualifier != nullptr ? mp_qualifier->getAsType() : nullptr, 0);
+#endif
     const auto owner_node = build(owner, depth + 1);
     // The component's QualType is the authoritative discriminator; avoid
     // spelling-based classification and keep both owner and component as
@@ -388,7 +397,7 @@ std::optional<TypeInterner::Result> TypeInterner::build(clang::QualType qt,
 
   // Everything else (member pointers, dependent shapes, packs, atomics, ...):
   // one opaque node keyed by the canonical print. No children.
-  const clang::QualType canon = clang::ASTContext::getCanonicalType(qt);
+  const clang::QualType canon = compat::canonical_type(context_, qt);
   rec.kind = kTypeOther;
   rec.type_key = "o:" + canon.getAsString(context_.getPrintingPolicy());
   return emit_node(qt, std::move(rec), depth);

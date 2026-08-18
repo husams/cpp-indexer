@@ -1,8 +1,16 @@
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/DiagnosticOptions.h"
-#include "clang/Driver/CreateASTUnitFromArgs.h"
 #include "clang/Frontend/ASTUnit.h"
+#include "llvm/Config/llvm-config.h"
+// LLVM 22 moved ASTUnit::LoadFromCommandLine out to a free function in
+// clang/Driver; LLVM 21 (RHEL 9.8) still has the static member. Same signature.
+#if LLVM_VERSION_MAJOR >= 22
+#include "clang/Driver/CreateASTUnitFromArgs.h"
+#define CIDX_CREATE_AST_UNIT_FROM_COMMAND_LINE clang::CreateASTUnitFromCommandLine
+#else
+#define CIDX_CREATE_AST_UNIT_FROM_COMMAND_LINE clang::ASTUnit::LoadFromCommandLine
+#endif
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Tooling/Tooling.h"
@@ -117,6 +125,20 @@ Trial run_syntax_trial(const std::string &source,
           .semantic_parity = summary.complete()};
 }
 
+// llvm::sys::ExecuteAndWait needs a resolved path -- it does not search PATH,
+// so a bare "clang++" silently fails to launch on hosts without the Homebrew
+// LLVM prefix (e.g. RHEL 9).
+std::string clang_compiler_path() {
+  if (std::filesystem::is_regular_file("/opt/homebrew/opt/llvm/bin/clang++")) {
+    return "/opt/homebrew/opt/llvm/bin/clang++";
+  }
+  if (const llvm::ErrorOr<std::string> found =
+          llvm::sys::findProgramByName("clang++")) {
+    return *found;
+  }
+  return "clang++";
+}
+
 Trial run_astunit_trial(const std::string &source) {
   const std::filesystem::path directory =
       std::filesystem::temp_directory_path() /
@@ -132,10 +154,7 @@ template <typename T> struct Value { T value; };
 }
 )cpp";
   std::ofstream(source_path) << "#include \"prefix.h\"\n" << source;
-  const std::string compiler =
-      std::filesystem::is_regular_file("/opt/homebrew/opt/llvm/bin/clang++")
-          ? "/opt/homebrew/opt/llvm/bin/clang++"
-          : "clang++";
+  const std::string compiler = clang_compiler_path();
   const std::vector<std::string> command = {
       compiler, "-std=c++23", "-I", directory.string(), source_path.string()};
   std::vector<const char *> command_args;
@@ -151,7 +170,7 @@ template <typename T> struct Value { T value; };
           *diagnostic_options));
   SemanticSummary summary;
   const auto started = std::chrono::steady_clock::now();
-  const auto ast = clang::CreateASTUnitFromCommandLine(
+  const auto ast = CIDX_CREATE_AST_UNIT_FROM_COMMAND_LINE(
       command_args.data(), command_args.data() + command_args.size(),
       std::make_shared<clang::PCHContainerOperations>(), diagnostic_options,
       diagnostics, "", true, directory.string(), false,
@@ -191,10 +210,7 @@ bool generate_pch(const std::string &prefix,
   }
   output << prefix;
   output.close();
-  const std::string compiler =
-      std::filesystem::is_regular_file("/opt/homebrew/opt/llvm/bin/clang++")
-          ? "/opt/homebrew/opt/llvm/bin/clang++"
-          : "clang++";
+  const std::string compiler = clang_compiler_path();
   const std::vector<std::string> args = {
       compiler,     "-std=c++23",      "-x",
       "c++-header", "-Xclang",         "-emit-pch",
