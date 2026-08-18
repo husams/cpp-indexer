@@ -116,16 +116,16 @@ private:
 struct ExtractionPassDescriptor {
   std::string id;
   std::uint32_t version = 1;
-  std::vector<FrontendCapability> required_capabilities;
-  std::vector<std::string> consumed_fact_families;
-  std::vector<std::string> produced_fact_families;
-  std::vector<std::uint32_t> catalog_versions;
-  std::vector<std::string> dependencies;
+  std::vector<FrontendCapability> required_capabilities = {};
+  std::vector<std::string> consumed_fact_families = {};
+  std::vector<std::string> produced_fact_families = {};
+  std::vector<std::uint32_t> catalog_versions = {};
+  std::vector<std::string> dependencies = {};
   PassScope scope = PassScope::translation_unit;
   TraversalMode traversal = TraversalMode::lifecycle;
   FactCompleteness completeness = FactCompleteness::complete;
   FactTrust trust = FactTrust::trusted;
-  PassBudget budget;
+  PassBudget budget = {};
 
   [[nodiscard]] auto stable_key() const -> std::string;
 };

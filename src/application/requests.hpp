@@ -37,8 +37,8 @@ inline constexpr const char *kIndexParallelNeedsFileIndex =
 
 struct IndexRequest {
   IndexAction action = IndexAction::update;
-  std::vector<std::string> files;
-  std::optional<std::string> source;
+  std::vector<std::string> files = {};
+  std::optional<std::string> source = std::nullopt;
   bool graph = true;
   bool defer_transforms = false;
   // Opt-in clean rebuild: index into a private candidate database, verify it,
@@ -47,9 +47,9 @@ struct IndexRequest {
   bool autoderive_labels = true;
   bool no_front_end_reuse = false;
   bool json = false;
-  std::optional<std::string> index;
-  std::optional<std::string> profile_json;
-  std::optional<std::string> profile_sqlite_configuration;
+  std::optional<std::string> index = std::nullopt;
+  std::optional<std::string> profile_json = std::nullopt;
+  std::optional<std::string> profile_sqlite_configuration = std::nullopt;
   // Bounded parallel translation-unit extraction (S-074). 0 selects the
   // documented automatic policy; the parsers reject anything that is not a
   // positive integer, so a set value is always usable.
@@ -65,20 +65,20 @@ struct QueryRequest {
   std::string expression;
   QueryOutput output = QueryOutput::human;
   bool explain = false;
-  std::optional<std::string> index;
+  std::optional<std::string> index = std::nullopt;
   // An optional caller-owned result budget. The executor reports exhaustion
   // explicitly; it never treats a capped prefix as complete.
-  std::optional<std::int64_t> max_results;
+  std::optional<std::int64_t> max_results = std::nullopt;
 };
 
 enum class AnalysisAction : std::uint8_t { list, execute, export_facts };
 
 struct AnalysisRequest {
   AnalysisAction action = AnalysisAction::execute;
-  std::optional<std::string> rule;
-  std::optional<std::string> rules_file;
-  std::optional<std::string> export_directory;
-  std::optional<std::string> index;
+  std::optional<std::string> rule = std::nullopt;
+  std::optional<std::string> rules_file = std::nullopt;
+  std::optional<std::string> export_directory = std::nullopt;
+  std::optional<std::string> index = std::nullopt;
   int jobs = 1;
 };
 
@@ -97,7 +97,7 @@ enum class AstInspectionAction : std::uint8_t { dump, locals, conditions };
 struct AstInspectionRequest {
   AstInspectionAction action = AstInspectionAction::dump;
   std::string source;
-  std::optional<std::string> index;
+  std::optional<std::string> index = std::nullopt;
   bool json = false;
 };
 
@@ -111,17 +111,17 @@ enum class DiffScope : std::uint8_t {
 
 struct DiffRequest {
   DiffScope scope = DiffScope::file;
-  std::string left;
-  std::string right;
-  std::optional<std::string> left_index;
-  std::optional<std::string> right_index;
-  std::optional<std::string> selector;
-  std::optional<std::string> left_source_revision;
-  std::optional<std::string> right_source_revision;
-  std::optional<std::string> left_configuration;
-  std::optional<std::string> right_configuration;
-  std::optional<std::string> left_index_identity;
-  std::optional<std::string> right_index_identity;
+  std::string left = {};
+  std::string right = {};
+  std::optional<std::string> left_index = std::nullopt;
+  std::optional<std::string> right_index = std::nullopt;
+  std::optional<std::string> selector = std::nullopt;
+  std::optional<std::string> left_source_revision = std::nullopt;
+  std::optional<std::string> right_source_revision = std::nullopt;
+  std::optional<std::string> left_configuration = std::nullopt;
+  std::optional<std::string> right_configuration = std::nullopt;
+  std::optional<std::string> left_index_identity = std::nullopt;
+  std::optional<std::string> right_index_identity = std::nullopt;
   bool json = false;
 };
 
@@ -129,8 +129,8 @@ enum class IncludeAction : std::uint8_t { graph, check, plan, apply };
 
 struct IncludeRequest {
   IncludeAction action = IncludeAction::check;
-  std::vector<std::string> paths;
-  std::optional<std::string> files_from;
+  std::vector<std::string> paths = {};
+  std::optional<std::string> files_from = std::nullopt;
   bool reverse = false;
   bool transitive = false;
   bool cycles = false;
@@ -138,11 +138,11 @@ struct IncludeRequest {
   bool duplicates = false;
   bool unused = false;
   bool json = false;
-  std::optional<std::string> output;
-  std::optional<std::string> plan;
-  std::vector<std::string> only;
+  std::optional<std::string> output = std::nullopt;
+  std::optional<std::string> plan = std::nullopt;
+  std::vector<std::string> only = {};
   bool dry_run = false;
-  std::optional<std::string> index;
+  std::optional<std::string> index = std::nullopt;
 };
 
 enum class RefactoringAction : std::uint8_t { check, plan, apply };

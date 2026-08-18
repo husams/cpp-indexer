@@ -40,7 +40,7 @@ struct TuDependencyEdge {
   std::string destination;
   // Content identity captured when the edge was observed. An empty value is
   // incomplete evidence and must never authorize a cache hit.
-  std::string destination_content_sha256;
+  std::string destination_content_sha256 = {};
   std::string conditional_context;
   std::string provenance;
   TuDependencyKind kind = TuDependencyKind::include;

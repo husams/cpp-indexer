@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <fstream>
 #include <sstream>
+#include <string>
+#include <string_view>
 
 namespace cidx::hygiene {
 
@@ -77,7 +79,7 @@ Value validations_json(const std::vector<ValidationRecord> &v) {
   throw CidxError("cleanup plan: " + what);
 }
 
-const Value *member(const Value &obj, const std::string &key) {
+const Value *member(const Value &obj, std::string_view key) {
   if (obj.t != Value::T::Obj) {
     return nullptr;
   }
@@ -89,35 +91,33 @@ const Value *member(const Value &obj, const std::string &key) {
   return nullptr;
 }
 
-const Value &require(const Value &obj, const std::string &key,
-                     Value::T type) {
+const Value &require(const Value &obj, std::string_view key, Value::T type) {
   const Value *v = member(obj, key);
   if (v == nullptr) {
-    bad("missing required field '" + key + "'");
+    bad("missing required field '" + std::string(key) + "'");
   }
   if (v->t != type) {
-    bad("field '" + key + "' has the wrong type");
+    bad("field '" + std::string(key) + "' has the wrong type");
   }
   return *v;
 }
 
-std::string opt_str(const Value &obj, const std::string &key) {
+std::string opt_str(const Value &obj, std::string_view key) {
   const Value *v = member(obj, key);
   return (v != nullptr && v->t == Value::T::Str) ? v->s : std::string();
 }
 
-int64_t opt_int(const Value &obj, const std::string &key) {
+int64_t opt_int(const Value &obj, std::string_view key) {
   const Value *v = member(obj, key);
   return (v != nullptr && v->t == Value::T::Int) ? v->i : 0;
 }
 
-bool opt_bool(const Value &obj, const std::string &key) {
+bool opt_bool(const Value &obj, std::string_view key) {
   const Value *v = member(obj, key);
   return v != nullptr && v->t == Value::T::Bool && v->b;
 }
 
-std::vector<std::string> opt_str_array(const Value &obj,
-                                       const std::string &key) {
+std::vector<std::string> opt_str_array(const Value &obj, std::string_view key) {
   std::vector<std::string> out;
   const Value *v = member(obj, key);
   if (v == nullptr || v->t != Value::T::Arr) {
@@ -125,7 +125,7 @@ std::vector<std::string> opt_str_array(const Value &obj,
   }
   for (const Value &e : v->a) {
     if (e.t != Value::T::Str) {
-      bad("field '" + key + "' must be an array of strings");
+      bad("field '" + std::string(key) + "' must be an array of strings");
     }
     out.push_back(e.s);
   }
@@ -133,7 +133,7 @@ std::vector<std::string> opt_str_array(const Value &obj,
 }
 
 std::vector<ValidationRecord> read_validations(const Value &obj,
-                                               const std::string &key) {
+                                               std::string_view key) {
   std::vector<ValidationRecord> out;
   const Value *v = member(obj, key);
   if (v == nullptr || v->t != Value::T::Arr) {
@@ -141,7 +141,7 @@ std::vector<ValidationRecord> read_validations(const Value &obj,
   }
   for (const Value &e : v->a) {
     if (e.t != Value::T::Obj) {
-      bad("field '" + key + "' must be an array of objects");
+      bad("field '" + std::string(key) + "' must be an array of objects");
     }
     ValidationRecord r;
     r.stage = opt_str(e, "stage");
@@ -172,14 +172,15 @@ std::string serialize(const CleanupPlan &p) {
         {"state", Value::of(std::string(plan_state_name(it.state)))},
         {"reason", Value::of(it.reason)},
         {"evidence",
-         Value::obj({{"owners", str_array(it.owners)},
-                     {"header_symbols", str_array(it.header_symbols)},
-                     {"intersection_count", Value::of(it.intersection_count)},
-                     {"reference_kinds_searched",
-                      str_array(it.reference_kinds_searched)},
-                     {"macro_uses", str_array(it.macro_uses)},
-                     {"guarded", Value::of(it.guarded)},
-                     {"reverse_dependants", str_array(it.reverse_dependants)}})},
+         Value::obj(
+             {{"owners", str_array(it.owners)},
+              {"header_symbols", str_array(it.header_symbols)},
+              {"intersection_count", Value::of(it.intersection_count)},
+              {"reference_kinds_searched",
+               str_array(it.reference_kinds_searched)},
+              {"macro_uses", str_array(it.macro_uses)},
+              {"guarded", Value::of(it.guarded)},
+              {"reverse_dependants", str_array(it.reverse_dependants)}})},
         {"affected_tus", str_array(it.affected_tus)},
         {"configs", str_array(it.configs)},
         {"validations", validations_json(it.validations)},
@@ -212,8 +213,8 @@ CleanupPlan deserialize(const std::string &text) {
     bad("top level must be an object");
   }
   CleanupPlan p;
-  p.format_version = static_cast<int>(
-      require(root, "format_version", Value::T::Int).i);
+  p.format_version =
+      static_cast<int>(require(root, "format_version", Value::T::Int).i);
   if (p.format_version != kPlanFormatVersion) {
     // Refuse rather than guess: a field's meaning may have changed, and this
     // artifact describes edits to source.

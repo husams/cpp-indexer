@@ -32,7 +32,7 @@ struct EvidenceRecord {
   std::int64_t col = 0;
   FactCompleteness completeness = FactCompleteness::complete;
   FactTrust trust = FactTrust::trusted;
-  std::string detail;
+  std::string detail = {};
 };
 
 struct PresentationIntent {
@@ -77,7 +77,7 @@ struct IncludeDirectiveRecord {
   std::int64_t col = 0;
   std::int64_t begin_offset = 0;
   std::int64_t end_offset = 0;
-  std::string conditional_fingerprint;
+  std::string conditional_fingerprint = {};
   bool is_angled = false;
   bool resolved = true;
   bool is_system = false;

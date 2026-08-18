@@ -53,16 +53,16 @@ struct Diagnostic {
   std::string code;
   std::string severity = "error";
   std::string message;
-  std::optional<std::string> next_action;
+  std::optional<std::string> next_action = std::nullopt;
 };
 
 struct EvidenceNode {
   std::string id;
   std::string evidence_class = "derived";
   std::string trust = "unverified";
-  std::string summary;
-  std::optional<std::string> source;
-  std::vector<EvidenceNode> children;
+  std::string summary = {};
+  std::optional<std::string> source = std::nullopt;
+  std::vector<EvidenceNode> children = {};
 };
 
 struct ArtifactRef {
@@ -74,7 +74,7 @@ struct ArtifactRef {
   // Shared provenance token for the core index generation this artifact
   // publishes or derives from. Artifact IDs identify different artifacts and
   // therefore must not be compared as if they were generation identities.
-  std::optional<std::string> generation;
+  std::optional<std::string> generation = std::nullopt;
 };
 
 struct ReplayInput {

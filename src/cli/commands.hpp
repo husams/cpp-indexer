@@ -39,7 +39,7 @@ struct Context {
   Logger *logger = nullptr;    // Logger::root() in main; file sink lazy
   std::ostream *out = nullptr; // stdout
   std::ostream *err = nullptr; // stderr
-  IndexOutcomeSink index_outcome_sink;
+  IndexOutcomeSink index_outcome_sink = {};
 };
 
 int cmd_init(const ParsedArgs &args, Context &ctx);

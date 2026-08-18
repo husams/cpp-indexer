@@ -20,7 +20,7 @@ enum class PlannedFileRole : std::uint8_t {
 };
 
 struct PlannedSourceSnapshot {
-  std::optional<double> mtime;
+  std::optional<double> mtime = std::nullopt;
   std::optional<std::string> md5;
 };
 
@@ -30,10 +30,10 @@ struct OwnedHeaderRouteCandidate {
   std::int64_t translation_unit_file_id = -1;
   std::string path;
   std::size_t discovery_ordinal = 0;
-  std::optional<std::int64_t> existing_file_id;
+  std::optional<std::int64_t> existing_file_id = std::nullopt;
   PlannedSourceSnapshot snapshot;
-  std::optional<std::vector<std::string>> compile_options;
-  std::optional<std::string> driver;
+  std::optional<std::vector<std::string>> compile_options = std::nullopt;
+  std::optional<std::string> driver = std::nullopt;
   bool cleanup_symbols = false;
   FactPartitionKey partition;
 };

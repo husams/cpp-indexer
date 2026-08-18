@@ -60,9 +60,11 @@ TableRows table_rows(cidx::Storage &db, std::string_view table) {
   while (statement.step()) {
     auto &row = rows.emplace_back();
     for (int column = 0; column < statement.column_count(); ++column) {
-      row.push_back(statement.col_is_null(column)
-                        ? std::nullopt
-                        : std::optional(statement.col_text(column)));
+      if (statement.col_is_null(column)) {
+        row.emplace_back();
+      } else {
+        row.emplace_back(statement.col_text(column));
+      }
     }
   }
   return rows;
@@ -454,8 +456,7 @@ TEST_CASE(
   auto version =
       raw.prepare("SELECT value FROM meta WHERE key = 'schema_version'");
   REQUIRE(version.step());
-  check_condition(version.col_text(0) ==
-                  std::to_string(cidx::kSchemaVersion));
+  check_condition(version.col_text(0) == std::to_string(cidx::kSchemaVersion));
   auto edge = raw.prepare("SELECT src_id, dst_id FROM edge WHERE id = 11");
   REQUIRE(edge.step());
   check_condition(edge.col_int64(0) == 7);

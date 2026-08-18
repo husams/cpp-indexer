@@ -68,7 +68,7 @@ template <typename Payload> struct ParallelResult {
   std::uint64_t bytes = 0;
   // Set when extraction threw or failed; publication is skipped and the error
   // is reported through the publish callback's failure branch.
-  std::optional<std::string> error;
+  std::optional<std::string> error = std::nullopt;
 };
 
 template <typename Payload> struct RankedParallelResult {

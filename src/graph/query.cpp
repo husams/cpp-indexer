@@ -1485,7 +1485,7 @@ std::optional<std::string> GraphQuery::named_decl(TypeInfo type) {
       candidates.emplace_back(8, 0);
     }
     std::optional<TypeInfo> child;
-    for (const auto [kind, position] : candidates) {
+    for (const auto &[kind, position] : candidates) {
       child = type_child(type.id, kind, position);
       if (child) {
         break;

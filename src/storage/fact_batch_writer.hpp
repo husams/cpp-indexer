@@ -135,7 +135,7 @@ struct FactBatchPublicationContext {
   std::string expected_generation;
   ast::PlannedSourceValidator source_is_current;
   std::int64_t configuration_id = -1;
-  std::optional<cidx::TranslationUnitConfig> configuration;
+  std::optional<cidx::TranslationUnitConfig> configuration = std::nullopt;
   FactBatchWriterFailurePoint failure = FactBatchWriterFailurePoint::none;
   // Opt in to per-step VM-step/timing sampling for this publication. Off by
   // default so an ordinary index run pays no measurement cost; an active

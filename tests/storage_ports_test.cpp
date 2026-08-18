@@ -513,7 +513,7 @@ TEST_CASE("site-less call and use counts retain indexed values") {
   const auto use_id = db.add_edge(
       Edge{.src_id = src_id, .dst_id = dst_id, .kind = 7, .count = 11});
   REQUIRE(db.run_transform_pipeline().complete);
-  for (const auto [edge_id, expected] :
+  for (const auto &[edge_id, expected] :
        std::array<std::pair<int64_t, int64_t>, 2>{
            {{call_id, 7}, {use_id, 11}}}) {
     auto row = db.raw_db().prepare("SELECT count FROM edge WHERE id = ?");

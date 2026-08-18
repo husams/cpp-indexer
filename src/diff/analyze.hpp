@@ -18,7 +18,8 @@ namespace cidx::diff {
 // signature, exact qualified name (+ optional kind filter), or line:N.
 struct Selector {
   std::string raw;
-  std::optional<std::string> kind; // --kind filter for the name tier
+  std::optional<std::string> kind = std::nullopt; // --kind filter for the
+                                                  // name tier
 };
 
 // Everything one parsed side contributes to matching/verdicts/reporting.

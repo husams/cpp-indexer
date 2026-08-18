@@ -41,7 +41,7 @@ struct TransformInvalidationInput {
   TransformInputKind kind = TransformInputKind::source;
   // Stable provider identity; labels alone are not valid invalidation input.
   std::string provider_id;
-  std::string value_query;
+  std::string value_query = {};
   std::string static_value;
 };
 

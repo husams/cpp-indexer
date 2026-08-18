@@ -521,7 +521,7 @@ TEST_CASE("GraphView uses one site budget across include and semantic edges") {
     }
     return total;
   };
-  for (const auto [budget, retained] :
+  for (const auto &[budget, retained] :
        {std::pair{0, 0}, std::pair{1, 1}, std::pair{3, 3}}) {
     request.site_budget = budget;
     const std::string json =

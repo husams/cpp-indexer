@@ -15,9 +15,9 @@ struct EdgeRecord {
   int64_t dst_id = 0;
   int64_t kind = 0; // edge_kind id (1=calls .. 18=dispatch_calls, 19=alias_of)
   int64_t count = 1;
-  std::optional<int64_t>
-      base_access;                   // inherits: 1=public 2=protected 3=private
-  std::optional<int64_t> is_virtual; // inherits: virtual base
+  std::optional<int64_t> base_access =
+      std::nullopt; // inherits: 1=public 2=protected 3=private
+  std::optional<int64_t> is_virtual = std::nullopt; // inherits: virtual base
 };
 
 // mint_symbol_id() payload: a USR-keyed stub for a symbol that may not be
@@ -25,22 +25,25 @@ struct EdgeRecord {
 struct MintRequest {
   std::string usr;
   std::string spelling;
-  std::string qual_name;
-  std::string display_name;
-  std::optional<std::string> type_info; // cursor type / prototype, when known
+  std::string qual_name = {};
+  std::string display_name = {};
+  std::optional<std::string> type_info =
+      std::nullopt;      // cursor type / prototype, when known
   std::string kind_name; // storage kind NAME ("class", "function", ...)
-  std::optional<int64_t> decl_file_id;
-  std::optional<int64_t> decl_line;
-  std::optional<int64_t> decl_col;
-  std::optional<std::string> decl_path; // unregistered (system) header path
-  bool is_instantiation = false;        // implicit template-instantiation node
-  bool is_named_instance = false;       // X<B> minted from alias/member/local
-  std::optional<std::string> identity_source; // portable declaration source
-  std::optional<std::string> linkage;
-  std::optional<std::string> callable_kind;
-  std::optional<std::string> template_origin;
-  std::optional<std::string> template_form;
-  std::optional<std::string> parent_usr;
+  std::optional<int64_t> decl_file_id = std::nullopt;
+  std::optional<int64_t> decl_line = std::nullopt;
+  std::optional<int64_t> decl_col = std::nullopt;
+  std::optional<std::string> decl_path =
+      std::nullopt;               // unregistered (system) header path
+  bool is_instantiation = false;  // implicit template-instantiation node
+  bool is_named_instance = false; // X<B> minted from alias/member/local
+  std::optional<std::string> identity_source =
+      std::nullopt; // portable declaration source
+  std::optional<std::string> linkage = std::nullopt;
+  std::optional<std::string> callable_kind = std::nullopt;
+  std::optional<std::string> template_origin = std::nullopt;
+  std::optional<std::string> template_form = std::nullopt;
+  std::optional<std::string> parent_usr = std::nullopt;
 };
 
 struct TemplateParamRecord {
@@ -77,9 +80,9 @@ struct TypeNodeRecord {
   bool is_const = false;
   bool is_volatile = false;
   bool is_restrict = false;
-  std::optional<std::string> decl_usr;
-  std::optional<int64_t> canonical_id;
-  std::optional<std::string> extent;
+  std::optional<std::string> decl_usr = std::nullopt;
+  std::optional<int64_t> canonical_id = std::nullopt;
+  std::optional<std::string> extent = std::nullopt;
 };
 
 // One parameter of a callable (replace_parameters payload).
@@ -115,11 +118,11 @@ struct EdgeSiteRecord {
   int64_t line = 0;
   int64_t col = 0;
   int64_t conditional = 0;
-  std::optional<std::string> recv_src_kind;
-  std::optional<std::string> recv_type_usr;
-  std::optional<std::string> recv_decl_usr;
-  std::optional<int64_t> recv_param_pos;
-  std::optional<int64_t> recv_type_is_value;
+  std::optional<std::string> recv_src_kind = std::nullopt;
+  std::optional<std::string> recv_type_usr = std::nullopt;
+  std::optional<std::string> recv_decl_usr = std::nullopt;
+  std::optional<int64_t> recv_param_pos = std::nullopt;
+  std::optional<int64_t> recv_type_is_value = std::nullopt;
 };
 
 struct CallArgRecord {

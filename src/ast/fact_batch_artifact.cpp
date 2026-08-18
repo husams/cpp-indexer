@@ -1645,6 +1645,9 @@ auto encode_fact_batch_artifact(const FactBatch &batch,
     case util::ArtifactIoErrorCode::io_error:
       fail(FactBatchArtifactErrorCode::io_error, error.what());
     }
+    // Every enumerator above calls a [[noreturn]] fail(); GCC cannot see the
+    // switch is exhaustive and warns about falling off the end.
+    std::unreachable();
   }
 }
 

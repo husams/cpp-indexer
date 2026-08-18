@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <array>
 #include <atomic>
 #include <cstdlib>
 #include <ctime>
@@ -4098,10 +4099,11 @@ TEST_SUITE("clang") {
     REQUIRE(!independent_before.empty());
 
     // The header gains a symbol. Nothing else on disk changes.
-    write_file(header,
-               "#pragma once\n"
-               "namespace fan { inline int value() { return 1; } }\n"
-               "namespace fan { inline int probe_after_edit() { return 2; } }\n");
+    write_file(
+        header,
+        "#pragma once\n"
+        "namespace fan { inline int value() { return 1; } }\n"
+        "namespace fan { inline int probe_after_edit() { return 2; } }\n");
     REQUIRE(run_shipped({"index"}, cache) == 0);
 
     // The dependents were re-extracted: the header's new symbol is in the
@@ -4122,8 +4124,9 @@ TEST_SUITE("clang") {
     const std::string base = dir + "/chain_base.hpp";
     const std::string middle = dir + "/chain_middle.hpp";
     const std::string source = dir + "/chain_main.cpp";
-    write_file(base, "#pragma once\n"
-                     "namespace chain { inline int base_value() { return 1; } }\n");
+    write_file(base,
+               "#pragma once\n"
+               "namespace chain { inline int base_value() { return 1; } }\n");
     write_file(middle, "#pragma once\n"
                        "#include \"chain_base.hpp\"\n"
                        "namespace chain { inline int middle_value() "
@@ -4151,9 +4154,10 @@ TEST_SUITE("clang") {
 
     // Edit the header at the *bottom* of the chain. The only unit that
     // includes it does so through another header.
-    write_file(base, "#pragma once\n"
-                     "namespace chain { inline int base_value() { return 1; } }\n"
-                     "namespace chain { inline int deep_probe() { return 3; } }\n");
+    write_file(base,
+               "#pragma once\n"
+               "namespace chain { inline int base_value() { return 1; } }\n"
+               "namespace chain { inline int deep_probe() { return 3; } }\n");
     REQUIRE(run_shipped({"index"}, cache) == 0);
     CHECK(symbol_count("deep_probe") > 0);
   }
@@ -4162,8 +4166,9 @@ TEST_SUITE("clang") {
     const std::string dir = make_temp_dir();
     const std::string generated = dir + "/generated_input.hpp";
     const std::string source = dir + "/forced_main.cpp";
-    write_file(generated, "#pragma once\n"
-                          "namespace gen { inline int seed() { return 1; } }\n");
+    write_file(generated,
+               "#pragma once\n"
+               "namespace gen { inline int seed() { return 1; } }\n");
     write_file(source, "int forced_main() { return gen::seed(); }\n");
 
     const std::string cache = dir + "/cache";
@@ -4185,10 +4190,11 @@ TEST_SUITE("clang") {
     REQUIRE(symbol_count("seed") > 0);
     CHECK(symbol_count("generated_probe") == 0);
 
-    write_file(generated,
-               "#pragma once\n"
-               "namespace gen { inline int seed() { return 1; } }\n"
-               "namespace gen { inline int generated_probe() { return 4; } }\n");
+    write_file(
+        generated,
+        "#pragma once\n"
+        "namespace gen { inline int seed() { return 1; } }\n"
+        "namespace gen { inline int generated_probe() { return 4; } }\n");
     REQUIRE(run_shipped({"index"}, cache) == 0);
     CHECK(symbol_count("generated_probe") > 0);
   }
@@ -4208,7 +4214,8 @@ TEST_SUITE("clang") {
         "#pragma once\n"
         "namespace hist {\n"
         "inline int shared_value() { return 1; }\n"
-        "inline int shared_value();\n"  // redeclaration: multiplicity in one file
+        "inline int shared_value();\n" // redeclaration: multiplicity in one
+                                       // file
         "}\n";
     write_file(header, original_header);
     write_file(source, "#include \"history.hpp\"\n"
@@ -4249,12 +4256,12 @@ TEST_SUITE("clang") {
     const auto project = [](const std::string &cache) {
       Storage db(cache + "/index.db");
       std::string out;
-      for (const auto &[name, sql] : std::vector<std::pair<const char *, const char *>>{
-               {"contains",
-                "SELECT s.usr, d.usr, e.count FROM edge e "
-                "JOIN symbol s ON s.id = e.src_id "
-                "JOIN symbol d ON d.id = e.dst_id "
-                "WHERE e.kind = 3 ORDER BY s.usr, d.usr"},
+      for (const auto &[name, sql] :
+           std::vector<std::pair<const char *, const char *>>{
+               {"contains", "SELECT s.usr, d.usr, e.count FROM edge e "
+                            "JOIN symbol s ON s.id = e.src_id "
+                            "JOIN symbol d ON d.id = e.dst_id "
+                            "WHERE e.kind = 3 ORDER BY s.usr, d.usr"},
                {"applicability",
                 "SELECT fa.fact_kind, COUNT(*) FROM fact_applicability fa "
                 "GROUP BY fa.fact_kind ORDER BY fa.fact_kind"},
@@ -4274,11 +4281,10 @@ TEST_SUITE("clang") {
     };
 
     const std::string cold = build("cold", {});
-    const std::string edited = build(
-        "edited",
-        {original_header + "\n#define HISTORY_PROBE_1 1\n",
-         original_header + "\n#define HISTORY_PROBE_2 1\n",
-         original_header + "\n#define HISTORY_PROBE_3 1\n"});
+    const std::string edited =
+        build("edited", {original_header + "\n#define HISTORY_PROBE_1 1\n",
+                         original_header + "\n#define HISTORY_PROBE_2 1\n",
+                         original_header + "\n#define HISTORY_PROBE_3 1\n"});
 
     // Non-vacuity: the fixture really does produce a containment edge that
     // more than one file declares into, and a repeated declaration inside one.
@@ -4329,11 +4335,10 @@ TEST_SUITE("clang") {
           "JOIN file f ON f.id = fa.file_id "
           "WHERE fa.fact_kind = 'diagnostic' ORDER BY 1, 2, 3");
       while (statement.step()) {
-        rows.push_back(std::to_string(statement.col_int64(0)) + '|' +
-                       std::filesystem::path(statement.col_text(1))
-                           .filename()
-                           .string() +
-                       '|' + std::to_string(statement.col_int64(2)));
+        rows.push_back(
+            std::to_string(statement.col_int64(0)) + '|' +
+            std::filesystem::path(statement.col_text(1)).filename().string() +
+            '|' + std::to_string(statement.col_int64(2)));
       }
       return rows;
     };
@@ -4397,8 +4402,7 @@ TEST_SUITE("clang") {
                     cidx::ast::ExtractionPassRegistry &registry,
                     cidx::ast::IndexingPlan &plan) {
               for (std::size_t rule = 0; rule < rules; ++rule) {
-                const std::string id =
-                    "synthetic.rule." + std::to_string(rule);
+                const std::string id = "synthetic.rule." + std::to_string(rule);
                 registry.register_pass(
                     cidx::ast::ExtractionPassDescriptor{
                         .id = id,
@@ -4880,7 +4884,8 @@ TEST_CASE("index --jobs rejects non-positive values identically in both "
 TEST_CASE("analyze --jobs and index --jobs share one rejection contract") {
   // The story requires index to reuse analyze's parsing, validation and error
   // text; a divergence here is the drift that requirement exists to prevent.
-  for (const std::string &value : {"0", "-3", "nope", ""}) {
+  for (const std::string &value :
+       std::array<std::string, 4>{"0", "-3", "nope", ""}) {
     const ParseFail analyze =
         typed_parse_fail({"analyze", "--rule", "r", "--jobs", value});
     const ParseFail index = typed_parse_fail({"index", "--jobs", value});

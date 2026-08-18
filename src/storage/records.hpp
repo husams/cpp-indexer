@@ -67,9 +67,10 @@ struct SemanticUniverse {
 struct Component {
   int64_t id = -1;
   std::string name;
-  std::string path;                   // base path (no version segment)
-  std::string kind;                   // 'repo' | 'external'
-  std::optional<std::string> version; // v14: nullable; NULL = unversioned
+  std::string path; // base path (no version segment)
+  std::string kind; // 'repo' | 'external'
+  std::optional<std::string> version =
+      std::nullopt; // v14: nullable; NULL = unversioned
   std::optional<int64_t>
       repository_id; // v23: owning repository; NULL = ungrouped
   std::optional<int64_t>
@@ -108,7 +109,7 @@ struct Clone {
   int64_t id = -1;
   int64_t repository_id = -1;
   std::string path; // absolute checkout/worktree root
-  std::optional<std::string> label;
+  std::optional<std::string> label = std::nullopt;
 };
 
 // v14: label registry row
@@ -144,9 +145,9 @@ struct Diagnostic {
   int64_t file_id = -1;
   int severity = 0; // clang: 2=warning, 3=error, 4=fatal
   std::string spelling;
-  std::optional<std::string> file_path;
-  std::optional<int64_t> line;
-  std::optional<int64_t> col;
+  std::optional<std::string> file_path = std::nullopt;
+  std::optional<int64_t> line = std::nullopt;
+  std::optional<int64_t> col = std::nullopt;
 };
 
 struct Symbol {
@@ -238,9 +239,9 @@ struct Edge {
   int64_t dst_id = -1;
   int64_t kind = 0; // edge_kind.id
   int64_t count = 1;
-  std::optional<int64_t> base_access; // inherits
-  std::optional<int64_t> is_virtual;  // inherits (0/1)
-  std::optional<int64_t> vtable_slot; // overrides (reserved)
+  std::optional<int64_t> base_access = std::nullopt; // inherits
+  std::optional<int64_t> is_virtual = std::nullopt;  // inherits (0/1)
+  std::optional<int64_t> vtable_slot = std::nullopt; // overrides (reserved)
   int64_t id = -1;
 };
 
@@ -250,15 +251,15 @@ struct EdgeSite {
   std::optional<int64_t> line;
   std::optional<int64_t> col;
   int64_t conditional = 0;
-  std::optional<std::string> args_sig;
+  std::optional<std::string> args_sig = std::nullopt;
   // Phase 2: receiver provenance for virtual dispatch
-  std::optional<std::string> recv_src_kind;
-  std::optional<std::string> recv_type_usr;
-  std::optional<std::string> recv_decl_usr;
-  std::optional<int64_t>
-      recv_param_pos; // 0-based index of receiver in callee params
-  std::optional<int64_t>
-      recv_type_is_value; // v11: receiver held by value (1) else 0/NULL
+  std::optional<std::string> recv_src_kind = std::nullopt;
+  std::optional<std::string> recv_type_usr = std::nullopt;
+  std::optional<std::string> recv_decl_usr = std::nullopt;
+  std::optional<int64_t> recv_param_pos =
+      std::nullopt; // 0-based index of receiver in callee params
+  std::optional<int64_t> recv_type_is_value =
+      std::nullopt; // v11: receiver held by value (1) else 0/NULL
 };
 
 struct CallArg {
@@ -313,9 +314,9 @@ struct TypeNode {
   bool is_const = false;
   bool is_volatile = false;
   bool is_restrict = false;
-  std::optional<std::string> decl_usr;
-  std::optional<int64_t> canonical_id;
-  std::optional<std::string> extent;
+  std::optional<std::string> decl_usr = std::nullopt;
+  std::optional<int64_t> canonical_id = std::nullopt;
+  std::optional<std::string> extent = std::nullopt;
 };
 
 struct EntityNode {
@@ -406,12 +407,12 @@ struct IncludeConfig {
   int64_t id = -1;
   int64_t tu_file_id = -1;
   std::string digest;
-  std::optional<std::string> driver;
-  std::optional<std::string> working_dir;
-  std::vector<std::string> arguments;
-  std::optional<std::string> lang_mode; // "c" | "c++"
-  std::optional<std::string> resource_dir;
-  std::optional<int64_t> translation_unit_config_id;
+  std::optional<std::string> driver = std::nullopt;
+  std::optional<std::string> working_dir = std::nullopt;
+  std::vector<std::string> arguments = {};
+  std::optional<std::string> lang_mode = std::nullopt; // "c" | "c++"
+  std::optional<std::string> resource_dir = std::nullopt;
+  std::optional<int64_t> translation_unit_config_id = std::nullopt;
 };
 
 struct IncludeDeletionStats {
@@ -431,20 +432,20 @@ struct TranslationUnitConfig {
   int64_t id = -1;
   std::string descriptor_hash;
   std::string descriptor_json;
-  std::optional<std::string> driver;
-  std::optional<std::string> working_dir;
-  std::optional<std::string> language;
-  std::optional<std::string> standard;
-  std::optional<std::string> target;
-  std::vector<std::string> abi_options;
-  std::optional<std::string> sysroot;
-  std::optional<std::string> resource_dir;
-  std::vector<std::string> include_paths;
-  std::vector<std::string> macro_state;
-  std::vector<std::string> relevant_environment;
-  std::vector<std::string> generated_inputs;
-  std::optional<std::string> diagnostics_policy;
-  std::vector<std::string> arguments;
+  std::optional<std::string> driver = std::nullopt;
+  std::optional<std::string> working_dir = std::nullopt;
+  std::optional<std::string> language = std::nullopt;
+  std::optional<std::string> standard = std::nullopt;
+  std::optional<std::string> target = std::nullopt;
+  std::vector<std::string> abi_options = {};
+  std::optional<std::string> sysroot = std::nullopt;
+  std::optional<std::string> resource_dir = std::nullopt;
+  std::vector<std::string> include_paths = {};
+  std::vector<std::string> macro_state = {};
+  std::vector<std::string> relevant_environment = {};
+  std::vector<std::string> generated_inputs = {};
+  std::optional<std::string> diagnostics_policy = std::nullopt;
+  std::vector<std::string> arguments = {};
   TranslationUnitConfigState state = TranslationUnitConfigState::registered;
   // State of this file's association with the descriptor. It can become
   // stale while the descriptor remains reusable for another TU.
@@ -467,7 +468,7 @@ struct FileConfigApplicability {
 struct IncludeEdge {
   int64_t id = -1;
   int64_t src_file_id = -1;
-  std::optional<int64_t> dst_file_id;
+  std::optional<int64_t> dst_file_id = std::nullopt;
   std::string dst_path;
   int64_t config_id = -1;
   bool is_system = false;
@@ -512,10 +513,10 @@ struct IncludeSite {
   int64_t col = 0;
   int64_t begin_offset = 0;
   int64_t end_offset = 0;
-  std::string spelling; // as written, without <> or ""
+  std::string spelling = {}; // as written, without <> or ""
   bool is_angled = false;
   int64_t directive = kIncludeDirectiveInclude;
-  std::string cond_fingerprint; // "" = unconditional top level
+  std::string cond_fingerprint = {}; // "" = unconditional top level
   bool resolved = true;
   bool guarded = false;
 };
