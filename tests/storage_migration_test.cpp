@@ -208,8 +208,8 @@ TEST_CASE("predecessor catalog hash requires the v40 to v41 migration") {
                "' WHERE key = 'schema_version'");
       raw.exec(
           "UPDATE meta SET value = "
-               "'3337824260ee0afe1260859b6be88e6fb8280852fd736cde5e12cca5c3847ba4' "
-               "WHERE key = 'catalog_hash'");
+          "'3337824260ee0afe1260859b6be88e6fb8280852fd736cde5e12cca5c3847ba4' "
+          "WHERE key = 'catalog_hash'");
     }
     CHECK_THROWS_AS(cidx::Storage{path}, cidx::CidxError);
   }
@@ -581,6 +581,69 @@ TEST_CASE("v28 -> v29: template_arg arg_kind remapped to the canonical codes") {
                          "WHERE owner_id = 1 AND position = 1");
   REQUIRE(st.step());
   CHECK(st.col_text(0) == std::string("3")); // stayed template-template
+}
+
+TEST_CASE("v28 database with Souffle adapter views migrates through the "
+          "template_arg rebuild") {
+  // examples/souffle-index/cidx_views.sql installs PERSISTENT views into the
+  // user's index.db. The v32 step rebuilds template_arg (create scratch, copy,
+  // drop, rename), and SQLite re-parses the whole schema on ALTER TABLE ...
+  // RENAME -- so a view that reads template_arg cannot resolve during the
+  // window and older engines abort the migration with
+  //   error in view template_arg_fact: no such table: main.template_arg
+  // SQLite 3.34 (RHEL 9's system library) refuses; 3.51 does not, so this test
+  // only discriminates on the older engine. It still pins the end state
+  // everywhere: the rebuild completes and the views survive it.
+  const std::string tmp = make_temp_dir();
+  const std::string path = tmp + "/v28_views.db";
+  {
+    cidx::Storage db(path);
+  }
+  {
+    cidx::SqliteDb raw(path);
+    // Wind template_arg back to its pre-v32 shape (no composite primary key)
+    // so the v32 rebuild actually runs.
+    raw.exec("PRAGMA legacy_alter_table = ON");
+    raw.exec("DROP TABLE template_arg");
+    raw.exec("CREATE TABLE template_arg (owner_id INTEGER NOT NULL, position "
+             "INTEGER NOT NULL, pack_index INTEGER NOT NULL DEFAULT -1, "
+             "arg_kind INTEGER NOT NULL, ref_id INTEGER, literal TEXT, "
+             "type_id INTEGER)");
+    raw.exec("PRAGMA legacy_alter_table = OFF");
+    raw.exec("INSERT INTO symbol (id, usr, spelling, kind, "
+             "semantic_universe_id, identity_key) VALUES "
+             "(1, 'c:@S@Spec', 'Spec', 2, 1, 'legacy' || char(31) || "
+             "'c:@S@Spec')");
+    raw.exec("INSERT INTO template_arg (owner_id, position, pack_index, "
+             "arg_kind) VALUES (1, 0, -1, 1)");
+    // The two adapter views from cidx_views.sql that read template_arg.
+    raw.exec("CREATE VIEW symdisp AS SELECT s.id, COALESCE(s.qual_name, "
+             "s.spelling, s.usr) AS name FROM symbol s");
+    raw.exec("CREATE VIEW template_arg_fact AS SELECT o.name AS owner, "
+             "a.position, a.arg_kind, COALESCE(r.name, '') AS referenced, "
+             "COALESCE(a.literal, '') AS literal FROM template_arg a "
+             "JOIN symdisp o ON o.id = a.owner_id "
+             "LEFT JOIN symdisp r ON r.id = a.ref_id");
+    raw.exec("UPDATE meta SET value = '28' WHERE key = 'schema_version'");
+  }
+  {
+    cidx::Storage db(path); // migration runs here; must not throw
+  }
+  cidx::SqliteDb raw(path);
+  CHECK(meta_version(raw) == std::to_string(cidx::kSchemaVersion));
+  { // the rebuild happened: the v32 composite primary key is in place
+    auto st = raw.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' "
+                          "AND name = 'template_arg'");
+    REQUIRE(st.step());
+    CHECK(std::string(st.col_text(0))
+              .contains("PRIMARY KEY (owner_id, position, pack_index)"));
+  }
+  { // the row survived and the view still resolves against the new table
+    auto st = raw.prepare("SELECT owner, position FROM template_arg_fact");
+    REQUIRE(st.step());
+    CHECK(st.col_text(0) == std::string("Spec"));
+    CHECK(st.col_int64(1) == 0);
+  }
 }
 
 TEST_CASE("v29 -> v30: signature/type tier tables created, version stamped") {

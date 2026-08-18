@@ -20,13 +20,61 @@
 #include "storage/storage_detail.hpp"
 #include "storage/storage_schema.hpp"
 #include "util/errors.hpp"
+#include "util/logger.hpp"
 #include "util/pathutil.hpp"
 
 namespace cidx {
 
 using namespace detail;
 
+namespace {
+
+// Every migration table rebuild follows create-new -> copy -> drop-old ->
+// rename-new. SQLite re-parses the whole schema when ALTER TABLE ... RENAME
+// runs, and during that window any view referencing the dropped table cannot
+// resolve, so the rename aborts with "error in view <name>: no such table".
+// The views need not be ours: `examples/souffle-index/cidx_views.sql` installs
+// persistent views (template_arg_fact, call_site_fact, ...) into the user's
+// index.db, and a database carrying them could not be migrated at all.
+// Older SQLite is stricter here -- 3.34 (RHEL 9's system library) refuses
+// where 3.51 does not -- so the guard matters most on the oldest supported
+// engine. The legacy rename skips that re-parse, which is what a rebuild
+// wants: nothing legitimately refers to the scratch table name, and the views
+// resolve again as soon as the rename restores the real one.
+class LegacyAlterTableScope {
+public:
+  explicit LegacyAlterTableScope(SqliteDb &db) : db_(db) {
+    auto st = db_.prepare("PRAGMA legacy_alter_table");
+    previous_ = st.step() && st.col_int64(0) != 0;
+    db_.exec("PRAGMA legacy_alter_table = ON");
+  }
+  ~LegacyAlterTableScope() {
+    // Never throw while unwinding a failed migration; the pragma is
+    // connection-local, so a failure to restore it dies with the connection.
+    try {
+      db_.exec(previous_ ? "PRAGMA legacy_alter_table = ON"
+                         : "PRAGMA legacy_alter_table = OFF");
+    } catch (const std::exception &error) {
+      Logger::root().warning("cidx.storage",
+                             std::string("could not restore "
+                                         "legacy_alter_table: ") +
+                                 error.what());
+    }
+  }
+  LegacyAlterTableScope(const LegacyAlterTableScope &) = delete;
+  LegacyAlterTableScope &operator=(const LegacyAlterTableScope &) = delete;
+  LegacyAlterTableScope(LegacyAlterTableScope &&) = delete;
+  LegacyAlterTableScope &operator=(LegacyAlterTableScope &&) = delete;
+
+private:
+  SqliteDb &db_;
+  bool previous_ = false;
+};
+
+} // namespace
+
 void SqliteStorageService::migrate() {
+  const LegacyAlterTableScope legacy_rename(db_);
   std::vector<std::string> tables;
   {
     auto st =
