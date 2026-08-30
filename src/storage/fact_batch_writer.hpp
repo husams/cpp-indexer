@@ -18,8 +18,9 @@
 #include <vector>
 
 namespace cidx {
+class SqliteDb;
 class SqliteStorageService;
-}
+} // namespace cidx
 
 namespace cidx::storage {
 
@@ -208,6 +209,26 @@ private:
                        const FactBatchPublicationContext &context,
                        TemporaryRowPolicy temporary_rows,
                        std::size_t window_ordinal = 0) -> FactBatchWriterResult;
+
+  using FactBatchStager =
+      std::function<void(SqliteDb &, FactBatchWriterResult &, std::int64_t)>;
+
+  [[nodiscard]] auto apply_in_transaction(
+      const ast::FactBatch &batch, const ast::FactBatch &cleanup_batch,
+      const FactBatchPublicationContext &context,
+      TemporaryRowPolicy temporary_rows, std::size_t window_ordinal,
+      const FactBatchStager &stage) -> FactBatchWriterResult;
+
+  [[nodiscard]] auto apply_artifact(const ast::FactBatchArtifact &artifact,
+                                    const FactBatchPublicationContext &context)
+      -> FactBatchWriterResult;
+
+  [[nodiscard]] auto
+  apply_artifact_in_transaction(const ast::FactBatchArtifact &artifact,
+                                const FactBatchPublicationContext &context,
+                                TemporaryRowPolicy temporary_rows,
+                                std::size_t window_ordinal = 0)
+      -> FactBatchWriterResult;
 
   cidx::SqliteStorageService &storage_;
 };

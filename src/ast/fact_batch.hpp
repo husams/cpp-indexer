@@ -382,6 +382,7 @@ private:
                                      const std::string &key) -> std::int64_t;
   void bind_identity(FactIdentityKind kind, std::string key,
                      std::int64_t handle);
+  void append_identity_maps(FactBatch::Data &data) const;
   [[nodiscard]] auto identity_entries(FactIdentityKind kind) const
       -> std::map<std::int64_t, std::string>;
   [[nodiscard]] auto build_batch(bool canonical) const -> FactBatch;
@@ -450,6 +451,10 @@ private:
   std::uint64_t next_emission_order_ = 0;
   FactBatchOperationCounters counters_;
   ExtractionFactLimits extraction_limits_;
+  // The ordered spill index is the bounded overflow tier.  Keep the hot
+  // resident lookup path hash-based so file routing and identity minting do
+  // not turn every probe into an ordered lookup or a run scan.
+  std::unordered_map<std::string, std::int64_t> resident_identity_handles_;
   std::unique_ptr<SpillableIdentityIndex> identity_index_;
   std::unique_ptr<SpillableFactBuffer<SymbolRecord>> fact_payload_;
 };

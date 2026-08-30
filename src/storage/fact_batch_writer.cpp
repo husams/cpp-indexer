@@ -223,7 +223,10 @@ auto partitions_for(const ast::FactBatch &batch, ast::FactFamily family,
     }
     for (const std::size_t index : found->second) {
       if (index >= result.size() || result[index] != nullptr) {
-        throw StorageError("FactBatch family membership is invalid");
+        throw StorageError("FactBatch family membership is invalid (family " +
+                           std::to_string(std::to_underlying(family)) +
+                           ", index " + std::to_string(index) + ", count " +
+                           std::to_string(result.size()) + ")");
       }
       result[index] = &partition.key;
     }
@@ -2770,6 +2773,27 @@ auto FactBatchWriter::apply_in_transaction(
     const ast::FactBatch &batch, const FactBatchPublicationContext &context,
     TemporaryRowPolicy temporary_rows, std::size_t window_ordinal)
     -> FactBatchWriterResult {
+  return apply_in_transaction(
+      batch, batch, context, temporary_rows, window_ordinal,
+      [this, &batch, &context](SqliteDb &database,
+                               FactBatchWriterResult &result,
+                               std::int64_t token) {
+        load_file_map(database, result, batch, context, token);
+        load_symbols(storage_, database, result, batch, token);
+        load_external_references(storage_, database, result, batch, token);
+        load_types(database, result, batch, token);
+        load_definitions(database, result, batch, token);
+        load_relations(database, result, batch, token);
+        load_auxiliary_rows(database, result, auxiliary_rows(storage_, batch),
+                            token);
+      });
+}
+
+auto FactBatchWriter::apply_in_transaction(
+    const ast::FactBatch &batch, const ast::FactBatch &cleanup_batch,
+    const FactBatchPublicationContext &context,
+    TemporaryRowPolicy temporary_rows, std::size_t window_ordinal,
+    const FactBatchStager &stage) -> FactBatchWriterResult {
   FactBatchWriterResult result;
   const std::int64_t token = batch_token(batch, context, window_ordinal);
   std::optional<StatementMeasurementScope> measurement;
@@ -2862,13 +2886,7 @@ auto FactBatchWriter::apply_in_transaction(
   }
   const auto staging_started = Clock::now();
   const std::uint64_t staging_fullscan_before = result.report.fullscan_steps;
-  load_file_map(database, result, batch, context, token);
-  load_symbols(storage_, database, result, batch, token);
-  load_external_references(storage_, database, result, batch, token);
-  load_types(database, result, batch, token);
-  load_definitions(database, result, batch, token);
-  load_relations(database, result, batch, token);
-  load_auxiliary_rows(database, result, auxiliary_rows(storage_, batch), token);
+  stage(database, result, token);
   result.report.staging_seconds = seconds_since(staging_started);
   result.report.phase_seconds[FactBatchWriterPhase::load_temporary_staging] +=
       result.report.staging_seconds;
@@ -2889,7 +2907,7 @@ auto FactBatchWriter::apply_in_transaction(
   };
   inject(context.failure, FactBatchWriterFailurePoint::natural_key_resolution);
   time_phase(FactBatchWriterPhase::resolve_natural_keys, [&] {
-    reject_stale_cleanup_intents(batch, context);
+    reject_stale_cleanup_intents(cleanup_batch, context);
     apply_lifecycle_cleanup(database, result, token);
   });
   time_phase(FactBatchWriterPhase::apply_entities, [&] {
@@ -2966,6 +2984,107 @@ auto FactBatchWriter::apply_in_transaction(
   return result;
 }
 
+auto FactBatchWriter::apply_artifact_in_transaction(
+    const ast::FactBatchArtifact &artifact,
+    const FactBatchPublicationContext &context,
+    TemporaryRowPolicy temporary_rows, std::size_t window_ordinal)
+    -> FactBatchWriterResult {
+  const ast::FactBatch route_batch = ast::decode_fact_batch_artifact_family(
+      artifact, ast::FactFamily::symbols);
+  const ast::FactBatch cleanup_batch = ast::decode_fact_batch_artifact_family(
+      artifact, ast::FactFamily::lifecycle_cleanup);
+  const auto stage = [this, &artifact, &route_batch, &cleanup_batch, &context](
+                         SqliteDb &database, FactBatchWriterResult &result,
+                         std::int64_t token) {
+    load_file_map(database, result, route_batch, context, token);
+    load_symbols(storage_, database, result, route_batch, token);
+    load_external_references(storage_, database, result, route_batch, token);
+
+    const ast::FactBatch types = ast::decode_fact_batch_artifact_family(
+        artifact, ast::FactFamily::types);
+    load_types(database, result, types, token);
+    const ast::FactBatch definitions = ast::decode_fact_batch_artifact_family(
+        artifact, ast::FactFamily::definitions);
+    load_definitions(database, result, definitions, token);
+    const ast::FactBatch relations = ast::decode_fact_batch_artifact_family(
+        artifact, ast::FactFamily::relations);
+    load_relations(database, result, relations, token);
+
+    constexpr std::array auxiliary_families{
+        ast::FactFamily::declaration_sites,
+        ast::FactFamily::edge_sites,
+        ast::FactFamily::call_arguments,
+        ast::FactFamily::template_parameters,
+        ast::FactFamily::template_arguments,
+        ast::FactFamily::type_edges,
+        ast::FactFamily::symbol_types,
+        ast::FactFamily::parameters,
+        ast::FactFamily::definition_edges,
+        ast::FactFamily::includes,
+        ast::FactFamily::macros,
+        ast::FactFamily::diagnostics,
+        ast::FactFamily::evidence,
+        ast::FactFamily::presentation_intents,
+        ast::FactFamily::lifecycle_cleanup,
+        ast::FactFamily::applicability};
+    for (const ast::FactFamily family : auxiliary_families) {
+      const ast::FactBatch *batch = family == ast::FactFamily::lifecycle_cleanup
+                                        ? &cleanup_batch
+                                        : nullptr;
+      const ast::FactBatch decoded =
+          batch == nullptr
+              ? ast::decode_fact_batch_artifact_family(artifact, family)
+              : *batch;
+      try {
+        load_auxiliary_rows(database, result, auxiliary_rows(storage_, decoded),
+                            token);
+      } catch (const StorageError &error) {
+        throw StorageError("FactBatch artifact family " +
+                           std::to_string(std::to_underlying(family)) + ": " +
+                           error.what());
+      }
+    }
+  };
+  return apply_in_transaction(route_batch, cleanup_batch, context,
+                              temporary_rows, window_ordinal, stage);
+}
+
+auto FactBatchWriter::apply_artifact(const ast::FactBatchArtifact &artifact,
+                                     const FactBatchPublicationContext &context)
+    -> FactBatchWriterResult {
+  FactBatchWriterResult result;
+  const auto transaction_started = Clock::now();
+  auto transaction = storage_.transaction();
+  const double transaction_begin_seconds = seconds_since(transaction_started);
+  try {
+    result = apply_artifact_in_transaction(artifact, context,
+                                           TemporaryRowPolicy::per_item);
+    ++result.report.transactions_started;
+    result.report.transaction_begin_seconds += transaction_begin_seconds;
+    result.report.commit_attempted = true;
+    const auto commit_started = Clock::now();
+    if (context.failure == FactBatchWriterFailurePoint::commit) {
+      throw StorageError("injected FactBatchWriter commit failure");
+    }
+    transaction.commit();
+    result.report.commit_seconds = seconds_since(commit_started);
+    result.report.phase_seconds[FactBatchWriterPhase::commit] +=
+        result.report.commit_seconds;
+    result.report.committed = true;
+  } catch (const std::exception &error) {
+    std::string failure = error.what();
+    try {
+      transaction.rollback();
+    } catch (const std::exception &rollback_error) {
+      failure += "; rollback failed: ";
+      failure += rollback_error.what();
+    }
+    result.report.committed = false;
+    result.error = std::move(failure);
+  }
+  return result;
+}
+
 auto FactBatchWriter::apply(const ast::FactBatch &batch,
                             const FactBatchPublicationContext &context)
     -> FactBatchWriterResult {
@@ -3025,18 +3144,9 @@ auto FactBatchWriter::apply_window(
     for (const FactBatchWriterWindowItem &item : items) {
       FactBatchPublicationContext replay = item.context;
       replay.failure = FactBatchWriterFailurePoint::none;
-      std::optional<ast::FactBatch> decoded;
-      if (item.batch == nullptr) {
-        const auto decoded_result =
-            ast::decode_fact_batch_artifact(*item.artifact);
-        if (!decoded_result.usable()) {
-          throw StorageError(
-              "FactBatch artifact could not be decoded for replay");
-        }
-        decoded = *decoded_result.batch;
-      }
       FactBatchWriterResult result =
-          apply(item.batch != nullptr ? *item.batch : *decoded, replay);
+          item.batch != nullptr ? apply(*item.batch, replay)
+                                : apply_artifact(*item.artifact, replay);
       merge_report(window.report, result.report);
       ++window.report.translation_units_replayed;
       window.results.push_back(std::move(result));
@@ -3062,18 +3172,14 @@ auto FactBatchWriter::apply_window(
     bool inject_commit_failure = false;
     for (std::size_t index = 0; index < items.size(); ++index) {
       const FactBatchWriterWindowItem &item = items[index];
-      std::optional<ast::FactBatch> decoded;
-      if (item.batch == nullptr) {
-        const auto decoded_result =
-            ast::decode_fact_batch_artifact(*item.artifact);
-        if (!decoded_result.usable()) {
-          throw StorageError("FactBatch artifact could not be decoded");
-        }
-        decoded = *decoded_result.batch;
-      }
-      FactBatchWriterResult result = apply_in_transaction(
-          item.batch != nullptr ? *item.batch : *decoded, item.context,
-          TemporaryRowPolicy::shared_window, index + 1);
+      FactBatchWriterResult result =
+          item.batch != nullptr
+              ? apply_in_transaction(*item.batch, item.context,
+                                     TemporaryRowPolicy::shared_window,
+                                     index + 1)
+              : apply_artifact_in_transaction(*item.artifact, item.context,
+                                              TemporaryRowPolicy::shared_window,
+                                              index + 1);
       inject_commit_failure =
           inject_commit_failure ||
           item.context.failure == FactBatchWriterFailurePoint::commit;

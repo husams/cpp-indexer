@@ -33,6 +33,27 @@ auto optional_text(const std::optional<T> &value) -> std::string {
 
 auto bool_text(bool value) -> std::string { return value ? "1" : "0"; }
 
+auto resident_identity_key(FactIdentityKind kind, std::string_view key)
+    -> std::string {
+  std::string result;
+  result.reserve(key.size() + 2);
+  result.push_back(static_cast<char>(kind));
+  result.push_back('\0');
+  result.append(key);
+  return result;
+}
+
+constexpr std::size_t kResidentIdentityCacheEntries = 4096;
+
+void cache_resident_identity(
+    std::unordered_map<std::string, std::int64_t> &cache, std::string key,
+    std::int64_t handle) {
+  if (cache.size() >= kResidentIdentityCacheEntries && !cache.contains(key)) {
+    cache.clear();
+  }
+  cache.insert_or_assign(std::move(key), handle);
+}
+
 void append_u64(std::vector<std::byte> &bytes, std::uint64_t value) {
   for (unsigned shift = 0; shift < 64; shift += 8) {
     bytes.push_back(static_cast<std::byte>((value >> shift) & 0xffU));
@@ -830,6 +851,7 @@ auto FactBatchRecorder::identity_index_spilled() const -> bool {
 
 void FactBatchRecorder::set_extraction_limits(ExtractionFactLimits limits) {
   extraction_limits_ = std::move(limits);
+  resident_identity_handles_.clear();
   SpillableIdentityIndexOptions identity_options{
       .max_resident_identity_bytes =
           extraction_limits_.max_resident_identity_bytes,
@@ -850,7 +872,13 @@ void FactBatchRecorder::set_extraction_limits(ExtractionFactLimits limits) {
 auto FactBatchRecorder::identity_handle(FactIdentityKind kind,
                                         const std::string &key)
     -> std::int64_t {
+  const std::string resident_key = resident_identity_key(kind, key);
+  if (const auto found = resident_identity_handles_.find(resident_key);
+      found != resident_identity_handles_.end()) {
+    return found->second;
+  }
   if (const auto found = identity_index_->lookup(kind, key)) {
+    cache_resident_identity(resident_identity_handles_, resident_key, *found);
     return *found;
   }
   constexpr auto handle_mask =
@@ -869,17 +897,25 @@ auto FactBatchRecorder::identity_handle(FactIdentityKind kind,
         IdentityInsertResult::inserted) {
       continue;
     }
+    cache_resident_identity(resident_identity_handles_, resident_key, handle);
     if (identity_index_->insert(FactIdentityKind::handle, handle_key, handle) !=
         IdentityInsertResult::inserted) {
       throw std::logic_error("transient identity handle collision");
     }
+    cache_resident_identity(
+        resident_identity_handles_,
+        resident_identity_key(FactIdentityKind::handle, handle_key), handle);
     return handle;
   }
 }
 
 void FactBatchRecorder::bind_identity(FactIdentityKind kind, std::string key,
                                       std::int64_t handle) {
-  const auto existing = identity_index_->lookup(kind, key);
+  const std::string resident_key = resident_identity_key(kind, key);
+  const auto resident = resident_identity_handles_.find(resident_key);
+  const auto existing = resident != resident_identity_handles_.end()
+                            ? std::optional<std::int64_t>(resident->second)
+                            : identity_index_->lookup(kind, key);
   if (existing && *existing != handle) {
     throw std::logic_error("conflicting transient fact identity");
   }
@@ -887,6 +923,7 @@ void FactBatchRecorder::bind_identity(FactIdentityKind kind, std::string key,
                        IdentityInsertResult::conflict) {
     throw std::logic_error("conflicting transient fact identity");
   }
+  cache_resident_identity(resident_identity_handles_, resident_key, handle);
 }
 
 auto FactBatchRecorder::identity_entries(FactIdentityKind kind) const
@@ -898,6 +935,29 @@ auto FactBatchRecorder::identity_entries(FactIdentityKind kind) const
     }
   }
   return result;
+}
+
+void FactBatchRecorder::append_identity_maps(FactBatch::Data &data) const {
+  const auto identities = identity_index_->entries();
+  for (const auto &[identity, handle] : identities) {
+    switch (identity.first) {
+    case FactIdentityKind::symbol:
+      data.symbol_keys.emplace(handle, identity.second);
+      break;
+    case FactIdentityKind::relation:
+      data.relation_keys.emplace(handle, identity.second);
+      break;
+    case FactIdentityKind::type:
+      data.type_keys.emplace(handle, identity.second);
+      break;
+    case FactIdentityKind::definition:
+      data.definition_keys.emplace(handle, identity.second);
+      break;
+    case FactIdentityKind::file:
+    case FactIdentityKind::handle:
+      break;
+    }
+  }
 }
 
 void FactBatchRecorder::set_completeness(FactCompleteness completeness) {
@@ -1701,10 +1761,7 @@ auto FactBatchRecorder::build_batch(bool canonical) const -> FactBatch {
   data->producer = producer_;
   data->completeness = completeness_;
   data->canonical = canonical;
-  data->symbol_keys = identity_entries(FactIdentityKind::symbol);
-  data->relation_keys = identity_entries(FactIdentityKind::relation);
-  data->type_keys = identity_entries(FactIdentityKind::type);
-  data->definition_keys = identity_entries(FactIdentityKind::definition);
+  append_identity_maps(*data);
   data->file_keys.insert(partitions_by_file_handle_.begin(),
                          partitions_by_file_handle_.end());
   data->pending_symbol_references = pending_symbol_references_;

@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <iosfwd>
 #include <memory>
 #include <optional>
@@ -166,5 +167,12 @@ encode_fact_batch_artifact(const FactBatch &batch,
     const FactBatchArtifact &artifact,
     const FactBatchArtifactCompatibility &compatibility = {})
     -> FactBatchArtifactDecodeResult;
+
+// Decode only one record family together with the shared batch metadata.  The
+// writer uses this bounded view to consume a spilled artifact in its existing
+// deterministic family phases without reconstructing the complete batch.
+[[nodiscard]] auto decode_fact_batch_artifact_family(
+    const FactBatchArtifact &artifact, FactFamily family,
+    const FactBatchArtifactCompatibility &compatibility = {}) -> FactBatch;
 
 } // namespace cidx::ast
