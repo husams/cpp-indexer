@@ -360,6 +360,14 @@ private:
       -> std::string;
   [[nodiscard]] static auto name_kind_key(std::string_view name,
                                           std::string_view kind) -> std::string;
+  [[nodiscard]] auto lookup_identity(FactIdentityKind kind,
+                                     std::string_view key) const
+      -> std::optional<std::int64_t>;
+  [[nodiscard]] auto cached_identity_lookup(FactIdentityKind kind,
+                                            std::string_view key) const
+      -> const std::optional<std::int64_t> *;
+  void cache_identity(FactIdentityKind kind, std::string_view key,
+                      std::optional<std::int64_t> handle) const;
   [[nodiscard]] auto source_independent_symbol_id(std::string_view usr)
       -> std::optional<std::int64_t>;
   void enrich_minted_symbol(std::int64_t symbol_id, const MintRequest &request);
@@ -451,10 +459,13 @@ private:
   std::uint64_t next_emission_order_ = 0;
   FactBatchOperationCounters counters_;
   ExtractionFactLimits extraction_limits_;
-  // The ordered spill index is the bounded overflow tier.  Keep the hot
-  // resident lookup path hash-based so file routing and identity minting do
-  // not turn every probe into an ordered lookup or a run scan.
-  std::unordered_map<std::string, std::int64_t> resident_identity_handles_;
+  // The ordered spill index is the bounded overflow tier. Keep two bounded
+  // generations for both positive and negative hot probes so routing does not
+  // turn every lookup into an ordered lookup or a run scan.
+  using ResidentIdentityCache =
+      std::unordered_map<std::string, std::optional<std::int64_t>>;
+  mutable ResidentIdentityCache resident_identity_cache_;
+  mutable ResidentIdentityCache resident_identity_previous_cache_;
   std::unique_ptr<SpillableIdentityIndex> identity_index_;
   std::unique_ptr<SpillableFactBuffer<SymbolRecord>> fact_payload_;
 };

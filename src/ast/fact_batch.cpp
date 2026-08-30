@@ -44,15 +44,8 @@ auto resident_identity_key(FactIdentityKind kind, std::string_view key)
 }
 
 constexpr std::size_t kResidentIdentityCacheEntries = 4096;
-
-void cache_resident_identity(
-    std::unordered_map<std::string, std::int64_t> &cache, std::string key,
-    std::int64_t handle) {
-  if (cache.size() >= kResidentIdentityCacheEntries && !cache.contains(key)) {
-    cache.clear();
-  }
-  cache.insert_or_assign(std::move(key), handle);
-}
+constexpr std::size_t kResidentIdentityCacheGenerationEntries =
+    kResidentIdentityCacheEntries / 2;
 
 void append_u64(std::vector<std::byte> &bytes, std::uint64_t value) {
   for (unsigned shift = 0; shift < 64; shift += 8) {
@@ -851,7 +844,8 @@ auto FactBatchRecorder::identity_index_spilled() const -> bool {
 
 void FactBatchRecorder::set_extraction_limits(ExtractionFactLimits limits) {
   extraction_limits_ = std::move(limits);
-  resident_identity_handles_.clear();
+  resident_identity_cache_.clear();
+  resident_identity_previous_cache_.clear();
   SpillableIdentityIndexOptions identity_options{
       .max_resident_identity_bytes =
           extraction_limits_.max_resident_identity_bytes,
@@ -872,13 +866,7 @@ void FactBatchRecorder::set_extraction_limits(ExtractionFactLimits limits) {
 auto FactBatchRecorder::identity_handle(FactIdentityKind kind,
                                         const std::string &key)
     -> std::int64_t {
-  const std::string resident_key = resident_identity_key(kind, key);
-  if (const auto found = resident_identity_handles_.find(resident_key);
-      found != resident_identity_handles_.end()) {
-    return found->second;
-  }
-  if (const auto found = identity_index_->lookup(kind, key)) {
-    cache_resident_identity(resident_identity_handles_, resident_key, *found);
+  if (const auto found = lookup_identity(kind, key)) {
     return *found;
   }
   constexpr auto handle_mask =
@@ -890,40 +878,81 @@ auto FactBatchRecorder::identity_handle(FactIdentityKind kind,
     const auto handle = static_cast<std::int64_t>((mixed & handle_mask) | 1U);
     const std::string handle_key = std::to_string(static_cast<unsigned>(kind)) +
                                    ':' + std::to_string(handle);
-    if (identity_index_->lookup(FactIdentityKind::handle, handle_key)) {
+    if (lookup_identity(FactIdentityKind::handle, handle_key)) {
       continue;
     }
     if (identity_index_->insert(kind, key, handle) !=
         IdentityInsertResult::inserted) {
       continue;
     }
-    cache_resident_identity(resident_identity_handles_, resident_key, handle);
+    cache_identity(kind, key, handle);
     if (identity_index_->insert(FactIdentityKind::handle, handle_key, handle) !=
         IdentityInsertResult::inserted) {
       throw std::logic_error("transient identity handle collision");
     }
-    cache_resident_identity(
-        resident_identity_handles_,
-        resident_identity_key(FactIdentityKind::handle, handle_key), handle);
+    cache_identity(FactIdentityKind::handle, handle_key, handle);
     return handle;
   }
 }
 
+auto FactBatchRecorder::cached_identity_lookup(FactIdentityKind kind,
+                                               std::string_view key) const
+    -> const std::optional<std::int64_t> * {
+  const std::string resident_key = resident_identity_key(kind, key);
+  if (const auto found = resident_identity_cache_.find(resident_key);
+      found != resident_identity_cache_.end()) {
+    return &found->second;
+  }
+  const auto found = resident_identity_previous_cache_.find(resident_key);
+  return found == resident_identity_previous_cache_.end() ? nullptr
+                                                          : &found->second;
+}
+
+void FactBatchRecorder::cache_identity(
+    FactIdentityKind kind, std::string_view key,
+    std::optional<std::int64_t> handle) const {
+  std::string resident_key = resident_identity_key(kind, key);
+  if (const auto found = resident_identity_cache_.find(resident_key);
+      found != resident_identity_cache_.end()) {
+    found->second = handle;
+    return;
+  }
+  if (const auto found = resident_identity_previous_cache_.find(resident_key);
+      found != resident_identity_previous_cache_.end()) {
+    found->second = handle;
+    return;
+  }
+  if (resident_identity_cache_.size() >=
+      kResidentIdentityCacheGenerationEntries) {
+    resident_identity_previous_cache_.swap(resident_identity_cache_);
+    resident_identity_cache_.clear();
+  }
+  resident_identity_cache_.emplace(std::move(resident_key), handle);
+}
+
+auto FactBatchRecorder::lookup_identity(FactIdentityKind kind,
+                                        std::string_view key) const
+    -> std::optional<std::int64_t> {
+  if (const auto *const cached = cached_identity_lookup(kind, key)) {
+    return *cached;
+  }
+  const auto found = identity_index_->lookup(kind, key);
+  cache_identity(kind, key, found);
+  return found;
+}
+
 void FactBatchRecorder::bind_identity(FactIdentityKind kind, std::string key,
                                       std::int64_t handle) {
-  const std::string resident_key = resident_identity_key(kind, key);
-  const auto resident = resident_identity_handles_.find(resident_key);
-  const auto existing = resident != resident_identity_handles_.end()
-                            ? std::optional<std::int64_t>(resident->second)
-                            : identity_index_->lookup(kind, key);
+  const auto existing = lookup_identity(kind, key);
   if (existing && *existing != handle) {
     throw std::logic_error("conflicting transient fact identity");
   }
+  const std::string cache_key = key;
   if (!existing && identity_index_->insert(kind, std::move(key), handle) ==
                        IdentityInsertResult::conflict) {
     throw std::logic_error("conflicting transient fact identity");
   }
-  cache_resident_identity(resident_identity_handles_, resident_key, handle);
+  cache_identity(kind, cache_key, handle);
 }
 
 auto FactBatchRecorder::identity_entries(FactIdentityKind kind) const
@@ -985,17 +1014,16 @@ void FactBatchRecorder::set_partition(
           FactIdentityKind::file,
           file_path_identity_key(path, current_partition_.configuration),
           *transient_file_handle);
-      if (!identity_index_->lookup(
-              FactIdentityKind::file,
-              file_source_identity_key(path,
-                                       current_partition_.configuration))) {
+      if (!lookup_identity(FactIdentityKind::file,
+                           file_source_identity_key(
+                               path, current_partition_.configuration))) {
         bind_identity(
             FactIdentityKind::file,
             file_source_identity_key(path, current_partition_.configuration),
             *transient_file_handle);
       }
-      if (!identity_index_->lookup(FactIdentityKind::file,
-                                   file_unscoped_identity_key(path))) {
+      if (!lookup_identity(FactIdentityKind::file,
+                           file_unscoped_identity_key(path))) {
         bind_identity(FactIdentityKind::file, file_unscoped_identity_key(path),
                       *transient_file_handle);
       }
@@ -1005,7 +1033,7 @@ void FactBatchRecorder::set_partition(
         FactIdentityKind::file,
         file_path_identity_key(path, current_partition_.configuration),
         natural_handle);
-    if (!identity_index_->lookup(
+    if (!lookup_identity(
             FactIdentityKind::file,
             file_source_identity_key(path, current_partition_.configuration))) {
       bind_identity(
@@ -1013,8 +1041,8 @@ void FactBatchRecorder::set_partition(
           file_source_identity_key(path, current_partition_.configuration),
           natural_handle);
     }
-    if (!identity_index_->lookup(FactIdentityKind::file,
-                                 file_unscoped_identity_key(path))) {
+    if (!lookup_identity(FactIdentityKind::file,
+                         file_unscoped_identity_key(path))) {
       bind_identity(FactIdentityKind::file, file_unscoped_identity_key(path),
                     natural_handle);
     }
@@ -1044,15 +1072,14 @@ auto FactBatchRecorder::partition_for_symbol(const SymbolRecord &symbol) const
         file_path_identity_key(symbol.file, result.configuration);
     const auto source_key =
         file_source_identity_key(symbol.file, result.configuration);
-    if (const auto handle =
-            identity_index_->lookup(FactIdentityKind::file, path_key)) {
+    if (const auto handle = lookup_identity(FactIdentityKind::file, path_key)) {
       result = partition_for_file_handle(*handle);
-    } else if (const auto handle = identity_index_->lookup(
-                   FactIdentityKind::file, source_key)) {
+    } else if (const auto handle =
+                   lookup_identity(FactIdentityKind::file, source_key)) {
       result = partition_for_file_handle(*handle);
-    } else if (const auto handle = identity_index_->lookup(
-                   FactIdentityKind::file,
-                   file_unscoped_identity_key(symbol.file))) {
+    } else if (const auto handle =
+                   lookup_identity(FactIdentityKind::file,
+                                   file_unscoped_identity_key(symbol.file))) {
       result = partition_for_file_handle(*handle);
     } else {
       result.file =
@@ -1399,18 +1426,18 @@ auto FactBatchRecorder::mint_symbol(const MintRequest &request)
 auto FactBatchRecorder::file_id_for_path(const std::string &path)
     -> std::optional<std::int64_t> {
   counters_.note("lookup_file");
-  if (const auto handle = identity_index_->lookup(
+  if (const auto handle = lookup_identity(
           FactIdentityKind::file,
           file_path_identity_key(path, current_partition_.configuration))) {
     return handle;
   }
-  if (const auto handle = identity_index_->lookup(
+  if (const auto handle = lookup_identity(
           FactIdentityKind::file,
           file_source_identity_key(path, current_partition_.configuration))) {
     return handle;
   }
-  return identity_index_->lookup(FactIdentityKind::file,
-                                 file_unscoped_identity_key(path));
+  return lookup_identity(FactIdentityKind::file,
+                         file_unscoped_identity_key(path));
 }
 
 auto FactBatchRecorder::type_arg_candidates(const std::string &name,
@@ -1512,8 +1539,7 @@ auto FactBatchRecorder::intern_type_node(const TypeNodeRecord &node)
   const TypeNaturalKey key{.partition = current_partition_,
                            .type_key = node.type_key};
   const std::string stable = "type:" + key.stable_string();
-  if (const auto found =
-          identity_index_->lookup(FactIdentityKind::type, stable)) {
+  if (const auto found = lookup_identity(FactIdentityKind::type, stable)) {
     counters_.note("intern_type_node", 1);
     return *found;
   }
