@@ -143,6 +143,7 @@ struct SpillableIdentityIndex::Impl {
   std::uint64_t resident_size = 0;
   std::uint64_t total_size = 0;
   std::uint64_t total_entries = 0;
+  std::uint64_t compaction_serial = 0;
 
   explicit Impl(SpillableIdentityIndexOptions value)
       : options(std::move(value)) {}
@@ -239,7 +240,12 @@ struct SpillableIdentityIndex::Impl {
                               merged[{kind, std::move(key)}] = handle;
                             });
     }
-    const auto path = directory / "run-compacted.bin";
+    // Do not reuse the current compacted path: it may already be one of the
+    // runs being replaced, and removing the old runs would remove the new
+    // file as well.
+    const auto path = directory / ("run-compacted-" +
+                                   std::to_string(compaction_serial++) +
+                                   ".bin");
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     output.write(kMagic.data(), static_cast<std::streamsize>(kMagic.size()));
     write_u64(output, merged.size());

@@ -1,8 +1,10 @@
 #include "ast/fact_batch.hpp"
+#include "ast/spillable_fact_buffer.hpp"
 
 #include "ast/kind_map.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <iterator>
 #include <ranges>
 #include <stdexcept>
@@ -623,7 +625,56 @@ FactBatchRecorder::FactBatchRecorder(
     const CollisionSafeHandleIndex::Hasher &primary_hasher)
     : producer_(std::move(producer)), symbol_handles_(primary_hasher),
       edge_handles_(primary_hasher), type_handles_(primary_hasher),
-      definition_handles_(primary_hasher), file_handles_(primary_hasher) {}
+      definition_handles_(primary_hasher), file_handles_(primary_hasher) {
+  set_extraction_limits({});
+}
+
+FactBatchRecorder::~FactBatchRecorder() = default;
+
+auto FactBatchRecorder::fact_payload_spilled() const -> bool {
+  return fact_payload_ != nullptr && fact_payload_->spilled();
+}
+
+auto FactBatchRecorder::identity_index_spilled() const -> bool {
+  return identity_index_.spilled();
+}
+
+void FactBatchRecorder::set_extraction_limits(ExtractionFactLimits limits) {
+  extraction_limits_ = std::move(limits);
+  identity_index_ = SpillableIdentityIndex{
+      {.max_resident_identity_bytes =
+           extraction_limits_.max_resident_identity_bytes,
+       .max_identity_entries = extraction_limits_.max_identity_entries,
+       .max_total_bytes = extraction_limits_.max_total_bytes,
+       .spill_directory = extraction_limits_.spill_directory}};
+  const auto encode = [](const std::string &value) {
+    std::vector<std::byte> bytes(value.size());
+    if (!value.empty()) {
+      std::memcpy(bytes.data(), value.data(), value.size());
+    }
+    return bytes;
+  };
+  const auto decode = [](std::span<const std::byte> bytes) {
+    return std::string(reinterpret_cast<const char *>(bytes.data()),
+                       bytes.size());
+  };
+  fact_payload_ = std::make_unique<SpillableFactBuffer<std::string>>(
+      SpillableFactBufferOptions{
+          .family = FactFamily::symbols,
+          .spill_threshold_bytes = extraction_limits_.spill_threshold_bytes,
+          .max_total_bytes = extraction_limits_.max_total_bytes,
+          .spill_directory = extraction_limits_.spill_directory},
+      encode, decode);
+}
+
+void FactBatchRecorder::note_identity(FactIdentityKind kind, std::string key,
+                                      std::int64_t handle) {
+  const IdentityInsertResult result =
+      identity_index_.insert(kind, std::move(key), handle);
+  if (result == IdentityInsertResult::conflict) {
+    throw std::logic_error("conflicting transient fact identity");
+  }
+}
 
 void FactBatchRecorder::set_completeness(FactCompleteness completeness) {
   completeness_ = completeness;
@@ -641,6 +692,8 @@ void FactBatchRecorder::set_partition(
   const std::string path = current_partition_.file.portable_path();
   const std::int64_t natural_handle = file_handles_.find_or_insert(
       "file:" + current_partition_.stable_string());
+  note_identity(FactIdentityKind::file,
+                "file:" + current_partition_.stable_string(), natural_handle);
   if (!path.empty()) {
     file_handles_by_path_[path] = natural_handle;
   }
@@ -723,6 +776,10 @@ void FactBatchRecorder::emit(const SymbolRecord &symbol) {
   const SymbolNaturalKey key = natural_key(symbol, partition);
   const std::int64_t id =
       symbol_handles_.find_or_insert("symbol:" + key.stable_string());
+  note_identity(FactIdentityKind::symbol, "symbol:" + key.stable_string(), id);
+  if (fact_payload_) {
+    static_cast<void>(fact_payload_->append(stable_symbol_record_key(symbol)));
+  }
   const std::size_t position = symbols_.size();
   symbols_.push_back({.partition = partition, .record = symbol});
   symbol_positions_by_id_[id].push_back(position);
@@ -901,6 +958,7 @@ auto FactBatchRecorder::defer_external_symbol(
     return found->second;
   }
   reference.handle = symbol_handles_.find_or_insert("external:" + key);
+  note_identity(FactIdentityKind::symbol, "external:" + key, reference.handle);
   external_ids_by_key_.emplace(key, reference.handle);
   pending_symbol_references_.push_back(std::move(reference));
   counters_.note("defer_external_symbol");
@@ -1063,9 +1121,12 @@ auto FactBatchRecorder::add_edge(const EdgeRecord &edge) -> std::int64_t {
   if (found != edge_positions_by_key_.end()) {
     relations_[found->second].record.count += edge.count;
     counters_.note("add_edge", 1);
-    return edge_handles_.find_or_insert("edge:" + natural);
+    const auto handle = edge_handles_.find_or_insert("edge:" + natural);
+    note_identity(FactIdentityKind::relation, "edge:" + natural, handle);
+    return handle;
   }
   const std::int64_t id = edge_handles_.find_or_insert("edge:" + natural);
+  note_identity(FactIdentityKind::relation, "edge:" + natural, id);
   const std::size_t position = relations_.size();
   edge_positions_by_key_.emplace(natural, position);
   relations_.push_back({.partition = current_partition_, .record = edge});
@@ -1081,7 +1142,9 @@ auto FactBatchRecorder::ensure_edge(const EdgeRecord &edge) -> std::int64_t {
       current_partition_.stable_string() + edge_key(edge);
   if (edge_positions_by_key_.contains(natural)) {
     counters_.note("ensure_edge");
-    return edge_handles_.find_or_insert("edge:" + natural);
+    const auto handle = edge_handles_.find_or_insert("edge:" + natural);
+    note_identity(FactIdentityKind::relation, "edge:" + natural, handle);
+    return handle;
   }
   const EdgeRecord single{.src_id = edge.src_id,
                           .dst_id = edge.dst_id,
@@ -1125,6 +1188,7 @@ auto FactBatchRecorder::intern_type_node(const TypeNodeRecord &node)
     return *found;
   }
   const std::int64_t id = type_handles_.find_or_insert(stable);
+  note_identity(FactIdentityKind::type, stable, id);
   type_nodes_.push_back({.partition = current_partition_, .record = node});
   counters_.note("intern_type_node");
   return id;
@@ -1173,6 +1237,7 @@ auto FactBatchRecorder::get_or_create_definition(
   }
   const std::int64_t id =
       definition_handles_.find_or_insert("definition:" + natural);
+  note_identity(FactIdentityKind::definition, "definition:" + natural, id);
   definition_ids_by_key_.emplace(natural, id);
   definition_partitions_by_id_.emplace(id, partition);
   definitions_.push_back({.partition = partition,

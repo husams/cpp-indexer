@@ -13,6 +13,7 @@
 #include <cstdint>
 
 #include "ast/fact_batch.hpp"
+#include "ast/fact_batch_artifact.hpp"
 #include "ast/fact_records.hpp"
 #include "ast/header_stats.hpp" // HeaderStats
 #include "ast/include_facts.hpp"
@@ -110,6 +111,9 @@ struct IndexSessionMetrics {
 // it only through FactBatchWriter after rebuilding the source validator.
 struct ExtractedFactPublication {
   FactBatch batch;
+  ExtractedFactPayload payload;
+  std::shared_ptr<const FactBatchArtifact> artifact;
+  ExtractionFactLimits fact_limits;
   OwnedHeaderRoutePlan route_plan;
   std::string translation_unit;
   std::string expected_generation;
@@ -151,6 +155,9 @@ struct IndexOneOutcome {
   std::vector<IndexPassMetrics> pass_metrics;
   std::size_t registered_whole_tu_traversal_budget = 0;
   std::size_t observed_whole_tu_traversals = 0;
+  std::size_t statement_bodies_walked = 0;
+  bool fact_payload_spilled = false;
+  bool identity_index_spilled = false;
   std::vector<EvidenceRecord> evidence;
   std::optional<ExtractedFactPublication> publication;
   // Preprocessor-observed dependency evidence: every include directive as
@@ -202,8 +209,8 @@ enum class IndexFailurePoint : std::uint8_t {
   adapter,
   partial_transform,
   commit,
-  // The seven phase boundaries of the fused two-root pipeline, in publication
-  // order. See cidx::storage::FailurePoint for what each one brackets.
+  // The phase boundaries of the routed translation-unit pipeline, in
+  // publication order. See cidx::storage::FailurePoint for each bracket.
   symbol_capture_complete,
   declaration_replay,
   definition_replay,
@@ -231,6 +238,7 @@ struct ExtractionControl {
   // This translation unit's position in the legacy apply order. Only meaningful
   // with `claims`.
   std::size_t rank = 0;
+  ExtractionFactLimits fact_limits{};
 };
 
 IndexOneOutcome

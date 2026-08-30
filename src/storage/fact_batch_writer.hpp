@@ -2,6 +2,7 @@
 #pragma once
 
 #include "ast/fact_batch.hpp"
+#include "ast/fact_batch_artifact.hpp"
 #include "ast/owned_header_plan.hpp"
 #include "storage/records.hpp"
 
@@ -160,6 +161,7 @@ struct FactBatchWriterResult {
 
 struct FactBatchWriterWindowItem {
   const ast::FactBatch *batch = nullptr;
+  std::shared_ptr<const ast::FactBatchArtifact> artifact;
   FactBatchPublicationContext context;
   std::uint64_t approximate_bytes = 0;
 };

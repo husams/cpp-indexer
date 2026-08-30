@@ -58,6 +58,8 @@ PY
   INDEXER_CACHE="$ws/cache" "$binary" import --db "$ws" --name fixture >/dev/null
   INDEXER_CACHE="$ws/cache" "$binary" index --jobs "$jobs" >/dev/null
   INDEXER_CACHE="$ws/cache" "$binary" resolve >/dev/null
+  # dump_layer0.sh already canonicalizes ordinary fixture paths; this final
+  # normalization also covers the newly added fixture's owned-header path.
   "$dump" "$ws/cache/index.db" |
     sed -E 's#([^[:space:]()]*/)?single_traversal_fact_extraction\.cpp#single_traversal_fact_extraction.cpp#g'
 }

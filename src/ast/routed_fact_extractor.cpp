@@ -36,7 +36,6 @@ bool RoutedFactExtractor::TraverseDecl(clang::Decl *decl) {
   }
   const Routing routing = routing_for(decl);
   routings_.push_back(routing);
-  begin_decl(decl);
   try {
     const bool result = RecursiveASTVisitor::TraverseDecl(decl);
     end_decl();
@@ -86,6 +85,9 @@ bool RoutedFactExtractor::VisitNamedDecl(clang::NamedDecl *decl) {
   if (declarations_ != nullptr) {
     declarations_->VisitNamedDecl(decl);
   }
+  // The namespace symbol is emitted by the callbacks above. Resolve its
+  // scope only afterwards so a first-seen namespace can own its children.
+  begin_decl(decl);
   return true;
 }
 

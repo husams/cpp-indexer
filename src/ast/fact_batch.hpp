@@ -3,9 +3,11 @@
 
 #include "ast/fact_emitters.hpp"
 #include "ast/fact_identity.hpp"
+#include "ast/spillable_identity_index.hpp"
 
 #include <algorithm>
 #include <cstdint>
+#include <filesystem>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -19,6 +21,8 @@
 #include <vector>
 
 namespace cidx::ast {
+
+template <typename Record> class SpillableFactBuffer;
 
 class FactBatchArtifactCodec;
 
@@ -73,6 +77,17 @@ struct FileFactPartition {
   FactPartitionKey key;
   // Each index addresses the corresponding immutable FactRecords vector.
   std::map<FactFamily, std::vector<std::size_t>> members;
+};
+
+// Resource limits shared by the extractor's fact payload and its transient
+// natural-key indexes.  The defaults are deliberately bounded; tests may set
+// a smaller limit to force the same spill path used by production workers.
+struct ExtractionFactLimits {
+  std::uint64_t spill_threshold_bytes = 64ULL * 1024ULL * 1024ULL;
+  std::uint64_t max_total_bytes = 512ULL * 1024ULL * 1024ULL;
+  std::uint64_t max_resident_identity_bytes = 32ULL * 1024ULL * 1024ULL;
+  std::uint64_t max_identity_entries = 1'000'000ULL;
+  std::filesystem::path spill_directory;
 };
 
 // A cross-translation-unit symbol identity that extraction could not answer
@@ -225,7 +240,14 @@ public:
   explicit FactBatchRecorder(std::string producer = {},
                              const CollisionSafeHandleIndex::Hasher
                                  &primary_hasher = stable_fact_hash);
+  ~FactBatchRecorder() override;
 
+  FactBatchRecorder(const FactBatchRecorder &) = delete;
+  auto operator=(const FactBatchRecorder &) -> FactBatchRecorder & = delete;
+  FactBatchRecorder(FactBatchRecorder &&) = delete;
+  auto operator=(FactBatchRecorder &&) -> FactBatchRecorder & = delete;
+
+  void set_extraction_limits(ExtractionFactLimits limits);
   void set_completeness(FactCompleteness completeness);
   void set_deferred_external_identity(DeferredExternalIdentity deferral);
   void set_partition(
@@ -298,6 +320,8 @@ public:
   [[nodiscard]] auto batch() const -> FactBatch { return snapshot(); }
   [[nodiscard]] auto canonical_batch() const -> FactBatch;
   [[nodiscard]] auto counters() const -> const FactBatchOperationCounters &;
+  [[nodiscard]] auto fact_payload_spilled() const -> bool;
+  [[nodiscard]] auto identity_index_spilled() const -> bool;
   [[nodiscard]] auto pending_presentation_intents() const
       -> std::vector<PresentationIntent> {
     std::vector<PresentationIntent> result;
@@ -354,6 +378,8 @@ private:
                     const std::optional<std::string> &identity_source,
                     bool allow_deferral) -> std::optional<std::int64_t>;
   [[nodiscard]] static auto edge_key(const EdgeRecord &edge) -> std::string;
+  void note_identity(FactIdentityKind kind, std::string key,
+                     std::int64_t handle);
   [[nodiscard]] auto build_batch(bool canonical) const -> FactBatch;
   void append_symbol_records(FactBatch::Data &data, Memberships &memberships,
                              bool canonical) const;
@@ -424,6 +450,9 @@ private:
   std::map<std::int64_t, std::string> display_names_;
   std::uint64_t next_emission_order_ = 0;
   FactBatchOperationCounters counters_;
+  ExtractionFactLimits extraction_limits_;
+  SpillableIdentityIndex identity_index_;
+  std::unique_ptr<SpillableFactBuffer<std::string>> fact_payload_;
 };
 
 } // namespace cidx::ast

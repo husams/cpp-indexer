@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 namespace cidx::ast {
@@ -133,6 +134,13 @@ private:
   friend class FactBatchArtifactCodec;
   friend class FactBatchArtifactInput;
 };
+
+// The worker-to-writer transport can retain either the in-memory view used by
+// the legacy writer or the canonical spill-backed wire artifact.  Keeping the
+// artifact in the payload prevents byte accounting from serializing and then
+// discarding a second copy.
+using ExtractedFactPayload =
+    std::variant<FactBatch, std::shared_ptr<const FactBatchArtifact>>;
 
 struct FactBatchArtifactDiagnostic {
   FactBatchArtifactErrorCode code = FactBatchArtifactErrorCode::corrupt;

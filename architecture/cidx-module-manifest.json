@@ -1056,28 +1056,6 @@
       "removalIssue": "HSE-61"
     },
     {
-      "source": "src/ast/spillable_fact_buffer.hpp",
-      "fromModule": "extraction.ast",
-      "toModule": "external:filesystem",
-      "include": "filesystem",
-      "boundary": "extraction -> filesystem compatibility",
-      "owner": "Platform M1 extraction maintainers",
-      "rationale": "Worker-private fact segments use standard filesystem paths until the workspace filesystem port is shared.",
-      "expiresOn": "2026-12-31",
-      "removalIssue": "HSE-61"
-    },
-    {
-      "source": "src/ast/spillable_identity_index.hpp",
-      "fromModule": "extraction.ast",
-      "toModule": "external:filesystem",
-      "include": "filesystem",
-      "boundary": "extraction -> filesystem compatibility",
-      "owner": "Platform M1 extraction maintainers",
-      "rationale": "Worker-private identity runs use standard filesystem paths until the workspace filesystem port is shared.",
-      "expiresOn": "2026-12-31",
-      "removalIssue": "HSE-61"
-    },
-    {
       "source": "src/astgraph/astgraph.cpp",
       "fromModule": "analysis.astgraph",
       "toModule": "external:process",

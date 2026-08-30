@@ -2607,6 +2607,7 @@ TEST_SUITE("clang") {
     CHECK(registered_whole_tu_traversal_budget == 1);
     CHECK(outcome.observed_whole_tu_traversals == 1);
     CHECK(outcome.registered_whole_tu_traversal_budget == 1);
+    CHECK(outcome.statement_bodies_walked == 1);
     const std::vector<std::vector<cidx::ast::FrontendCapability>> capabilities{
         {cidx::ast::FrontendCapability::ast},
         {cidx::ast::FrontendCapability::ast,
@@ -2712,6 +2713,47 @@ TEST_SUITE("clang") {
           std::vector<std::string>{"presentation_intents"});
     CHECK(presentation->produced_fact_families ==
           std::vector<std::string>{"display_names"});
+  }
+
+  TEST_CASE("single rooted extraction walks each supported body once") {
+    const std::string dir = make_temp_dir();
+    const std::string source = dir + "/body_constructs.cpp";
+    write_file(source,
+               "int duplicate();\n"
+               "int duplicate() { return 1; }\n"
+               "template <typename T> T templ(T value) { return value; }\n"
+               "struct Holder { int member(int); };\n"
+               "int Holder::member(int value) { return value; }\n"
+               "int outer() {\n"
+               "  struct Local { int run() { return 1; } } local;\n"
+               "  auto lambda = []() { return 2; };\n"
+               "  return duplicate() + templ(1) + local.run() + lambda();\n"
+               "}\n");
+
+    Storage db(":memory:");
+    db.add_component("body-constructs", dir);
+    const int64_t file_id = db.add_file_path(
+        source, std::nullopt, std::nullopt,
+        std::vector<std::string>{"-std=c++23"}, std::string("clang++"));
+    const auto file = db.get_file_by_id(file_id);
+    REQUIRE(file.has_value());
+    db.stamp_graph_resolved();
+    db.stamp_index_identity();
+
+    cidx::ast::IndexSession session(db);
+    const cidx::ast::ExtractionControl control{
+        .publish = true,
+        .fact_limits = {.spill_threshold_bytes = 1,
+                        .max_total_bytes = 8ULL * 1024ULL * 1024ULL,
+                        .max_resident_identity_bytes = 4096,
+                        .max_identity_entries = 1}};
+    const auto outcome = cidx::ast::run_index_one(
+        db, session, *file, source, true, control);
+    REQUIRE(!outcome.parse_failed);
+    CHECK(outcome.observed_whole_tu_traversals == 1);
+    CHECK(outcome.statement_bodies_walked == 5);
+    CHECK(outcome.fact_payload_spilled);
+    CHECK(outcome.identity_index_spilled);
   }
 
   // The rooted cost stops depending on how many owned headers a translation

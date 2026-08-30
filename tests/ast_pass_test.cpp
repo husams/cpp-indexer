@@ -9,7 +9,6 @@
 #include "ast/location.hpp"
 #include "ast/namespace_use_visitor.hpp"
 #include "ast/pass_registry.hpp"
-#include "ast/routed_fact_extractor.hpp"
 #include "ast/statement_edge_visitor.hpp"
 #include "ast/symbol_emitter.hpp"
 #include "ast/symbol_visitor.hpp"

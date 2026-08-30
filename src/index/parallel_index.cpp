@@ -100,13 +100,21 @@ private:
 // Reorder pressure is based on the immutable bytes that would cross the
 // worker-to-writer boundary, not a record-count estimate. The artifact is
 // canonical, so this measurement is deterministic across worker counts.
-[[nodiscard]] auto batch_bytes(const ast::IndexOneOutcome &outcome)
-    -> std::uint64_t {
-  if (!outcome.publication) {
+[[nodiscard]] auto batch_bytes(ast::IndexOneOutcome &outcome) -> std::uint64_t {
+  if (!outcome.publication || outcome.publication->artifact) {
     return 0;
   }
-  return ast::encode_fact_batch_artifact(outcome.publication->batch)
-      .byte_size();
+  auto artifact = std::make_shared<const ast::FactBatchArtifact>(
+      ast::encode_fact_batch_artifact(
+          outcome.publication->batch,
+          {.spill_threshold_bytes =
+               outcome.publication->fact_limits.spill_threshold_bytes,
+           .spill_directory = outcome.publication->fact_limits.spill_directory,
+           .max_artifact_bytes =
+               outcome.publication->fact_limits.max_total_bytes}));
+  outcome.publication->artifact = artifact;
+  outcome.publication->payload = artifact;
+  return artifact->byte_size();
 }
 
 } // namespace
@@ -216,6 +224,7 @@ auto run_parallel_index(cidx::Storage &db, const std::string &index_path,
           outcome.publication) {
         writer_positions.push_back(position);
         writer_items.push_back({.batch = &outcome.publication->batch,
+                                .artifact = outcome.publication->artifact,
                                 .context = publication_context(outcome),
                                 .approximate_bytes = result.bytes});
       } else if (!outcome.parse_failed && !outcome.source_changed) {

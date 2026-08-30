@@ -3014,7 +3014,7 @@ auto FactBatchWriter::apply_window(
   window.report.windows_started = 1;
   window.report.window_items = items.size();
   for (const FactBatchWriterWindowItem &item : items) {
-    if (item.batch == nullptr) {
+    if (item.batch == nullptr && !item.artifact) {
       throw std::invalid_argument("FactBatchWriter window item has no batch");
     }
     window.report.window_bytes += item.approximate_bytes;
@@ -3025,7 +3025,18 @@ auto FactBatchWriter::apply_window(
     for (const FactBatchWriterWindowItem &item : items) {
       FactBatchPublicationContext replay = item.context;
       replay.failure = FactBatchWriterFailurePoint::none;
-      FactBatchWriterResult result = apply(*item.batch, replay);
+      std::optional<ast::FactBatch> decoded;
+      if (item.batch == nullptr) {
+        const auto decoded_result =
+            ast::decode_fact_batch_artifact(*item.artifact);
+        if (!decoded_result.usable()) {
+          throw StorageError(
+              "FactBatch artifact could not be decoded for replay");
+        }
+        decoded = *decoded_result.batch;
+      }
+      FactBatchWriterResult result =
+          apply(item.batch != nullptr ? *item.batch : *decoded, replay);
       merge_report(window.report, result.report);
       ++window.report.translation_units_replayed;
       window.results.push_back(std::move(result));
@@ -3051,9 +3062,18 @@ auto FactBatchWriter::apply_window(
     bool inject_commit_failure = false;
     for (std::size_t index = 0; index < items.size(); ++index) {
       const FactBatchWriterWindowItem &item = items[index];
-      FactBatchWriterResult result =
-          apply_in_transaction(*item.batch, item.context,
-                               TemporaryRowPolicy::shared_window, index + 1);
+      std::optional<ast::FactBatch> decoded;
+      if (item.batch == nullptr) {
+        const auto decoded_result =
+            ast::decode_fact_batch_artifact(*item.artifact);
+        if (!decoded_result.usable()) {
+          throw StorageError("FactBatch artifact could not be decoded");
+        }
+        decoded = *decoded_result.batch;
+      }
+      FactBatchWriterResult result = apply_in_transaction(
+          item.batch != nullptr ? *item.batch : *decoded, item.context,
+          TemporaryRowPolicy::shared_window, index + 1);
       inject_commit_failure =
           inject_commit_failure ||
           item.context.failure == FactBatchWriterFailurePoint::commit;

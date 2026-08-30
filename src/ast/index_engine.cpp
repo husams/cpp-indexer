@@ -5,6 +5,7 @@
 #include "ast/declaration_edge_visitor.hpp"
 #include "ast/display_name_rewrite.hpp"
 #include "ast/fact_batch.hpp"
+#include "ast/fact_batch_artifact.hpp"
 #include "ast/function_definition_visitor.hpp"
 #include "ast/include_facts.hpp"
 #include "ast/location.hpp"
@@ -12,6 +13,7 @@
 #include "ast/owned_header_plan.hpp"
 #include "ast/pass_registry.hpp"
 #include "ast/routed_fact_extractor.hpp"
+#include "ast/spillable_fact_buffer.hpp"
 #include "ast/symbol_visitor.hpp"
 
 #include "catalogs/generated_catalog.hpp"
@@ -176,6 +178,7 @@ struct EngineState {
   // contract of asking the committed database directly.
   cidx::index::HeaderClaimOracle *claims = nullptr;
   std::size_t rank = 0;
+  ExtractionFactLimits fact_limits;
   // Set once the oracle has answered, so a translation unit that fails after
   // discovery does not release the ordered gate twice.
   bool claimed = false;
@@ -237,6 +240,7 @@ public:
       : context_(context), state_(state), db_(*state.db),
         recorder_("production-index"), symbol_emitter_(recorder_),
         tu_(context.getTranslationUnitDecl()) {
+    recorder_.set_extraction_limits(state.fact_limits);
     // Cross-translation-unit symbol identity is NOT resolved here. It used to
     // be: a batch-local miss asked the authoritative database for the symbol
     // mid-parse. That made identity depend on what other translation units had
@@ -267,6 +271,8 @@ public:
     }
     record_pass_metrics(registry.run(plan, &session));
     state_.batch = recorder_.canonical_batch();
+    state_.out->fact_payload_spilled = recorder_.fact_payload_spilled();
+    state_.out->identity_index_spilled = recorder_.identity_index_spilled();
     update_output_stats(*state_.batch);
     state_.out->evidence = state_.batch->records().evidence;
   }
@@ -431,6 +437,8 @@ private:
                    PassScope::owned_header, TraversalMode::declaration,
                    FactCompleteness::complete, FactTrust::trusted, 0),
         [this](PassExecutionContext & /*execution*/) -> void {
+          // Keep this pass as the lifecycle/failure anchor for the former
+          // definition boundary; the direct extractor owns the traversal.
           inject(cidx::storage::FailurePoint::definition_replay);
         });
     registry.register_pass(
@@ -454,6 +462,8 @@ private:
                    TraversalMode::declaration, FactCompleteness::complete,
                    FactTrust::trusted, 0),
         [this](PassExecutionContext & /*execution*/) -> void {
+          // Keep this pass as the namespace lifecycle/failure anchor; it does
+          // not perform a second rooted traversal.
           inject(cidx::storage::FailurePoint::namespace_replay);
         });
     auto header_association = descriptor(
@@ -1069,8 +1079,6 @@ private:
     profile::add_counter("root_traverse_decl_calls");
     extractor.TraverseDecl(tu_);
     inject(cidx::storage::FailurePoint::symbol_capture_complete);
-    inject(cidx::storage::FailurePoint::definition_replay);
-    inject(cidx::storage::FailurePoint::namespace_replay);
   }
 
   void run_statement_stage(FunctionDefinitionVisitor &visitor,
@@ -1087,6 +1095,7 @@ private:
     BudgetedDefinitionScopeEmitter definitions(
         static_cast<DefinitionScopeEmitter &>(recorder_), execution.metrics);
     visitor.run_statement_pass(ports, &execution.metrics, &definitions);
+    state_.out->statement_bodies_walked = visitor.statement_body_count();
     static_cast<void>(edge_ids);
     static_cast<void>(definition_ids);
   }
@@ -2329,6 +2338,9 @@ IndexOneOutcome finalize_index_one(
           state.route_plan.routes().front().translation_unit;
       out.publication = ExtractedFactPublication{
           .batch = *state.batch,
+          .payload = *state.batch,
+          .artifact = nullptr,
+          .fact_limits = state.fact_limits,
           .route_plan = state.route_plan,
           .translation_unit = translation_unit,
           .expected_generation = state.route_plan.generation(),
@@ -2425,6 +2437,7 @@ IndexOneOutcome run_index_one(cidx::Storage &db, IndexSession &session,
   state.normalized_config_id = session.impl_->configuration_id(descriptor);
   state.claims = control.claims;
   state.rank = control.rank;
+  state.fact_limits = control.fact_limits;
 
   if (profiling) {
     profile::note_transaction_begin();
