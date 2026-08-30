@@ -1089,6 +1089,59 @@ auto read_fact_records(FactBatchArtifactInput &reader) -> FactRecords {
   return records;
 }
 
+template <typename T, typename Read>
+void discard_records(FactBatchArtifactInput &reader, Read read) {
+  const auto count = reader.count();
+  for (std::uint64_t index = 0; index < count; ++index) {
+    static_cast<void>(read(reader));
+  }
+}
+
+auto read_fact_records_family(FactBatchArtifactInput &reader,
+                              FactFamily selected) -> FactRecords {
+  FactRecords records;
+  const auto read = [&]<typename T>(std::vector<T> &destination, auto reader_fn,
+                                    FactFamily family) {
+    if (family == selected) {
+      destination = read_records<T>(reader, reader_fn);
+    } else {
+      discard_records<T>(reader, reader_fn);
+    }
+  };
+  read(records.symbols, read_symbol_record, FactFamily::symbols);
+  read(records.declaration_sites, read_declaration_site,
+       FactFamily::declaration_sites);
+  read(records.relations, read_edge, FactFamily::relations);
+  read(records.edge_sites, read_edge_site, FactFamily::edge_sites);
+  read(records.call_args, read_call_arg, FactFamily::call_arguments);
+  read(records.template_params, read_template_param,
+       FactFamily::template_parameters);
+  read(records.template_args, read_template_arg,
+       FactFamily::template_arguments);
+  read(records.type_nodes, read_type_node, FactFamily::types);
+  read(records.type_edges, read_type_edge, FactFamily::type_edges);
+  read(records.parameters, read_parameter_fact, FactFamily::parameters);
+  read(records.symbol_types, read_symbol_type, FactFamily::symbol_types);
+  read(records.definitions, read_definition, FactFamily::definitions);
+  read(records.definition_edges, read_definition_edge,
+       FactFamily::definition_edges);
+  read(records.includes, read_include, FactFamily::includes);
+  read(records.macros, read_macro, FactFamily::macros);
+  read(records.diagnostics, read_diagnostic, FactFamily::diagnostics);
+  read(records.evidence, read_evidence, FactFamily::evidence);
+  read(records.presentation_intents, read_presentation,
+       FactFamily::presentation_intents);
+  read(records.lifecycle_cleanup, read_cleanup, FactFamily::lifecycle_cleanup);
+  read(records.applicability, read_applicability, FactFamily::applicability);
+  if (selected == FactFamily::symbols) {
+    records.symbol_order =
+        read_records<SymbolEmissionMetadata>(reader, read_symbol_order);
+  } else {
+    discard_records<SymbolEmissionMetadata>(reader, read_symbol_order);
+  }
+  return records;
+}
+
 void write_string_map(BinaryWriter &writer,
                       const std::map<std::int64_t, std::string> &values) {
   writer.u64(values.size());
@@ -1476,9 +1529,62 @@ void validate_partitions(const FactRecords &records,
   }
 }
 
+void validate_partition_family(const FactRecords &records,
+                               const std::vector<FileFactPartition> &partitions,
+                               FactFamily family) {
+  const auto size = family_size(records, family);
+  for (const auto &partition : partitions) {
+    const auto members = partition.members.find(family);
+    if (members == partition.members.end()) {
+      continue;
+    }
+    if (std::ranges::any_of(members->second, [size](std::size_t index) {
+          return index >= size;
+        })) {
+      fail(FactBatchArtifactErrorCode::corrupt,
+           "FactBatch partition contains an out-of-range record index");
+    }
+  }
+}
+
 } // namespace
 
 class FactBatchArtifactCodec {
+  [[nodiscard]] static auto make_family_batch(FactBatchArtifactInput &reader,
+                                              const FactBatchArtifactInfo &info,
+                                              std::uint64_t payload_size,
+                                              FactFamily family) -> FactBatch {
+    auto data = std::make_shared<FactBatch::Data>();
+    data->producer = info.producer;
+    data->producer_version = info.producer_version;
+    data->completeness = info.completeness;
+    data->canonical = true;
+    data->records = read_fact_records_family(reader, family);
+    data->partitions = read_partitions(reader);
+    for (auto &partition : data->partitions) {
+      for (auto iterator = partition.members.begin();
+           iterator != partition.members.end();) {
+        if (iterator->first != family) {
+          iterator = partition.members.erase(iterator);
+        } else {
+          ++iterator;
+        }
+      }
+    }
+    data->symbol_keys = read_string_map(reader);
+    data->relation_keys = read_string_map(reader);
+    data->type_keys = read_string_map(reader);
+    data->definition_keys = read_string_map(reader);
+    data->file_keys = read_file_map(reader);
+    data->pending_symbol_references = read_pending_references(reader);
+    if (reader.offset() != payload_size) {
+      fail(FactBatchArtifactErrorCode::corrupt,
+           "FactBatch artifact has unrecognized trailing payload bytes");
+    }
+    validate_partition_family(data->records, data->partitions, family);
+    return FactBatch(std::move(data));
+  }
+
 public:
   [[nodiscard]] static auto
   encode(const FactBatch &batch, const FactBatchArtifactEncodeOptions &options)
@@ -1575,6 +1681,34 @@ public:
     info.byte_size = artifact.storage_.size();
     return {std::move(batch), std::move(info)};
   }
+
+  [[nodiscard]] static auto
+  decode_family(const FactBatchArtifact &artifact, FactFamily family,
+                const FactBatchArtifactCompatibility &compatibility)
+      -> FactBatch {
+    if (!artifact.storage_.valid()) {
+      fail(FactBatchArtifactErrorCode::missing,
+           "FactBatch artifact handle is empty");
+    }
+    if (artifact.storage_.size() > compatibility.limits.max_artifact_bytes) {
+      fail(FactBatchArtifactErrorCode::limit_exceeded,
+           "FactBatch artifact exceeds the configured byte limit");
+    }
+    validate_wire_preamble(artifact.storage_);
+    const auto [payload_size, digest] = verify_footer(artifact.storage_);
+    FactBatchArtifactInput reader(artifact, payload_size, compatibility.limits);
+    std::array<std::byte, kMagic.size()> magic{};
+    reader.read_exact(magic);
+    if (magic != kMagic) {
+      fail(FactBatchArtifactErrorCode::incompatible,
+           "FactBatch artifact wire magic is unsupported");
+    }
+    const auto info = read_info(reader);
+    validate_compatibility(info, compatibility);
+
+    static_cast<void>(digest);
+    return make_family_batch(reader, info, payload_size, family);
+  }
 };
 
 FactBatchArtifact::FactBatchArtifact(util::ImmutableByteArtifact storage)
@@ -1669,6 +1803,12 @@ auto decode_fact_batch_artifact(
     return {.diagnostics = {{.code = FactBatchArtifactErrorCode::corrupt,
                              .message = error.what()}}};
   }
+}
+
+auto decode_fact_batch_artifact_family(
+    const FactBatchArtifact &artifact, FactFamily family,
+    const FactBatchArtifactCompatibility &compatibility) -> FactBatch {
+  return FactBatchArtifactCodec::decode_family(artifact, family, compatibility);
 }
 
 } // namespace cidx::ast

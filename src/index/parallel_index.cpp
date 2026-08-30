@@ -1,5 +1,6 @@
 #include "index/parallel_index.hpp"
 
+#include "ast/fact_batch_artifact.hpp"
 #include "index/header_claims.hpp"
 #include "profile/index_profile.hpp"
 #include "storage/fact_batch_writer.hpp"
@@ -96,24 +97,25 @@ private:
   std::unique_ptr<ast::IndexSession> session_;
 };
 
-// Conservative payload accounting for the reorder buffer. The batch itself is
-// the dominant term; counting records rather than encoding the artifact keeps
-// the budget check off the hot path.
-[[nodiscard]] auto approximate_batch_bytes(const ast::IndexOneOutcome &outcome)
-    -> std::uint64_t {
-  if (!outcome.publication) {
+// Reorder pressure is based on the immutable bytes that would cross the
+// worker-to-writer boundary, not a record-count estimate. The artifact is
+// canonical, so this measurement is deterministic across worker counts.
+[[nodiscard]] auto batch_bytes(ast::IndexOneOutcome &outcome) -> std::uint64_t {
+  if (!outcome.publication || outcome.publication->artifact) {
     return 0;
   }
-  constexpr std::uint64_t kApproximateBytesPerRecord = 512;
-  std::uint64_t records = 0;
-  for (const ast::FileFactPartition &partition :
-       outcome.publication->batch.partitions()) {
-    for (const auto &[family, members] : partition.members) {
-      static_cast<void>(family);
-      records += members.size();
-    }
-  }
-  return records * kApproximateBytesPerRecord;
+  auto artifact = std::make_shared<const ast::FactBatchArtifact>(
+      ast::encode_fact_batch_artifact(
+          outcome.publication->batch,
+          {.metadata = {},
+           .spill_threshold_bytes =
+               outcome.publication->fact_limits.spill_threshold_bytes,
+           .spill_directory = outcome.publication->fact_limits.spill_directory,
+           .max_artifact_bytes =
+               outcome.publication->fact_limits.max_total_bytes}));
+  outcome.publication->artifact = artifact;
+  outcome.publication->payload = artifact;
+  return artifact->byte_size();
 }
 
 } // namespace
@@ -180,7 +182,7 @@ auto run_parallel_index(cidx::Storage &db, const std::string &index_path,
     if (extracted) {
       extracted(rank);
     }
-    const std::uint64_t bytes = approximate_batch_bytes(outcome);
+    const std::uint64_t bytes = batch_bytes(outcome);
     return ParallelResult<ast::IndexOneOutcome>{
         .payload = std::move(outcome), .bytes = bytes, .error = std::nullopt};
   };
@@ -222,9 +224,17 @@ auto run_parallel_index(cidx::Storage &db, const std::string &index_path,
       if (!outcome.parse_failed && !outcome.source_changed &&
           outcome.publication) {
         writer_positions.push_back(position);
-        writer_items.push_back({.batch = &outcome.publication->batch,
-                                .context = publication_context(outcome),
-                                .approximate_bytes = result.bytes});
+        const auto *payload_artifact =
+            std::get_if<std::shared_ptr<const ast::FactBatchArtifact>>(
+                &outcome.publication->payload);
+        const bool artifact_backed = payload_artifact != nullptr &&
+                                     *payload_artifact != nullptr &&
+                                     (*payload_artifact)->spilled();
+        writer_items.push_back(
+            {.batch = artifact_backed ? nullptr : &outcome.publication->batch,
+             .artifact = outcome.publication->artifact,
+             .context = publication_context(outcome),
+             .approximate_bytes = result.bytes});
       } else if (!outcome.parse_failed && !outcome.source_changed) {
         outcome.parse_failed = true;
         if (outcome.error.empty()) {

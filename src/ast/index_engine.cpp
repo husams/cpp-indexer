@@ -5,13 +5,15 @@
 #include "ast/declaration_edge_visitor.hpp"
 #include "ast/display_name_rewrite.hpp"
 #include "ast/fact_batch.hpp"
+#include "ast/fact_batch_artifact.hpp"
 #include "ast/function_definition_visitor.hpp"
 #include "ast/include_facts.hpp"
 #include "ast/location.hpp"
 #include "ast/namespace_use_visitor.hpp"
 #include "ast/owned_header_plan.hpp"
 #include "ast/pass_registry.hpp"
-#include "ast/routed_root_events.hpp"
+#include "ast/routed_fact_extractor.hpp"
+#include "ast/spillable_fact_buffer.hpp"
 #include "ast/symbol_visitor.hpp"
 
 #include "catalogs/generated_catalog.hpp"
@@ -176,6 +178,7 @@ struct EngineState {
   // contract of asking the committed database directly.
   cidx::index::HeaderClaimOracle *claims = nullptr;
   std::size_t rank = 0;
+  ExtractionFactLimits fact_limits;
   // Set once the oracle has answered, so a translation unit that fails after
   // discovery does not release the ordered gate twice.
   bool claimed = false;
@@ -237,6 +240,7 @@ public:
       : context_(context), state_(state), db_(*state.db),
         recorder_("production-index"), symbol_emitter_(recorder_),
         tu_(context.getTranslationUnitDecl()) {
+    recorder_.set_extraction_limits(state.fact_limits);
     // Cross-translation-unit symbol identity is NOT resolved here. It used to
     // be: a batch-local miss asked the authoritative database for the symbol
     // mid-parse. That made identity depend on what other translation units had
@@ -267,6 +271,10 @@ public:
     }
     record_pass_metrics(registry.run(plan, &session));
     state_.batch = recorder_.canonical_batch();
+    state_.out->fact_payload_records_recovered =
+        recorder_.fact_payload_record_count();
+    state_.out->fact_payload_spilled = recorder_.fact_payload_spilled();
+    state_.out->identity_index_spilled = recorder_.identity_index_spilled();
     update_output_stats(*state_.batch);
     state_.out->evidence = state_.batch->records().evidence;
   }
@@ -314,12 +322,6 @@ private:
       }
     }
   }
-
-  // The rooted graph collector's event bound, matching the emitted-fact budget
-  // every extraction pass declares. Overflow raises the named
-  // PassBudgetExceeded diagnostic instead of letting the buffer grow without
-  // limit.
-  static constexpr std::size_t kRoutedGraphEventBudget = 20'000'000;
 
   // Raise the configured fault at a pipeline phase boundary. Without an
   // injector this is a null check, so normal behaviour is unchanged.
@@ -395,10 +397,10 @@ private:
                    {FrontendCapability::ast, FrontendCapability::preprocessor},
                    {"includes"}, {"symbols"}, {"symbols.main"},
                    PassScope::owned_header, TraversalMode::declaration,
-                   FactCompleteness::complete, FactTrust::trusted, 1),
-        [this](PassExecutionContext &execution) -> void {
-          run_routed_symbol_pass(execution);
-          inject(cidx::storage::FailurePoint::symbol_capture_complete);
+                   FactCompleteness::complete, FactTrust::trusted, 0),
+        [this](PassExecutionContext & /*execution*/) -> void {
+          // The direct extractor owns the single rooted walk below; this
+          // provider remains the dependency anchor for lifecycle passes.
         });
   }
 
@@ -426,20 +428,19 @@ private:
             PassScope::owned_header, TraversalMode::declaration,
             FactCompleteness::complete, FactTrust::trusted, 1),
         [this](PassExecutionContext &execution) -> void {
-          collect_routed_graph_events(execution);
-          run_routed_declaration_stage(execution);
+          run_routed_fact_extraction(execution);
           inject(cidx::storage::FailurePoint::declaration_replay);
         });
     registry.register_pass(
-        // Replays the graph collector's recorded stream: a logical pass with
-        // its own provider id, diagnostics and fact families, but no rooted
-        // traversal of its own.
+        // Retain the lifecycle pass id and failure boundary while extraction
+        // itself is owned by the direct rooted pass above.
         descriptor("definitions.headers", {FrontendCapability::ast},
                    {"symbols"}, {"definitions"}, {"declarations.headers"},
                    PassScope::owned_header, TraversalMode::declaration,
                    FactCompleteness::complete, FactTrust::trusted, 0),
-        [this](PassExecutionContext &execution) -> void {
-          routed_definition_visitor_ = collect_routed_definitions(execution);
+        [this](PassExecutionContext & /*execution*/) -> void {
+          // Keep this pass as the lifecycle/failure anchor for the former
+          // definition boundary; the direct extractor owns the traversal.
           inject(cidx::storage::FailurePoint::definition_replay);
         });
     registry.register_pass(
@@ -462,8 +463,9 @@ private:
                    {"statements.headers"}, PassScope::owned_header,
                    TraversalMode::declaration, FactCompleteness::complete,
                    FactTrust::trusted, 0),
-        [this](PassExecutionContext &execution) -> void {
-          run_routed_namespace_stage(execution);
+        [this](PassExecutionContext & /*execution*/) -> void {
+          // Keep this pass as the namespace lifecycle/failure anchor; it does
+          // not perform a second rooted traversal.
           inject(cidx::storage::FailurePoint::namespace_replay);
         });
     auto header_association = descriptor(
@@ -853,18 +855,6 @@ private:
     std::vector<int64_t> definition_ids;
   };
 
-  void run_routed_symbol_pass(PassExecutionContext &execution) {
-    routed_symbol_file_id_ = -1;
-    recorder_.set_identity_translation_unit_config_id(
-        state_.normalized_config_id, main_file_handle_);
-    SymbolVisitor visitor(
-        context_, symbol_emitter_, {}, &execution.metrics,
-        [this](const std::string &path) { return route_symbol_file(path); });
-    execution.metrics.note_whole_tu_traversal();
-    profile::add_counter("root_traverse_decl_calls");
-    visitor.TraverseDecl(tu_);
-  }
-
   // The stable identity of this translation unit's normalized configuration.
   // Used as the owned-header claim key because a configuration ID is transient
   // until the writer mints its row, while this hash is not (S-074).
@@ -1025,17 +1015,6 @@ private:
     return file->second;
   }
 
-  // The same routing answer without route_fact_file's side effect of switching
-  // the fact sink's current file. Recording events is not emitting facts, so
-  // the collector must not move the sink; replay does that through the
-  // visitors' own routers, in emission order.
-  [[nodiscard]] auto route_fact_file_id(const std::string &path) const
-      -> std::optional<int64_t> {
-    const auto file = routed_file_ids_.find(path);
-    return file == routed_file_ids_.end() ? std::nullopt
-                                          : std::optional{file->second};
-  }
-
   void configure_fact_file(int64_t file_id, bool reset) {
     recorder_.set_current_file_id(file_id);
     recorder_.set_identity_translation_unit_config_id(
@@ -1046,60 +1025,62 @@ private:
     }
   }
 
-  // The single rooted graph traversal. It records declaration,
-  // definition-candidate and namespace-scope/use events and emits nothing; the
-  // declaration, definition and namespace stages then replay it in logical
-  // order. Statement bodies are neither traversed nor emitted here - they stay
-  // in the separate statements.main phase, which owns no root budget.
-  void collect_routed_graph_events(PassExecutionContext &execution) {
-    graph_events_.reset();
-    if (!state_.graph_enabled) {
-      return;
+  // The single rooted fact traversal dispatches declaration, definition, and
+  // namespace callbacks live. Statement bodies remain deferred to the
+  // statements.main phase, which owns no additional rooted traversal.
+  void run_routed_fact_extraction(PassExecutionContext &execution) {
+    routed_symbol_file_id_ = -1;
+    routed_fact_file_id_ = -1;
+    recorder_.set_identity_translation_unit_config_id(
+        state_.normalized_config_id, main_file_handle_);
+
+    SymbolVisitor symbols(
+        context_, symbol_emitter_, {}, &execution.metrics,
+        [this](const std::string &path) { return route_symbol_file(path); });
+
+    std::unique_ptr<DeclarationEdgeVisitor> declarations;
+    std::unique_ptr<NamespaceUseVisitor> namespaces;
+    std::unique_ptr<BudgetedDeclarationPassPorts> declaration_ports;
+    std::unique_ptr<BudgetedPresentationIntentEmitter> presentation_intents;
+    std::unique_ptr<BudgetedDefinitionScopeEmitter> definition_scope;
+    std::unique_ptr<BudgetedNamespacePassPorts> namespace_ports;
+    if (state_.graph_enabled) {
+      declaration_ports = std::make_unique<BudgetedDeclarationPassPorts>(
+          static_cast<DeclarationPassPorts &>(recorder_), execution.metrics);
+      presentation_intents =
+          std::make_unique<BudgetedPresentationIntentEmitter>(
+              static_cast<PresentationIntentEmitter &>(recorder_),
+              execution.metrics);
+      definition_scope = std::make_unique<BudgetedDefinitionScopeEmitter>(
+          static_cast<DefinitionScopeEmitter &>(recorder_), execution.metrics);
+      namespace_ports = std::make_unique<BudgetedNamespacePassPorts>(
+          static_cast<NamespacePassPorts &>(recorder_), execution.metrics);
+      declarations = std::make_unique<DeclarationEdgeVisitor>(
+          context_, *declaration_ports, std::string{}, -1,
+          definition_scope.get(), &execution.metrics,
+          presentation_intents.get(),
+          [this](const std::string &path) { return route_fact_file(path); });
+      routed_definition_visitor_ = std::make_unique<FunctionDefinitionVisitor>(
+          context_, static_cast<DeclarationIdentityResolver &>(recorder_),
+          static_cast<DefinitionScopeEmitter &>(recorder_), std::string{}, -1,
+          &execution.metrics,
+          [this](const std::string &path) { return route_fact_file(path); });
+      namespaces = std::make_unique<NamespaceUseVisitor>(
+          context_, *namespace_ports, std::string{}, -1, &execution.metrics,
+          [this](const std::string &path) { return route_fact_file(path); });
+    } else {
+      routed_definition_visitor_.reset();
     }
-    // Bounded by the declared emitted-fact budget of the owning pass and
-    // reported against its id. Metrics are deliberately not wired into the
-    // recorder: every recorded declaration is counted once, by the visitor
-    // that replays it, exactly as the separate root walks counted it.
-    graph_events_ = std::make_unique<RoutedRootEventBuffer>(
+
+    RoutedFactExtractor extractor(
         context_,
-        [this](const std::string &path) { return route_fact_file_id(path); },
-        kRoutedGraphEventBudget, "declarations.headers");
+        [this](const std::string &path) { return route_fact_file(path); },
+        &symbols, declarations.get(), routed_definition_visitor_.get(),
+        namespaces.get());
     execution.metrics.note_whole_tu_traversal();
     profile::add_counter("root_traverse_decl_calls");
-    graph_events_->collect(tu_);
-  }
-
-  void run_routed_declaration_stage(PassExecutionContext &execution) {
-    if (!state_.graph_enabled || graph_events_ == nullptr) {
-      return;
-    }
-    routed_fact_file_id_ = -1;
-    BudgetedDeclarationPassPorts ports(
-        static_cast<DeclarationPassPorts &>(recorder_), execution.metrics);
-    BudgetedPresentationIntentEmitter presentation_intents(
-        static_cast<PresentationIntentEmitter &>(recorder_), execution.metrics);
-    BudgetedDefinitionScopeEmitter definitions(
-        static_cast<DefinitionScopeEmitter &>(recorder_), execution.metrics);
-    DeclarationEdgeVisitor decls(
-        context_, ports, {}, -1, &definitions, &execution.metrics,
-        &presentation_intents,
-        [this](const std::string &path) { return route_fact_file(path); });
-    graph_events_->replay_declarations(decls);
-  }
-
-  auto collect_routed_definitions(PassExecutionContext &execution)
-      -> std::unique_ptr<FunctionDefinitionVisitor> {
-    if (!state_.graph_enabled || graph_events_ == nullptr) {
-      return nullptr;
-    }
-    routed_fact_file_id_ = -1;
-    auto visitor = std::make_unique<FunctionDefinitionVisitor>(
-        context_, static_cast<DeclarationIdentityResolver &>(recorder_),
-        static_cast<DefinitionScopeEmitter &>(recorder_), std::string{}, -1,
-        &execution.metrics,
-        [this](const std::string &path) { return route_fact_file(path); });
-    graph_events_->replay_definitions(*visitor);
-    return visitor;
+    extractor.TraverseDecl(tu_);
+    inject(cidx::storage::FailurePoint::symbol_capture_complete);
   }
 
   void run_statement_stage(FunctionDefinitionVisitor &visitor,
@@ -1116,24 +1097,9 @@ private:
     BudgetedDefinitionScopeEmitter definitions(
         static_cast<DefinitionScopeEmitter &>(recorder_), execution.metrics);
     visitor.run_statement_pass(ports, &execution.metrics, &definitions);
+    state_.out->statement_bodies_walked = visitor.statement_body_count();
     static_cast<void>(edge_ids);
     static_cast<void>(definition_ids);
-  }
-
-  void run_routed_namespace_stage(PassExecutionContext &execution) {
-    if (!state_.graph_enabled || graph_events_ == nullptr) {
-      return;
-    }
-    routed_fact_file_id_ = -1;
-    BudgetedNamespacePassPorts ports(
-        static_cast<NamespacePassPorts &>(recorder_), execution.metrics);
-    NamespaceUseVisitor ns(
-        context_, ports, {}, -1, &execution.metrics,
-        [this](const std::string &path) { return route_fact_file(path); });
-    graph_events_->replay_namespaces(ns);
-    // The recorded stream is valid only while this ASTContext lives, and the
-    // last consumer has just run.
-    graph_events_.reset();
   }
 
   [[nodiscard]] bool header_covered_by_current_config(
@@ -1305,9 +1271,6 @@ private:
   int64_t routed_fact_file_id_ = -1;
   int64_t main_file_handle_ = -1;
   std::unique_ptr<FunctionDefinitionVisitor> routed_definition_visitor_;
-  // The one rooted graph traversal's recorded event stream, alive only between
-  // its collection and the last replay of the same translation unit.
-  std::unique_ptr<RoutedRootEventBuffer> graph_events_;
 };
 
 class IndexASTConsumer : public clang::ASTConsumer {
@@ -2377,6 +2340,9 @@ IndexOneOutcome finalize_index_one(
           state.route_plan.routes().front().translation_unit;
       out.publication = ExtractedFactPublication{
           .batch = *state.batch,
+          .payload = *state.batch,
+          .artifact = nullptr,
+          .fact_limits = state.fact_limits,
           .route_plan = state.route_plan,
           .translation_unit = translation_unit,
           .expected_generation = state.route_plan.generation(),
@@ -2473,6 +2439,7 @@ IndexOneOutcome run_index_one(cidx::Storage &db, IndexSession &session,
   state.normalized_config_id = session.impl_->configuration_id(descriptor);
   state.claims = control.claims;
   state.rank = control.rank;
+  state.fact_limits = control.fact_limits;
 
   if (profiling) {
     profile::note_transaction_begin();

@@ -29,15 +29,12 @@ bool FunctionDefinitionVisitor::VisitDecl(clang::Decl * /*decl*/) {
   return true;
 }
 
-// An indexable function definition: has an actual body, is not nested in
-// another function (a LOCAL class's methods are covered by the enclosing
-// function's descent), and sits in the target file.
+// An indexable function definition has an actual body and sits in a routed
+// file. Nested methods and lambda call operators are intentionally included;
+// the canonical pending-body key prevents duplicate statement walks.
 bool FunctionDefinitionVisitor::is_indexable_definition(
     const clang::FunctionDecl *decl) {
   if (!decl->doesThisDeclarationHaveABody()) {
-    return false;
-  }
-  if (decl->getParentFunctionOrMethod() != nullptr) {
     return false;
   }
   const std::string file = expansion_loc(context_, decl->getLocation()).file;
@@ -58,22 +55,23 @@ void FunctionDefinitionVisitor::run_statement_pass(
     DefinitionScopeEmitter *statement_definitions) {
   DefinitionScopeEmitter &definitions =
       statement_definitions != nullptr ? *statement_definitions : definitions_;
-  for (const DefinitionFact &fact : definitions_found_) {
+  pending_bodies_.drain([&](const PendingBody &body) {
     if (router_) {
-      router_(fact.file);
+      router_(body.file);
     }
-    StatementEdgeVisitor body(context_, ports, fact.symbol_id, fact.file_id,
-                              fact.file, metrics);
-    body.walk(fact.decl);
-    definitions.copy_body_edges_to_def_edge(fact.definition_id, fact.symbol_id);
-  }
+    StatementEdgeVisitor statement_body(context_, ports, body.symbol_id,
+                                        body.file_id, body.file, metrics);
+    statement_body.walk(body.definition);
+    ++statement_body_count_;
+    definitions.copy_body_edges_to_def_edge(body.definition_id, body.symbol_id);
+  });
 }
 
 // Create the definition row. Statement facts are emitted by the separate
 // statement pass above so the two stages can be independently registered.
-void FunctionDefinitionVisitor::index_definition(clang::FunctionDecl *decl,
-                                                 const clang::NamedDecl *keyed,
-                                                 int64_t fn_sym) {
+void FunctionDefinitionVisitor::index_definition(
+    clang::FunctionDecl *decl, const clang::NamedDecl *keyed, int64_t fn_sym,
+    const clang::FunctionDecl *canonical_owner) {
   const clang::SourceRange range = keyed->getSourceRange();
   const ExpansionLoc start = extent_start(context_, range);
   const ExpansionLoc end = extent_end(context_, range);
@@ -85,11 +83,13 @@ void FunctionDefinitionVisitor::index_definition(clang::FunctionDecl *decl,
   if (metrics_ != nullptr) {
     metrics_->note_fact_family("definitions", 1, 1);
   }
-  definitions_found_.push_back({.decl = decl,
-                                .symbol_id = fn_sym,
-                                .definition_id = def_id,
-                                .file_id = file_id_,
-                                .file = target_file_});
+  ++definition_count_;
+  pending_bodies_.schedule({.canonical_owner = canonical_owner,
+                            .definition = decl,
+                            .symbol_id = fn_sym,
+                            .definition_id = def_id,
+                            .file_id = file_id_,
+                            .file = target_file_});
 }
 
 bool FunctionDefinitionVisitor::VisitFunctionDecl(clang::FunctionDecl *decl) {
@@ -103,13 +103,25 @@ bool FunctionDefinitionVisitor::VisitFunctionDecl(clang::FunctionDecl *decl) {
           decl->getDescribedFunctionTemplate()) {
     keyed = ft;
   }
+  clang::FunctionDecl *definition = decl->getDefinition();
+  if (definition == nullptr) {
+    return true;
+  }
+  const clang::FunctionDecl *canonical_owner = definition->getCanonicalDecl();
+  if (const clang::FunctionTemplateDecl *ft =
+          decl->getDescribedFunctionTemplate()) {
+    canonical_owner = ft->getTemplatedDecl()->getCanonicalDecl();
+  }
+  if (pending_bodies_.contains(canonical_owner)) {
+    return true;
+  }
   const std::string usr = usr_for_decl(keyed);
   if (usr.empty()) {
     return true;
   }
   if (const auto fn_sym = identity_.lookup_symbol_id(
           usr, expansion_loc(context_, keyed->getLocation()).file)) {
-    index_definition(decl, keyed, *fn_sym);
+    index_definition(definition, keyed, *fn_sym, canonical_owner);
   }
   return true;
 }

@@ -292,7 +292,9 @@ add_library(cidx_ast OBJECT
   src/ast/statement_edge_visitor.cpp src/ast/function_definition_visitor.cpp
   src/ast/call_template_args.cpp src/ast/display_name_rewrite.cpp
   src/ast/receiver_provenance.cpp src/ast/instantiation_edges.cpp
-  src/ast/namespace_use_visitor.cpp src/ast/routed_root_events.cpp
+  src/ast/namespace_use_visitor.cpp
+  src/ast/routed_fact_extractor.cpp
+  src/ast/spillable_fact_buffer.cpp src/ast/spillable_identity_index.cpp
   src/ast/fact_identity.cpp src/ast/fact_batch.cpp src/ast/fact_extraction.cpp
   src/ast/owned_header_plan.cpp
   src/ast/fact_batch_artifact.cpp

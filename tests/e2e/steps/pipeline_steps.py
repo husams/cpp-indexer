@@ -20,6 +20,11 @@ def _stage_fixture(workspace: Workspace, fixture: str, std: str) -> Workspace:
     workspace.fixture = fixture
     workspace.source = workspace.src_dir / fixture
     shutil.copyfile(src, workspace.source)
+    if fixture == "single_traversal_fact_extraction.cpp":
+        shutil.copyfile(
+            FIXTURES_DIR / "single_traversal_fact_extraction.hpp",
+            workspace.src_dir / "single_traversal_fact_extraction.hpp",
+        )
 
     compile_commands = [
         {

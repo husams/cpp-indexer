@@ -2,6 +2,7 @@
 #include "doctest/doctest.h"
 
 #include "ast/fact_batch.hpp"
+#include "ast/fact_batch_artifact.hpp"
 #include "ast/owned_header_plan.hpp"
 #include "storage/fact_batch_writer.hpp"
 #include "storage/storage.hpp"
@@ -9,6 +10,9 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -44,6 +48,12 @@ auto symbol(const ast::FactPartitionKey &owner, std::string usr,
           .identity_source = owner.configuration.identity_source,
           .identity_translation_unit = owner.configuration.translation_unit,
           .kind_name = "function"};
+}
+
+auto spill_directory_empty(const std::filesystem::path &root) -> bool {
+  return !std::filesystem::exists(root) ||
+         std::filesystem::directory_iterator(root) ==
+             std::filesystem::directory_iterator{};
 }
 
 struct Fixture {
@@ -931,6 +941,133 @@ TEST_CASE("FactBatchWriter commits a bounded ordered window once") {
   CHECK(result.report.window_items == items.size());
   CHECK(result.report.window_bytes == 3072);
   CHECK(fixture.storage.lookup_symbols_by_usr("usr-header-added").size() == 1);
+}
+
+TEST_CASE("FactBatchWriter publishes a spill-backed artifact window item") {
+  Fixture fixture;
+  storage::FactBatchWriter writer(fixture.storage);
+  const ast::FactBatch batch = fixture.batch();
+  const auto spill_directory =
+      std::filesystem::temp_directory_path() / "cidx-s124-writer-artifact";
+  std::error_code cleanup_error;
+  std::filesystem::remove_all(spill_directory, cleanup_error);
+  std::filesystem::create_directories(spill_directory);
+  auto encoded = ast::encode_fact_batch_artifact(
+      batch, {.spill_threshold_bytes = 1,
+              .spill_directory = spill_directory.string()});
+  const auto artifact_bytes = encoded.byte_size();
+  auto artifact =
+      std::make_shared<const ast::FactBatchArtifact>(std::move(encoded));
+  REQUIRE(artifact->spilled());
+
+  const storage::FactBatchWriterWindowItem item{.batch = nullptr,
+                                                .artifact = std::move(artifact),
+                                                .context = fixture.context(),
+                                                .approximate_bytes =
+                                                    artifact_bytes};
+  const auto result = writer.apply_window(std::array{item});
+  INFO(result.speculative_error.value_or(""));
+  REQUIRE(result.ok());
+  CHECK(result.results.size() == 1);
+  CHECK(fixture.storage.lookup_symbols_by_usr("usr-main").size() == 1);
+
+  Fixture direct_fixture;
+  storage::FactBatchWriter direct_writer(direct_fixture.storage);
+  const ast::FactBatch direct_batch = direct_fixture.batch();
+  const auto direct_result =
+      direct_writer.apply(direct_batch, direct_fixture.context());
+  REQUIRE(direct_result.ok());
+  CHECK(queryable_fact_projection(fixture) ==
+        queryable_fact_projection(direct_fixture));
+  std::filesystem::remove_all(spill_directory, cleanup_error);
+}
+
+TEST_CASE("FactBatchWriter cleans spill artifacts on failure paths") {
+  const auto root =
+      std::filesystem::temp_directory_path() / "cidx-s124-writer-cleanup-paths";
+  std::error_code cleanup_error;
+  std::filesystem::remove_all(root, cleanup_error);
+  std::filesystem::create_directories(root);
+
+  const auto make_artifact = [&root](const ast::FactBatch &batch) {
+    return std::make_shared<const ast::FactBatchArtifact>(
+        ast::encode_fact_batch_artifact(
+            batch,
+            {.spill_threshold_bytes = 1, .spill_directory = root.string()}));
+  };
+
+  {
+    Fixture fixture;
+    const auto artifact = make_artifact(fixture.batch());
+    REQUIRE(artifact->spilled());
+    storage::FactBatchWriter writer(fixture.storage);
+    auto context =
+        fixture.context(storage::FactBatchWriterFailurePoint::temporary_load);
+    const storage::FactBatchWriterWindowItem item{
+        .batch = nullptr, .artifact = artifact, .context = std::move(context)};
+    const auto result = writer.apply_window(std::array{item});
+    REQUIRE(result.ok());
+    CHECK(result.replayed);
+  }
+  CHECK(spill_directory_empty(root));
+
+  {
+    Fixture fixture;
+    const auto first_artifact = make_artifact(fixture.batch());
+    const auto second_artifact = make_artifact(fixture.batch(true));
+    REQUIRE(first_artifact->spilled());
+    REQUIRE(second_artifact->spilled());
+    storage::FactBatchWriter writer(fixture.storage);
+    const std::array items{
+        storage::FactBatchWriterWindowItem{.batch = nullptr,
+                                           .artifact = first_artifact,
+                                           .context = fixture.context()},
+        storage::FactBatchWriterWindowItem{.batch = nullptr,
+                                           .artifact = second_artifact,
+                                           .context = fixture.context()},
+    };
+    std::size_t checks = 0;
+    const auto result =
+        writer.apply_window(items, [&checks] { return checks++ == 0; });
+    REQUIRE(result.ok());
+    CHECK(result.replayed);
+  }
+  CHECK(spill_directory_empty(root));
+
+  {
+    Fixture fixture;
+    const auto valid = make_artifact(fixture.batch());
+    const auto corrupt_path = root / "corrupt-artifact.bin";
+    valid->materialize(corrupt_path.string());
+    {
+      std::ofstream corrupt(corrupt_path, std::ios::binary | std::ios::trunc);
+      corrupt.put('x');
+    }
+    const auto corrupt_artifact =
+        std::make_shared<const ast::FactBatchArtifact>(
+            ast::FactBatchArtifact::from_file(corrupt_path.string()));
+    storage::FactBatchWriter writer(fixture.storage);
+    const storage::FactBatchWriterWindowItem item{.batch = nullptr,
+                                                  .artifact = corrupt_artifact,
+                                                  .context = fixture.context()};
+    const auto result = writer.apply_window(std::array{item});
+    CHECK_FALSE(result.ok());
+    std::filesystem::remove(corrupt_path, cleanup_error);
+  }
+  CHECK(spill_directory_empty(root));
+
+  {
+    Fixture fixture;
+    const auto batch = fixture.batch();
+    CHECK_THROWS(([&] {
+      static_cast<void>(ast::encode_fact_batch_artifact(
+          batch, {.spill_threshold_bytes = 1,
+                  .max_artifact_bytes = 1,
+                  .spill_directory = root.string()}));
+    })());
+  }
+  CHECK(spill_directory_empty(root));
+  std::filesystem::remove_all(root, cleanup_error);
 }
 
 TEST_CASE("FactBatchWriter rolls back and replays a failed whole window") {

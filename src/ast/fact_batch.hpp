@@ -20,6 +20,9 @@
 
 namespace cidx::ast {
 
+template <typename Record> class SpillableFactBuffer;
+class SpillableIdentityIndex;
+
 class FactBatchArtifactCodec;
 
 enum class FactFamily : std::uint8_t {
@@ -73,6 +76,17 @@ struct FileFactPartition {
   FactPartitionKey key;
   // Each index addresses the corresponding immutable FactRecords vector.
   std::map<FactFamily, std::vector<std::size_t>> members;
+};
+
+// Resource limits shared by the extractor's fact payload and its transient
+// natural-key indexes.  The defaults are deliberately bounded; tests may set
+// a smaller limit to force the same spill path used by production workers.
+struct ExtractionFactLimits {
+  std::uint64_t spill_threshold_bytes = 64ULL * 1024ULL * 1024ULL;
+  std::uint64_t max_total_bytes = 512ULL * 1024ULL * 1024ULL;
+  std::uint64_t max_resident_identity_bytes = 32ULL * 1024ULL * 1024ULL;
+  std::uint64_t max_identity_entries = 1'000'000ULL;
+  std::string spill_directory;
 };
 
 // A cross-translation-unit symbol identity that extraction could not answer
@@ -222,10 +236,17 @@ public:
     std::string translation_unit_path;
   };
 
-  explicit FactBatchRecorder(std::string producer = {},
-                             const CollisionSafeHandleIndex::Hasher
-                                 &primary_hasher = stable_fact_hash);
+  explicit FactBatchRecorder(
+      std::string producer = {},
+      CollisionSafeHandleIndex::Hasher primary_hasher = stable_fact_hash);
+  ~FactBatchRecorder() override;
 
+  FactBatchRecorder(const FactBatchRecorder &) = delete;
+  auto operator=(const FactBatchRecorder &) -> FactBatchRecorder & = delete;
+  FactBatchRecorder(FactBatchRecorder &&) = delete;
+  auto operator=(FactBatchRecorder &&) -> FactBatchRecorder & = delete;
+
+  void set_extraction_limits(ExtractionFactLimits limits);
   void set_completeness(FactCompleteness completeness);
   void set_deferred_external_identity(DeferredExternalIdentity deferral);
   void set_partition(
@@ -298,6 +319,9 @@ public:
   [[nodiscard]] auto batch() const -> FactBatch { return snapshot(); }
   [[nodiscard]] auto canonical_batch() const -> FactBatch;
   [[nodiscard]] auto counters() const -> const FactBatchOperationCounters &;
+  [[nodiscard]] auto fact_payload_spilled() const -> bool;
+  [[nodiscard]] auto fact_payload_record_count() const -> std::uint64_t;
+  [[nodiscard]] auto identity_index_spilled() const -> bool;
   [[nodiscard]] auto pending_presentation_intents() const
       -> std::vector<PresentationIntent> {
     std::vector<PresentationIntent> result;
@@ -336,6 +360,14 @@ private:
       -> std::string;
   [[nodiscard]] static auto name_kind_key(std::string_view name,
                                           std::string_view kind) -> std::string;
+  [[nodiscard]] auto lookup_identity(FactIdentityKind kind,
+                                     std::string_view key) const
+      -> std::optional<std::int64_t>;
+  [[nodiscard]] auto cached_identity_lookup(FactIdentityKind kind,
+                                            std::string_view key) const
+      -> const std::optional<std::int64_t> *;
+  void cache_identity(FactIdentityKind kind, std::string_view key,
+                      std::optional<std::int64_t> handle) const;
   [[nodiscard]] auto source_independent_symbol_id(std::string_view usr)
       -> std::optional<std::int64_t>;
   void enrich_minted_symbol(std::int64_t symbol_id, const MintRequest &request);
@@ -354,6 +386,13 @@ private:
                     const std::optional<std::string> &identity_source,
                     bool allow_deferral) -> std::optional<std::int64_t>;
   [[nodiscard]] static auto edge_key(const EdgeRecord &edge) -> std::string;
+  [[nodiscard]] auto identity_handle(FactIdentityKind kind,
+                                     const std::string &key) -> std::int64_t;
+  void bind_identity(FactIdentityKind kind, std::string key,
+                     std::int64_t handle);
+  void append_identity_maps(FactBatch::Data &data) const;
+  [[nodiscard]] auto identity_entries(FactIdentityKind kind) const
+      -> std::map<std::int64_t, std::string>;
   [[nodiscard]] auto build_batch(bool canonical) const -> FactBatch;
   void append_symbol_records(FactBatch::Data &data, Memberships &memberships,
                              bool canonical) const;
@@ -366,7 +405,6 @@ private:
   FactCompleteness completeness_ = FactCompleteness::complete;
   FactPartitionKey current_partition_;
   std::map<std::int64_t, FactPartitionKey> partitions_by_file_handle_;
-  std::unordered_map<std::string, std::int64_t> file_handles_by_path_;
 
   std::vector<RoutedSymbol> symbols_;
   std::vector<RoutedRecord<DeclarationSiteRecord>> declaration_sites_;
@@ -390,11 +428,7 @@ private:
   std::vector<RoutedRecord<ApplicabilityOwnershipRecord>> applicability_;
   std::vector<SymbolEmissionMetadata> symbol_order_;
 
-  CollisionSafeHandleIndex symbol_handles_;
-  CollisionSafeHandleIndex edge_handles_;
-  CollisionSafeHandleIndex type_handles_;
-  CollisionSafeHandleIndex definition_handles_;
-  CollisionSafeHandleIndex file_handles_;
+  CollisionSafeHandleIndex::Hasher primary_hasher_;
   DeferredExternalIdentity deferred_external_identity_;
   std::vector<PendingSymbolReference> pending_symbol_references_;
   std::unordered_map<std::string, std::int64_t> external_ids_by_key_;
@@ -424,6 +458,16 @@ private:
   std::map<std::int64_t, std::string> display_names_;
   std::uint64_t next_emission_order_ = 0;
   FactBatchOperationCounters counters_;
+  ExtractionFactLimits extraction_limits_;
+  // The ordered spill index is the bounded overflow tier. Keep two bounded
+  // generations for both positive and negative hot probes so routing does not
+  // turn every lookup into an ordered lookup or a run scan.
+  using ResidentIdentityCache =
+      std::unordered_map<std::string, std::optional<std::int64_t>>;
+  mutable ResidentIdentityCache resident_identity_cache_;
+  mutable ResidentIdentityCache resident_identity_previous_cache_;
+  std::unique_ptr<SpillableIdentityIndex> identity_index_;
+  std::unique_ptr<SpillableFactBuffer<SymbolRecord>> fact_payload_;
 };
 
 } // namespace cidx::ast

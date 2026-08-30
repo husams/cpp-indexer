@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <iosfwd>
 #include <memory>
 #include <optional>
@@ -14,6 +15,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 namespace cidx::ast {
@@ -134,6 +136,13 @@ private:
   friend class FactBatchArtifactInput;
 };
 
+// The worker-to-writer transport can retain either the in-memory view used by
+// the legacy writer or the canonical spill-backed wire artifact.  Keeping the
+// artifact in the payload prevents byte accounting from serializing and then
+// discarding a second copy.
+using ExtractedFactPayload =
+    std::variant<FactBatch, std::shared_ptr<const FactBatchArtifact>>;
+
 struct FactBatchArtifactDiagnostic {
   FactBatchArtifactErrorCode code = FactBatchArtifactErrorCode::corrupt;
   std::string message;
@@ -158,5 +167,12 @@ encode_fact_batch_artifact(const FactBatch &batch,
     const FactBatchArtifact &artifact,
     const FactBatchArtifactCompatibility &compatibility = {})
     -> FactBatchArtifactDecodeResult;
+
+// Decode only one record family together with the shared batch metadata.  The
+// writer uses this bounded view to consume a spilled artifact in its existing
+// deterministic family phases without reconstructing the complete batch.
+[[nodiscard]] auto decode_fact_batch_artifact_family(
+    const FactBatchArtifact &artifact, FactFamily family,
+    const FactBatchArtifactCompatibility &compatibility = {}) -> FactBatch;
 
 } // namespace cidx::ast
