@@ -5,7 +5,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <filesystem>
 #include <functional>
 #include <memory>
 #include <span>
@@ -16,7 +15,7 @@
 namespace cidx::ast {
 
 struct SpillSegment {
-  std::filesystem::path path;
+  std::string path;
   FactFamily family = FactFamily::symbols;
   std::uint64_t first_index = 0;
   std::uint64_t record_count = 0;
@@ -28,7 +27,7 @@ struct SpillableFactBufferOptions {
   FactFamily family = FactFamily::symbols;
   std::uint64_t spill_threshold_bytes = 64ULL * 1024ULL * 1024ULL;
   std::uint64_t max_total_bytes = 512ULL * 1024ULL * 1024ULL;
-  std::filesystem::path spill_directory;
+  std::string spill_directory;
 };
 
 template <typename Record> struct InMemoryRecords {

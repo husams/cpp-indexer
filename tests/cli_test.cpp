@@ -2747,11 +2747,13 @@ TEST_SUITE("clang") {
                         .max_total_bytes = 8ULL * 1024ULL * 1024ULL,
                         .max_resident_identity_bytes = 4096,
                         .max_identity_entries = 1}};
-    const auto outcome = cidx::ast::run_index_one(
-        db, session, *file, source, true, control);
+    const auto outcome =
+        cidx::ast::run_index_one(db, session, *file, source, true, control);
     REQUIRE(!outcome.parse_failed);
     CHECK(outcome.observed_whole_tu_traversals == 1);
     CHECK(outcome.statement_bodies_walked == 5);
+    CHECK(outcome.fact_payload_records_recovered ==
+          outcome.publication->batch.records().symbols.size());
     CHECK(outcome.fact_payload_spilled);
     CHECK(outcome.identity_index_spilled);
   }

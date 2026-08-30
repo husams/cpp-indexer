@@ -1,9 +1,11 @@
 #pragma once
 
+#include "ast/fact_identity.hpp"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <filesystem>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -12,16 +14,8 @@
 
 namespace cidx::ast {
 
-enum class FactIdentityKind : std::uint8_t {
-  symbol,
-  relation,
-  type,
-  definition,
-  file,
-};
-
 struct IdentityRun {
-  std::filesystem::path path;
+  std::string path;
   std::uint64_t entry_count = 0;
   std::uint64_t byte_size = 0;
   std::string first_key;
@@ -40,7 +34,7 @@ struct SpillableIdentityIndexOptions {
   std::uint64_t max_identity_entries = 1'000'000ULL;
   std::size_t max_identity_runs = 8;
   std::uint64_t max_total_bytes = 512ULL * 1024ULL * 1024ULL;
-  std::filesystem::path spill_directory;
+  std::string spill_directory;
 };
 
 class SpillableIdentityIndex final {
@@ -63,6 +57,8 @@ public:
   [[nodiscard]] auto entry_count() const -> std::uint64_t;
   [[nodiscard]] auto spilled() const -> bool;
   [[nodiscard]] auto runs() const -> const std::vector<IdentityRun> &;
+  [[nodiscard]] auto entries() const
+      -> std::map<std::pair<FactIdentityKind, std::string>, std::int64_t>;
 
 private:
   struct Impl;

@@ -192,7 +192,8 @@ struct SpillableIdentityIndex::Impl {
       return;
     }
     if (directory.empty()) {
-      directory = private_directory(options.spill_directory);
+      directory =
+          private_directory(std::filesystem::path(options.spill_directory));
     }
     const auto path =
         directory / ("run-" + std::to_string(runs.size()) + ".bin");
@@ -211,7 +212,7 @@ struct SpillableIdentityIndex::Impl {
       std::filesystem::remove(path);
       throw std::runtime_error("identity spill hard byte limit exceeded");
     }
-    IdentityRun run{.path = path,
+    IdentityRun run{.path = path.string(),
                     .entry_count = resident.size(),
                     .byte_size = bytes,
                     .first_key = std::move(first),
@@ -243,9 +244,9 @@ struct SpillableIdentityIndex::Impl {
     // Do not reuse the current compacted path: it may already be one of the
     // runs being replaced, and removing the old runs would remove the new
     // file as well.
-    const auto path = directory / ("run-compacted-" +
-                                   std::to_string(compaction_serial++) +
-                                   ".bin");
+    const auto path =
+        directory /
+        ("run-compacted-" + std::to_string(compaction_serial++) + ".bin");
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     output.write(kMagic.data(), static_cast<std::streamsize>(kMagic.size()));
     write_u64(output, merged.size());
@@ -265,7 +266,7 @@ struct SpillableIdentityIndex::Impl {
     }
     total_size = bytes;
     runs.clear();
-    runs.push_back({.path = path,
+    runs.push_back({.path = path.string(),
                     .entry_count = merged.size(),
                     .byte_size = bytes,
                     .first_key = std::move(first),
@@ -340,6 +341,21 @@ auto SpillableIdentityIndex::spilled() const -> bool {
 
 auto SpillableIdentityIndex::runs() const -> const std::vector<IdentityRun> & {
   return impl_->runs;
+}
+
+auto SpillableIdentityIndex::entries() const
+    -> std::map<std::pair<FactIdentityKind, std::string>, std::int64_t> {
+  std::map<std::pair<FactIdentityKind, std::string>, std::int64_t> result;
+  for (const IdentityRun &run : impl_->runs) {
+    read_identity_entries(run, [&result](FactIdentityKind kind, std::string key,
+                                         std::int64_t handle) {
+      result.insert_or_assign({kind, std::move(key)}, handle);
+    });
+  }
+  for (const auto &[identity, handle] : impl_->resident) {
+    result.insert_or_assign(identity, handle);
+  }
+  return result;
 }
 
 } // namespace cidx::ast

@@ -107,7 +107,8 @@ private:
   auto artifact = std::make_shared<const ast::FactBatchArtifact>(
       ast::encode_fact_batch_artifact(
           outcome.publication->batch,
-          {.spill_threshold_bytes =
+          {.metadata = {},
+           .spill_threshold_bytes =
                outcome.publication->fact_limits.spill_threshold_bytes,
            .spill_directory = outcome.publication->fact_limits.spill_directory,
            .max_artifact_bytes =
@@ -223,10 +224,17 @@ auto run_parallel_index(cidx::Storage &db, const std::string &index_path,
       if (!outcome.parse_failed && !outcome.source_changed &&
           outcome.publication) {
         writer_positions.push_back(position);
-        writer_items.push_back({.batch = &outcome.publication->batch,
-                                .artifact = outcome.publication->artifact,
-                                .context = publication_context(outcome),
-                                .approximate_bytes = result.bytes});
+        const auto *payload_artifact =
+            std::get_if<std::shared_ptr<const ast::FactBatchArtifact>>(
+                &outcome.publication->payload);
+        const bool artifact_backed = payload_artifact != nullptr &&
+                                     *payload_artifact != nullptr &&
+                                     (*payload_artifact)->spilled();
+        writer_items.push_back(
+            {.batch = artifact_backed ? nullptr : &outcome.publication->batch,
+             .artifact = outcome.publication->artifact,
+             .context = publication_context(outcome),
+             .approximate_bytes = result.bytes});
       } else if (!outcome.parse_failed && !outcome.source_changed) {
         outcome.parse_failed = true;
         if (outcome.error.empty()) {

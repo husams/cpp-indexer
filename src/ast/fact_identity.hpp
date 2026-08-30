@@ -13,6 +13,15 @@
 
 namespace cidx::ast {
 
+enum class FactIdentityKind : std::uint8_t {
+  symbol,
+  relation,
+  type,
+  definition,
+  file,
+  handle,
+};
+
 struct PortableFileIdentity {
   std::string component_path;
   std::string directory_path;

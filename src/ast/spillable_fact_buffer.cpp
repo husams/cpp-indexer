@@ -117,7 +117,8 @@ template <typename Record> struct SpillableFactBuffer<Record>::Impl {
       throw std::runtime_error("fact spill buffer has no record codec");
     }
     if (directory.empty()) {
-      directory = unique_directory(options.spill_directory);
+      directory =
+          unique_directory(std::filesystem::path(options.spill_directory));
       cleanup = std::shared_ptr<void>(
           new std::filesystem::path(directory), [](void *value) noexcept {
             auto *path = static_cast<std::filesystem::path *>(value);
@@ -147,7 +148,7 @@ template <typename Record> struct SpillableFactBuffer<Record>::Impl {
       throw std::runtime_error("fact spill hard byte limit exceeded");
     }
     segments.push_back(
-        {.path = path,
+        {.path = path.string(),
          .family = options.family,
          .first_index = next_index - resident.size(),
          .record_count = resident.size(),
@@ -270,5 +271,6 @@ auto SpillableFactBuffer<Record>::freeze() && -> FrozenFactRecords<Record> {
 }
 
 template class SpillableFactBuffer<std::string>;
+template class SpillableFactBuffer<SymbolRecord>;
 
 } // namespace cidx::ast

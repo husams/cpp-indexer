@@ -156,6 +156,7 @@ struct IndexOneOutcome {
   std::size_t registered_whole_tu_traversal_budget = 0;
   std::size_t observed_whole_tu_traversals = 0;
   std::size_t statement_bodies_walked = 0;
+  std::uint64_t fact_payload_records_recovered = 0;
   bool fact_payload_spilled = false;
   bool identity_index_spilled = false;
   std::vector<EvidenceRecord> evidence;

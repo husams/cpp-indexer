@@ -35,7 +35,7 @@ TEST_CASE("fact payload segments retain order and clean up") {
         {.family = cidx::ast::FactFamily::symbols,
          .spill_threshold_bytes = 1,
          .max_total_bytes = 4096,
-         .spill_directory = root},
+         .spill_directory = root.string()},
         encode, decode);
     CHECK(buffer.append("first") == 0);
     CHECK(buffer.append("second") == 1);
@@ -64,7 +64,7 @@ TEST_CASE("identity runs preserve exact lookup and stable handles") {
     cidx::ast::SpillableIdentityIndex index({.max_resident_identity_bytes = 128,
                                              .max_identity_entries = 1,
                                              .max_total_bytes = 4096,
-                                             .spill_directory = root});
+                                             .spill_directory = root.string()});
     CHECK(index.insert(cidx::ast::FactIdentityKind::symbol, "alpha", 17) ==
           cidx::ast::IdentityInsertResult::inserted);
     CHECK(index.insert(cidx::ast::FactIdentityKind::symbol, "beta", 23) ==

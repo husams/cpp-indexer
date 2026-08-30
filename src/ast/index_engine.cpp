@@ -271,6 +271,8 @@ public:
     }
     record_pass_metrics(registry.run(plan, &session));
     state_.batch = recorder_.canonical_batch();
+    state_.out->fact_payload_records_recovered =
+        recorder_.fact_payload_record_count();
     state_.out->fact_payload_spilled = recorder_.fact_payload_spilled();
     state_.out->identity_index_spilled = recorder_.identity_index_spilled();
     update_output_stats(*state_.batch);

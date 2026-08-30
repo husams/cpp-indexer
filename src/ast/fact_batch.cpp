@@ -1,11 +1,14 @@
 #include "ast/fact_batch.hpp"
 #include "ast/spillable_fact_buffer.hpp"
+#include "ast/spillable_identity_index.hpp"
 
 #include "ast/kind_map.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cstring>
 #include <iterator>
+#include <limits>
 #include <ranges>
 #include <stdexcept>
 #include <tuple>
@@ -30,9 +33,186 @@ auto optional_text(const std::optional<T> &value) -> std::string {
 
 auto bool_text(bool value) -> std::string { return value ? "1" : "0"; }
 
+void append_u64(std::vector<std::byte> &bytes, std::uint64_t value) {
+  for (unsigned shift = 0; shift < 64; shift += 8) {
+    bytes.push_back(static_cast<std::byte>((value >> shift) & 0xffU));
+  }
+}
+
+void append_string(std::vector<std::byte> &bytes, std::string_view value) {
+  append_u64(bytes, value.size());
+  const std::size_t offset = bytes.size();
+  bytes.resize(offset + value.size());
+  if (!value.empty()) {
+    std::memcpy(bytes.data() + offset, value.data(), value.size());
+  }
+}
+
+void append_optional_string(std::vector<std::byte> &bytes,
+                            const std::optional<std::string> &value) {
+  append_u64(bytes, value ? 1 : 0);
+  if (value) {
+    append_string(bytes, *value);
+  }
+}
+
+void append_optional_i64(std::vector<std::byte> &bytes,
+                         const std::optional<std::int64_t> &value) {
+  append_u64(bytes, value ? 1 : 0);
+  if (value) {
+    append_u64(bytes, static_cast<std::uint64_t>(*value));
+  }
+}
+
+auto encode_symbol_record(const SymbolRecord &record)
+    -> std::vector<std::byte> {
+  std::vector<std::byte> bytes;
+  append_string(bytes, record.file);
+  append_string(bytes, record.usr);
+  append_string(bytes, record.spelling);
+  append_u64(bytes, static_cast<std::uint64_t>(record.kind));
+  append_optional_string(bytes, record.qual_name);
+  append_optional_string(bytes, record.display_name);
+  append_optional_string(bytes, record.type_info);
+  append_u64(bytes, static_cast<std::uint64_t>(record.line));
+  append_u64(bytes, static_cast<std::uint64_t>(record.col));
+  append_u64(bytes, static_cast<std::uint64_t>(record.end_line));
+  append_u64(bytes, static_cast<std::uint64_t>(record.end_col));
+  append_optional_i64(bytes, record.decl_line);
+  append_optional_i64(bytes, record.decl_col);
+  append_optional_string(bytes, record.decl_path);
+  append_u64(bytes, static_cast<std::uint64_t>(record.is_definition));
+  append_u64(bytes, static_cast<std::uint64_t>(record.is_pure));
+  append_u64(bytes, static_cast<std::uint64_t>(record.is_static));
+  append_u64(bytes, static_cast<std::uint64_t>(record.is_instantiation));
+  append_u64(bytes, static_cast<std::uint64_t>(record.is_named_instance));
+  append_optional_string(bytes, record.callable_kind);
+  append_optional_string(bytes, record.template_origin);
+  append_optional_string(bytes, record.template_form);
+  append_optional_string(bytes, record.linkage);
+  append_optional_string(bytes, record.access);
+  append_optional_string(bytes, record.parent_usr);
+  append_optional_string(bytes, record.const_value);
+  append_u64(bytes, static_cast<std::uint64_t>(record.resolved));
+  append_string(bytes, record.semantic_universe);
+  append_string(bytes, record.normalized_configuration);
+  append_optional_string(bytes, record.identity_source);
+  append_optional_string(bytes, record.identity_translation_unit);
+  append_optional_string(bytes, record.local_anchor);
+  append_string(bytes, record.kind_name);
+  return bytes;
+}
+
+class SymbolRecordReader {
+public:
+  explicit SymbolRecordReader(std::span<const std::byte> bytes)
+      : bytes_(bytes) {}
+
+  auto string() -> std::string {
+    const auto length = size();
+    if (length > bytes_.size() - offset_) {
+      throw std::runtime_error("spilled symbol record is truncated");
+    }
+    const auto *data = reinterpret_cast<const char *>(bytes_.data() + offset_);
+    offset_ += length;
+    return {data, length};
+  }
+
+  auto optional_string() -> std::optional<std::string> {
+    return present() ? std::optional<std::string>(string()) : std::nullopt;
+  }
+
+  auto optional_i64() -> std::optional<std::int64_t> {
+    return present() ? std::optional<std::int64_t>(integer()) : std::nullopt;
+  }
+
+  auto integer() -> std::int64_t { return static_cast<std::int64_t>(size()); }
+
+  auto boolean() -> bool { return integer() != 0; }
+
+private:
+  auto size() -> std::uint64_t {
+    if (bytes_.size() - offset_ < sizeof(std::uint64_t)) {
+      throw std::runtime_error("spilled symbol record is truncated");
+    }
+    std::uint64_t value = 0;
+    for (unsigned shift = 0; shift < 64; shift += 8) {
+      value |= static_cast<std::uint64_t>(
+                   std::to_integer<unsigned char>(bytes_[offset_++]))
+               << shift;
+    }
+    return value;
+  }
+
+  auto present() -> bool { return boolean(); }
+
+  std::span<const std::byte> bytes_;
+  std::size_t offset_ = 0;
+};
+
+auto decode_symbol_record(std::span<const std::byte> bytes) -> SymbolRecord {
+  SymbolRecordReader reader(bytes);
+  SymbolRecord record;
+  record.file = reader.string();
+  record.usr = reader.string();
+  record.spelling = reader.string();
+  record.kind = static_cast<int>(reader.integer());
+  record.qual_name = reader.optional_string();
+  record.display_name = reader.optional_string();
+  record.type_info = reader.optional_string();
+  record.line = reader.integer();
+  record.col = reader.integer();
+  record.end_line = reader.integer();
+  record.end_col = reader.integer();
+  record.decl_line = reader.optional_i64();
+  record.decl_col = reader.optional_i64();
+  record.decl_path = reader.optional_string();
+  record.is_definition = reader.boolean();
+  record.is_pure = reader.boolean();
+  record.is_static = reader.boolean();
+  record.is_instantiation = reader.boolean();
+  record.is_named_instance = reader.boolean();
+  record.callable_kind = reader.optional_string();
+  record.template_origin = reader.optional_string();
+  record.template_form = reader.optional_string();
+  record.linkage = reader.optional_string();
+  record.access = reader.optional_string();
+  record.parent_usr = reader.optional_string();
+  record.const_value = reader.optional_string();
+  record.resolved = reader.boolean();
+  record.semantic_universe = reader.string();
+  record.normalized_configuration = reader.string();
+  record.identity_source = reader.optional_string();
+  record.identity_translation_unit = reader.optional_string();
+  record.local_anchor = reader.optional_string();
+  record.kind_name = reader.string();
+  return record;
+}
+
 auto portable_file_key(const PortableFileIdentity &file) -> std::string {
   return file.component_path + '\x1f' + file.directory_path + '\x1f' +
          file.file_name;
+}
+
+auto file_path_identity_key(std::string_view path,
+                            const ConfigurationIdentity &configuration)
+    -> std::string {
+  return "path:" + std::string(path) + '\x1e' +
+         configuration.semantic_universe + '\x1e' +
+         configuration.translation_unit + '\x1e' +
+         configuration.normalized_configuration + '\x1e' +
+         configuration.identity_source;
+}
+
+auto file_source_identity_key(std::string_view path,
+                              const ConfigurationIdentity &configuration)
+    -> std::string {
+  return "path-source:" + std::string(path) + '\x1e' +
+         configuration.identity_source;
+}
+
+auto file_unscoped_identity_key(std::string_view path) -> std::string {
+  return "path:" + std::string(path);
 }
 
 auto optional_file_key(const std::optional<PortableFileIdentity> &file)
@@ -621,11 +801,10 @@ void FactBatchOperationCounters::note(std::string_view operation,
 }
 
 FactBatchRecorder::FactBatchRecorder(
-    std::string producer,
-    const CollisionSafeHandleIndex::Hasher &primary_hasher)
-    : producer_(std::move(producer)), symbol_handles_(primary_hasher),
-      edge_handles_(primary_hasher), type_handles_(primary_hasher),
-      definition_handles_(primary_hasher), file_handles_(primary_hasher) {
+    std::string producer, CollisionSafeHandleIndex::Hasher primary_hasher)
+    : producer_(std::move(producer)),
+      primary_hasher_(std::move(primary_hasher)),
+      identity_index_(std::make_unique<SpillableIdentityIndex>()) {
   set_extraction_limits({});
 }
 
@@ -635,45 +814,90 @@ auto FactBatchRecorder::fact_payload_spilled() const -> bool {
   return fact_payload_ != nullptr && fact_payload_->spilled();
 }
 
+auto FactBatchRecorder::fact_payload_record_count() const -> std::uint64_t {
+  if (!fact_payload_) {
+    return 0;
+  }
+  std::uint64_t count = 0;
+  fact_payload_->for_each_in_order(
+      [&count](std::uint64_t, const SymbolRecord &) { ++count; });
+  return count;
+}
+
 auto FactBatchRecorder::identity_index_spilled() const -> bool {
-  return identity_index_.spilled();
+  return identity_index_ != nullptr && identity_index_->spilled();
 }
 
 void FactBatchRecorder::set_extraction_limits(ExtractionFactLimits limits) {
   extraction_limits_ = std::move(limits);
-  identity_index_ = SpillableIdentityIndex{
-      {.max_resident_identity_bytes =
-           extraction_limits_.max_resident_identity_bytes,
-       .max_identity_entries = extraction_limits_.max_identity_entries,
-       .max_total_bytes = extraction_limits_.max_total_bytes,
-       .spill_directory = extraction_limits_.spill_directory}};
-  const auto encode = [](const std::string &value) {
-    std::vector<std::byte> bytes(value.size());
-    if (!value.empty()) {
-      std::memcpy(bytes.data(), value.data(), value.size());
-    }
-    return bytes;
-  };
-  const auto decode = [](std::span<const std::byte> bytes) {
-    return std::string(reinterpret_cast<const char *>(bytes.data()),
-                       bytes.size());
-  };
-  fact_payload_ = std::make_unique<SpillableFactBuffer<std::string>>(
+  SpillableIdentityIndexOptions identity_options{
+      .max_resident_identity_bytes =
+          extraction_limits_.max_resident_identity_bytes,
+      .max_identity_entries = extraction_limits_.max_identity_entries,
+      .max_total_bytes = extraction_limits_.max_total_bytes,
+      .spill_directory = extraction_limits_.spill_directory};
+  identity_index_ =
+      std::make_unique<SpillableIdentityIndex>(std::move(identity_options));
+  fact_payload_ = std::make_unique<SpillableFactBuffer<SymbolRecord>>(
       SpillableFactBufferOptions{
           .family = FactFamily::symbols,
           .spill_threshold_bytes = extraction_limits_.spill_threshold_bytes,
           .max_total_bytes = extraction_limits_.max_total_bytes,
           .spill_directory = extraction_limits_.spill_directory},
-      encode, decode);
+      encode_symbol_record, decode_symbol_record);
 }
 
-void FactBatchRecorder::note_identity(FactIdentityKind kind, std::string key,
+auto FactBatchRecorder::identity_handle(FactIdentityKind kind,
+                                        const std::string &key)
+    -> std::int64_t {
+  if (const auto found = identity_index_->lookup(kind, key)) {
+    return *found;
+  }
+  constexpr auto handle_mask =
+      static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+  for (std::uint64_t attempt = 0;; ++attempt) {
+    std::string salted = key + '#' + std::to_string(attempt);
+    const auto secondary = stable_fact_hash(salted);
+    const auto mixed = primary_hasher_(key) ^ std::rotl(secondary, 23);
+    const auto handle = static_cast<std::int64_t>((mixed & handle_mask) | 1U);
+    const std::string handle_key = std::to_string(static_cast<unsigned>(kind)) +
+                                   ':' + std::to_string(handle);
+    if (identity_index_->lookup(FactIdentityKind::handle, handle_key)) {
+      continue;
+    }
+    if (identity_index_->insert(kind, key, handle) !=
+        IdentityInsertResult::inserted) {
+      continue;
+    }
+    if (identity_index_->insert(FactIdentityKind::handle, handle_key, handle) !=
+        IdentityInsertResult::inserted) {
+      throw std::logic_error("transient identity handle collision");
+    }
+    return handle;
+  }
+}
+
+void FactBatchRecorder::bind_identity(FactIdentityKind kind, std::string key,
                                       std::int64_t handle) {
-  const IdentityInsertResult result =
-      identity_index_.insert(kind, std::move(key), handle);
-  if (result == IdentityInsertResult::conflict) {
+  const auto existing = identity_index_->lookup(kind, key);
+  if (existing && *existing != handle) {
     throw std::logic_error("conflicting transient fact identity");
   }
+  if (!existing && identity_index_->insert(kind, std::move(key), handle) ==
+                       IdentityInsertResult::conflict) {
+    throw std::logic_error("conflicting transient fact identity");
+  }
+}
+
+auto FactBatchRecorder::identity_entries(FactIdentityKind kind) const
+    -> std::map<std::int64_t, std::string> {
+  std::map<std::int64_t, std::string> result;
+  for (const auto &[identity, handle] : identity_index_->entries()) {
+    if (identity.first == kind) {
+      result.emplace(handle, identity.second);
+    }
+  }
+  return result;
 }
 
 void FactBatchRecorder::set_completeness(FactCompleteness completeness) {
@@ -690,18 +914,49 @@ void FactBatchRecorder::set_partition(
     std::optional<std::int64_t> transient_file_handle) {
   current_partition_ = std::move(partition);
   const std::string path = current_partition_.file.portable_path();
-  const std::int64_t natural_handle = file_handles_.find_or_insert(
-      "file:" + current_partition_.stable_string());
-  note_identity(FactIdentityKind::file,
-                "file:" + current_partition_.stable_string(), natural_handle);
-  if (!path.empty()) {
-    file_handles_by_path_[path] = natural_handle;
-  }
+  const std::string natural_key = "file:" + current_partition_.stable_string();
+  const std::int64_t natural_handle =
+      identity_handle(FactIdentityKind::file, natural_key);
   partitions_by_file_handle_[natural_handle] = current_partition_;
   if (transient_file_handle) {
     partitions_by_file_handle_[*transient_file_handle] = current_partition_;
     if (!path.empty()) {
-      file_handles_by_path_[path] = *transient_file_handle;
+      bind_identity(
+          FactIdentityKind::file,
+          file_path_identity_key(path, current_partition_.configuration),
+          *transient_file_handle);
+      if (!identity_index_->lookup(
+              FactIdentityKind::file,
+              file_source_identity_key(path,
+                                       current_partition_.configuration))) {
+        bind_identity(
+            FactIdentityKind::file,
+            file_source_identity_key(path, current_partition_.configuration),
+            *transient_file_handle);
+      }
+      if (!identity_index_->lookup(FactIdentityKind::file,
+                                   file_unscoped_identity_key(path))) {
+        bind_identity(FactIdentityKind::file, file_unscoped_identity_key(path),
+                      *transient_file_handle);
+      }
+    }
+  } else if (!path.empty()) {
+    bind_identity(
+        FactIdentityKind::file,
+        file_path_identity_key(path, current_partition_.configuration),
+        natural_handle);
+    if (!identity_index_->lookup(
+            FactIdentityKind::file,
+            file_source_identity_key(path, current_partition_.configuration))) {
+      bind_identity(
+          FactIdentityKind::file,
+          file_source_identity_key(path, current_partition_.configuration),
+          natural_handle);
+    }
+    if (!identity_index_->lookup(FactIdentityKind::file,
+                                 file_unscoped_identity_key(path))) {
+      bind_identity(FactIdentityKind::file, file_unscoped_identity_key(path),
+                    natural_handle);
     }
   }
 }
@@ -709,15 +964,6 @@ void FactBatchRecorder::set_partition(
 auto FactBatchRecorder::partition_for_symbol(const SymbolRecord &symbol) const
     -> FactPartitionKey {
   FactPartitionKey result = current_partition_;
-  if (!symbol.file.empty() && result.file.portable_path() != symbol.file) {
-    if (const auto handle = file_handles_by_path_.find(symbol.file);
-        handle != file_handles_by_path_.end()) {
-      result = partition_for_file_handle(handle->second);
-    } else {
-      result.file =
-          file_identity_from_path(symbol.file, result.file.component_path);
-    }
-  }
   if (!symbol.semantic_universe.empty()) {
     result.configuration.semantic_universe = symbol.semantic_universe;
   }
@@ -732,6 +978,26 @@ auto FactBatchRecorder::partition_for_symbol(const SymbolRecord &symbol) const
   }
   if (symbol.identity_translation_unit) {
     result.configuration.translation_unit = *symbol.identity_translation_unit;
+  }
+  if (!symbol.file.empty() && result.file.portable_path() != symbol.file) {
+    const auto path_key =
+        file_path_identity_key(symbol.file, result.configuration);
+    const auto source_key =
+        file_source_identity_key(symbol.file, result.configuration);
+    if (const auto handle =
+            identity_index_->lookup(FactIdentityKind::file, path_key)) {
+      result = partition_for_file_handle(*handle);
+    } else if (const auto handle = identity_index_->lookup(
+                   FactIdentityKind::file, source_key)) {
+      result = partition_for_file_handle(*handle);
+    } else if (const auto handle = identity_index_->lookup(
+                   FactIdentityKind::file,
+                   file_unscoped_identity_key(symbol.file))) {
+      result = partition_for_file_handle(*handle);
+    } else {
+      result.file =
+          file_identity_from_path(symbol.file, result.file.component_path);
+    }
   }
   return result;
 }
@@ -774,11 +1040,10 @@ auto FactBatchRecorder::name_kind_key(std::string_view name,
 void FactBatchRecorder::emit(const SymbolRecord &symbol) {
   const FactPartitionKey partition = partition_for_symbol(symbol);
   const SymbolNaturalKey key = natural_key(symbol, partition);
-  const std::int64_t id =
-      symbol_handles_.find_or_insert("symbol:" + key.stable_string());
-  note_identity(FactIdentityKind::symbol, "symbol:" + key.stable_string(), id);
+  const std::string identity = "symbol:" + key.stable_string();
+  const std::int64_t id = identity_handle(FactIdentityKind::symbol, identity);
   if (fact_payload_) {
-    static_cast<void>(fact_payload_->append(stable_symbol_record_key(symbol)));
+    static_cast<void>(fact_payload_->append(symbol));
   }
   const std::size_t position = symbols_.size();
   symbols_.push_back({.partition = partition, .record = symbol});
@@ -957,8 +1222,8 @@ auto FactBatchRecorder::defer_external_symbol(
     ++counters_.records_touched["defer_external_symbol"];
     return found->second;
   }
-  reference.handle = symbol_handles_.find_or_insert("external:" + key);
-  note_identity(FactIdentityKind::symbol, "external:" + key, reference.handle);
+  reference.handle =
+      identity_handle(FactIdentityKind::symbol, "external:" + key);
   external_ids_by_key_.emplace(key, reference.handle);
   pending_symbol_references_.push_back(std::move(reference));
   counters_.note("defer_external_symbol");
@@ -1074,10 +1339,18 @@ auto FactBatchRecorder::mint_symbol(const MintRequest &request)
 auto FactBatchRecorder::file_id_for_path(const std::string &path)
     -> std::optional<std::int64_t> {
   counters_.note("lookup_file");
-  const auto found = file_handles_by_path_.find(path);
-  return found == file_handles_by_path_.end()
-             ? std::nullopt
-             : std::optional<std::int64_t>(found->second);
+  if (const auto handle = identity_index_->lookup(
+          FactIdentityKind::file,
+          file_path_identity_key(path, current_partition_.configuration))) {
+    return handle;
+  }
+  if (const auto handle = identity_index_->lookup(
+          FactIdentityKind::file,
+          file_source_identity_key(path, current_partition_.configuration))) {
+    return handle;
+  }
+  return identity_index_->lookup(FactIdentityKind::file,
+                                 file_unscoped_identity_key(path));
 }
 
 auto FactBatchRecorder::type_arg_candidates(const std::string &name,
@@ -1121,12 +1394,10 @@ auto FactBatchRecorder::add_edge(const EdgeRecord &edge) -> std::int64_t {
   if (found != edge_positions_by_key_.end()) {
     relations_[found->second].record.count += edge.count;
     counters_.note("add_edge", 1);
-    const auto handle = edge_handles_.find_or_insert("edge:" + natural);
-    note_identity(FactIdentityKind::relation, "edge:" + natural, handle);
-    return handle;
+    return identity_handle(FactIdentityKind::relation, "edge:" + natural);
   }
-  const std::int64_t id = edge_handles_.find_or_insert("edge:" + natural);
-  note_identity(FactIdentityKind::relation, "edge:" + natural, id);
+  const std::int64_t id =
+      identity_handle(FactIdentityKind::relation, "edge:" + natural);
   const std::size_t position = relations_.size();
   edge_positions_by_key_.emplace(natural, position);
   relations_.push_back({.partition = current_partition_, .record = edge});
@@ -1142,9 +1413,7 @@ auto FactBatchRecorder::ensure_edge(const EdgeRecord &edge) -> std::int64_t {
       current_partition_.stable_string() + edge_key(edge);
   if (edge_positions_by_key_.contains(natural)) {
     counters_.note("ensure_edge");
-    const auto handle = edge_handles_.find_or_insert("edge:" + natural);
-    note_identity(FactIdentityKind::relation, "edge:" + natural, handle);
-    return handle;
+    return identity_handle(FactIdentityKind::relation, "edge:" + natural);
   }
   const EdgeRecord single{.src_id = edge.src_id,
                           .dst_id = edge.dst_id,
@@ -1183,12 +1452,12 @@ auto FactBatchRecorder::intern_type_node(const TypeNodeRecord &node)
   const TypeNaturalKey key{.partition = current_partition_,
                            .type_key = node.type_key};
   const std::string stable = "type:" + key.stable_string();
-  if (const auto found = type_handles_.find(stable)) {
+  if (const auto found =
+          identity_index_->lookup(FactIdentityKind::type, stable)) {
     counters_.note("intern_type_node", 1);
     return *found;
   }
-  const std::int64_t id = type_handles_.find_or_insert(stable);
-  note_identity(FactIdentityKind::type, stable, id);
+  const std::int64_t id = identity_handle(FactIdentityKind::type, stable);
   type_nodes_.push_back({.partition = current_partition_, .record = node});
   counters_.note("intern_type_node");
   return id;
@@ -1236,8 +1505,7 @@ auto FactBatchRecorder::get_or_create_definition(
     return found->second;
   }
   const std::int64_t id =
-      definition_handles_.find_or_insert("definition:" + natural);
-  note_identity(FactIdentityKind::definition, "definition:" + natural, id);
+      identity_handle(FactIdentityKind::definition, "definition:" + natural);
   definition_ids_by_key_.emplace(natural, id);
   definition_partitions_by_id_.emplace(id, partition);
   definitions_.push_back({.partition = partition,
@@ -1433,10 +1701,10 @@ auto FactBatchRecorder::build_batch(bool canonical) const -> FactBatch {
   data->producer = producer_;
   data->completeness = completeness_;
   data->canonical = canonical;
-  data->symbol_keys = symbol_handles_.entries();
-  data->relation_keys = edge_handles_.entries();
-  data->type_keys = type_handles_.entries();
-  data->definition_keys = definition_handles_.entries();
+  data->symbol_keys = identity_entries(FactIdentityKind::symbol);
+  data->relation_keys = identity_entries(FactIdentityKind::relation);
+  data->type_keys = identity_entries(FactIdentityKind::type);
+  data->definition_keys = identity_entries(FactIdentityKind::definition);
   data->file_keys.insert(partitions_by_file_handle_.begin(),
                          partitions_by_file_handle_.end());
   data->pending_symbol_references = pending_symbol_references_;
