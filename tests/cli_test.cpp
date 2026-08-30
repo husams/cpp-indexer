@@ -2254,7 +2254,7 @@ TEST_SUITE("clang") {
                        "int changed_pipeline_symbol() { return 2; }\n");
 
     // The four storage-adapter boundaries plus the seven phase boundaries of
-    // the fused two-root pipeline, in publication order. Injecting at any of
+    // the single-root pipeline, in publication order. Injecting at any of
     // them must leave the whole translation unit exactly as it was.
     for (const auto failure :
          {cidx::ast::IndexFailurePoint::begin,
@@ -2278,9 +2278,10 @@ TEST_SUITE("clang") {
     CHECK(db.find_symbols("published_pipeline_symbol", {}, 10).empty());
   }
 
-  // Per-file fact ownership for the fused topology, keyed by file basename.
-  // Every family that carries a file_id is counted, so a fact drifting from a
-  // header to the main file (or the reverse) shows up as a count change.
+  // Per-file fact ownership for the single-root topology, keyed by file
+  // basename. Every family that carries a file_id is counted, so a fact
+  // drifting from a header to the main file (or the reverse) shows up as a
+  // count change.
   std::map<std::string, std::map<std::string, int64_t>> ownership_by_file(
       Storage & db) {
     static const std::vector<std::pair<std::string, std::string>> kFamilies{
@@ -2326,12 +2327,13 @@ TEST_SUITE("clang") {
     return owned;
   }
 
-  // The interleaved fixture the fused topology has to get right: two owned
-  // headers plus the main file, with redeclarations, an explicit callable
+  // The interleaved fixture the single-root topology has to get right: two
+  // owned headers plus the main file, with redeclarations, an explicit callable
   // instantiation anchored in the main file, nested namespaces with using
   // directives and qualified reference sites, definitions with bodies,
   // declaration and type facts, and the same names reached from both files.
-  TEST_CASE("fused topology keeps interleaved main/header fact ownership") {
+  TEST_CASE(
+      "single-root topology keeps interleaved main/header fact ownership") {
     const std::string dir = make_temp_dir();
     const std::string source = dir + "/interleaved.cpp";
     const std::string first = dir + "/interleaved_first.hpp";
@@ -2403,7 +2405,7 @@ TEST_SUITE("clang") {
     CHECK(db.find_symbols("echo", {}, 10).size() >= 1);
 
     // Header cleanup and association complete before main association, and
-    // statement-body replay stays outside the root traversal counts.
+    // statement-body processing stays outside the root traversal counts.
     const auto position = [&](const std::string &id) {
       const auto found = std::ranges::find_if(
           first_run.pass_metrics,
@@ -2420,8 +2422,8 @@ TEST_SUITE("clang") {
         CHECK(metrics.registered_whole_tu_traversal_budget == 0U);
       }
     }
-    CHECK(first_run.registered_whole_tu_traversal_budget == 2);
-    CHECK(first_run.observed_whole_tu_traversals == 2);
+    CHECK(first_run.registered_whole_tu_traversal_budget == 1);
+    CHECK(first_run.observed_whole_tu_traversals == 1);
 
     // Re-indexing the same successful TU is idempotent. The first re-index is
     // the one that changes state: the headers were indexed by the cold run, so
@@ -2587,17 +2589,13 @@ TEST_SUITE("clang") {
       CHECK(outcome.pass_metrics[index].id == expected[index]);
       CHECK(!outcome.pass_metrics[index].produced_fact_families.empty());
     }
-    // Two rooted traversals per translation unit: one complete routed symbol
-    // walk, then one rooted graph-event collection owned by
-    // declarations.headers. definitions.headers and namespaces.headers replay
-    // that recorded stream and own no root budget, and statement-body
-    // extraction is a separate non-root phase that never increments either
-    // counter.
+    // One rooted traversal per translation unit owns both symbol and graph
+    // extraction. The later definition and namespace lifecycle entries retain
+    // their pass contracts but own no rooted traversal.
     std::size_t whole_tu_traversals = 0;
     std::size_t registered_whole_tu_traversal_budget = 0;
     for (const auto &metrics : outcome.pass_metrics) {
-      const bool routed_root_pass = metrics.id == "symbols.headers" ||
-                                    metrics.id == "declarations.headers";
+      const bool routed_root_pass = metrics.id == "declarations.headers";
       CHECK(metrics.whole_tu_traversals == (routed_root_pass ? 1U : 0U));
       CHECK(metrics.registered_whole_tu_traversal_budget ==
             (routed_root_pass ? 1U : 0U));
@@ -2605,10 +2603,10 @@ TEST_SUITE("clang") {
       registered_whole_tu_traversal_budget +=
           metrics.registered_whole_tu_traversal_budget;
     }
-    CHECK(whole_tu_traversals == 2);
-    CHECK(registered_whole_tu_traversal_budget == 2);
-    CHECK(outcome.observed_whole_tu_traversals == 2);
-    CHECK(outcome.registered_whole_tu_traversal_budget == 2);
+    CHECK(whole_tu_traversals == 1);
+    CHECK(registered_whole_tu_traversal_budget == 1);
+    CHECK(outcome.observed_whole_tu_traversals == 1);
+    CHECK(outcome.registered_whole_tu_traversal_budget == 1);
     const std::vector<std::vector<cidx::ast::FrontendCapability>> capabilities{
         {cidx::ast::FrontendCapability::ast},
         {cidx::ast::FrontendCapability::ast,
@@ -2716,9 +2714,8 @@ TEST_SUITE("clang") {
           std::vector<std::string>{"display_names"});
   }
 
-  // The point of the two-root topology is that the rooted cost stops depending
-  // on how many owned headers a translation unit pulls in: one routed symbol
-  // walk plus one rooted graph-event collection, whatever the header count.
+  // The rooted cost stops depending on how many owned headers a translation
+  // unit pulls in: one direct fact walk, whatever the header count.
   TEST_CASE("rooted traversals per TU are independent of owned-header count") {
     for (const int header_count : {0, 1, 2, 16}) {
       CAPTURE(header_count);
@@ -2745,8 +2742,8 @@ TEST_SUITE("clang") {
 
       const auto outcome = cidx::ast::run_index_one(db, *file, source, true);
       REQUIRE(!outcome.parse_failed);
-      CHECK(outcome.registered_whole_tu_traversal_budget == 2);
-      CHECK(outcome.observed_whole_tu_traversals == 2);
+      CHECK(outcome.registered_whole_tu_traversal_budget == 1);
+      CHECK(outcome.observed_whole_tu_traversals == 1);
       // Non-vacuity: the headers really were owned and indexed.
       CHECK(outcome.headers.indexed == static_cast<int>(header_count));
 
@@ -4436,7 +4433,7 @@ TEST_SUITE("clang") {
 
     const cidx::ast::IndexOneOutcome shipped = index_once(0);
     REQUIRE(!shipped.parse_failed);
-    // The shipped topology after S-098's two-root fusion: the registered
+    // The shipped single-root topology: the registered
     // budget is a real number, not an unbounded default, and the run never
     // walks more than it registered.
     CHECK(shipped.registered_whole_tu_traversal_budget > 0);

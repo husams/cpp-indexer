@@ -1,5 +1,6 @@
 #include "index/parallel_index.hpp"
 
+#include "ast/fact_batch_artifact.hpp"
 #include "index/header_claims.hpp"
 #include "profile/index_profile.hpp"
 #include "storage/fact_batch_writer.hpp"
@@ -96,24 +97,16 @@ private:
   std::unique_ptr<ast::IndexSession> session_;
 };
 
-// Conservative payload accounting for the reorder buffer. The batch itself is
-// the dominant term; counting records rather than encoding the artifact keeps
-// the budget check off the hot path.
-[[nodiscard]] auto approximate_batch_bytes(const ast::IndexOneOutcome &outcome)
+// Reorder pressure is based on the immutable bytes that would cross the
+// worker-to-writer boundary, not a record-count estimate. The artifact is
+// canonical, so this measurement is deterministic across worker counts.
+[[nodiscard]] auto batch_bytes(const ast::IndexOneOutcome &outcome)
     -> std::uint64_t {
   if (!outcome.publication) {
     return 0;
   }
-  constexpr std::uint64_t kApproximateBytesPerRecord = 512;
-  std::uint64_t records = 0;
-  for (const ast::FileFactPartition &partition :
-       outcome.publication->batch.partitions()) {
-    for (const auto &[family, members] : partition.members) {
-      static_cast<void>(family);
-      records += members.size();
-    }
-  }
-  return records * kApproximateBytesPerRecord;
+  return ast::encode_fact_batch_artifact(outcome.publication->batch)
+      .byte_size();
 }
 
 } // namespace
@@ -180,7 +173,7 @@ auto run_parallel_index(cidx::Storage &db, const std::string &index_path,
     if (extracted) {
       extracted(rank);
     }
-    const std::uint64_t bytes = approximate_batch_bytes(outcome);
+    const std::uint64_t bytes = batch_bytes(outcome);
     return ParallelResult<ast::IndexOneOutcome>{
         .payload = std::move(outcome), .bytes = bytes, .error = std::nullopt};
   };

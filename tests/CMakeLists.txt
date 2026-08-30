@@ -32,6 +32,7 @@ set(CIDX_DEFAULT_TESTS
   owned_header_plan_test
   parallel_extraction_test
   parallel_worker_stack_test
+  spillable_extraction_test
   fact_batch_artifact_test
   tu_fact_cache_test
   ui_graph_view_test

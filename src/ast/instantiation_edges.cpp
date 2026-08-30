@@ -69,8 +69,7 @@ void emit_spec_owner(DeclarationIdentityResolver &identity,
 // for an authored member specialization).
 void emit_member_class_pattern_edge(DeclarationIdentityResolver &identity,
                                     RelationFactEmitter &relations,
-                                    const clang::ASTContext &context,
-                                    int64_t owner_id,
+                                    const MintBuilder &mint, int64_t owner_id,
                                     const clang::CXXRecordDecl *owner) {
   const clang::CXXRecordDecl *pattern = owner->getInstantiatedFromMemberClass();
   if (pattern == nullptr) {
@@ -80,8 +79,17 @@ void emit_member_class_pattern_edge(DeclarationIdentityResolver &identity,
   if (pat_usr.empty()) {
     return;
   }
-  const auto pid = identity.lookup_symbol_id(
-      pat_usr, expansion_loc(context, pattern->getLocation()).file);
+  std::optional<int64_t> pid = identity.lookup_symbol_id(
+      pat_usr, expansion_loc(mint.context(), pattern->getLocation()).file);
+  if (!pid) {
+    // Direct extraction can promote an instantiated member before the
+    // rooted traversal reaches the member-class pattern. Minting here keeps
+    // the identity edge order-independent; the ordinary symbol callback
+    // later upserts the same USR with its complete authored facts.
+    if (auto request = mint.build(pattern)) {
+      pid = identity.mint_symbol(*request);
+    }
+  }
   if (!pid) {
     return;
   }
@@ -126,8 +134,7 @@ void emit_owner_promotion(DeclarationIdentityResolver &identity,
       mo.dst_id = oid;
       mo.kind = 9;
       relations.ensure_edge(mo);
-      emit_member_class_pattern_edge(identity, relations, mint.context(), oid,
-                                     owner);
+      emit_member_class_pattern_edge(identity, relations, mint, oid, owner);
     }
     return;
   }
